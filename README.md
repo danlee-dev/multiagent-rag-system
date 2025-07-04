@@ -13,6 +13,7 @@
 ├── mock_databases.py    # Mock DB
 ├── utils.py             # 헬퍼 함수
 ├── requirements.txt     # 의존성 명시
+├── test_multi-agent-rag.ipynb # Colab test file
 └── README.md            # 실행법 안내
 ```
 
