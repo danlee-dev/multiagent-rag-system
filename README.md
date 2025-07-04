@@ -1,46 +1,85 @@
-# Multi-Agent RAG (로컬 실행)
+# Multi-Agent RAG System (Local Version)
 
-## 개요
-- Colab에서 작성된 Multi-Agent RAG 시스템을 로컬 Python 프로젝트로 리팩토링한 버전입니다.
-- 식품개발팀 페르소나 기반, Mock DB 포함, LangChain/LangGraph 기반.
+## Overview
+This project is a refactored local Python version of a Multi-Agent RAG (Retrieval-Augmented Generation) system originally developed in Colab. It is designed for food product development teams, featuring a persona-driven workflow, mock databases, and a modular multi-agent architecture based on LangChain and LangGraph.
 
-## 폴더 구조
+---
+
+## System Architecture
+The Multi-Agent RAG system orchestrates a set of specialized agents, each responsible for a distinct stage in the information retrieval and answer generation pipeline. Agents communicate via real-time feedback channels, enabling iterative refinement and robust multi-source retrieval.
+
+### Core Agents
+- **PlanningAgent**: Analyzes the user query, decomposes it if necessary, and creates a query plan with required sub-queries and database selection.
+- **RetrieverAgentXWithFeedback**: Focuses on graph database retrieval, performs keyword optimization, and collaborates with Retriever Y via feedback loops.
+- **RetrieverAgentYWithFeedback**: Handles multi-source retrieval (vector DB, RDB, web search), receives hints from X, and provides feedback for further graph search.
+- **CriticAgent1**: Evaluates the sufficiency of retrieved information and suggests improvements if needed.
+- **ContextIntegratorAgent**: Integrates and organizes all search results into a coherent context for answer generation.
+- **CriticAgent2**: Assesses the quality and reliability of the integrated context.
+- **ReportGeneratorAgent**: Generates the final report or answer for the user.
+- **SimpleAnswererAgent**: Handles simple queries directly using the vector database.
+
+### Real-Time Feedback Channel
+Agents X and Y communicate through an asynchronous feedback channel, exchanging hints and feedback to iteratively improve search results. This mechanism is key to the system's robustness and adaptability.
+
+---
+
+## Workflow Diagram
+Below are two visualizations of the RAG system workflow:
+
+### 1. LangGraph Workflow (Mermaid)
+![LangGraph Workflow](static/langgraph-workflow-visualization(mermaid).png)
+
+### 2. Feedback Channel & Agent Interaction (Graphviz)
+![RAG System Feedback Channel](static/rag-system-workflow-diagram(graphviz).png)
+
+---
+
+## Folder Structure
 ```
 .
-├── main.py              # 메인 실행 파일
-├── agents.py            # 에이전트 클래스
-├── models.py            # 데이터 모델 (Pydantic)
-├── mock_databases.py    # Mock DB
-├── utils.py             # 헬퍼 함수
-├── requirements.txt     # 의존성 명시
-├── test_multi-agent-rag.ipynb # Colab test file
-└── README.md            # 실행법 안내
+├── main.py              # Main entry point
+├── agents.py            # Agent class implementations
+├── models.py            # Data models (Pydantic)
+├── mock_databases.py    # Mock database implementations
+├── utils.py             # Helper functions
+├── requirements.txt     # Python dependencies
+├── static/              # Workflow diagrams and images
+├── test_multi-agent-rag.ipynb # Original Colab notebook
+└── README.md            # Project documentation
 ```
 
-## 실행 방법
-1. Python 3.9 이상 설치
-2. 의존성 설치
+---
+
+## How to Run
+1. **Python 3.9+ required**
+2. Install dependencies:
    ```bash
    pip install -r requirements.txt
    ```
-3. OpenAI API 키 준비
-   - .env 파일 생성 후 아래와 같이 작성
+3. Prepare your OpenAI API key:
+   - Create a `.env` file with:
      ```
      OPENAI_API_KEY=sk-...
      ```
-   - 또는 환경 변수로 직접 설정
-4. 실행
+   - Or set the environment variable directly.
+4. Run the main script:
    ```bash
    python main.py
    ```
 
-## 주요 파일 설명
-- `main.py` : 전체 파이프라인 진입점, 샘플 쿼리 실행
-- `models.py` : 에이전트/메시지/DB 등 데이터 모델 정의
-- `agents.py` : PlanningAgent 등 주요 에이전트 클래스
-- `mock_databases.py` : 테스트용 Mock DB
-- `utils.py` : 헬퍼 함수 및 샘플 데이터 생성
+---
 
-## 참고
-- 실제 DB/외부 API 연동이 아닌 Mock DB 기반 예제입니다.
-- LangChain, LangGraph, OpenAI API 사용
+## Key Files
+- `main.py` : Entry point for the full workflow and sample queries
+- `models.py` : Data models for agents, messages, and DB records
+- `agents.py` : All core agent class implementations
+- `mock_databases.py` : Mock DBs for local testing
+- `utils.py` : Helper functions and message formatting
+- `static/` : Workflow diagrams (PNG)
+
+---
+
+## Notes
+- This project uses mock databases for demonstration; no real DB or external API is required.
+- Built with LangChain, LangGraph, and OpenAI API.
+- For more details, see the original Colab notebook or the code comments.
