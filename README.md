@@ -201,4 +201,4 @@ Korea University, Computer Science & Engineering
 
 ## License
 
-This project is available under the MIT License.
+This project is available under the [MIT License](LICENSE).
