@@ -1,8 +1,236 @@
-.DS_Store
-.vscode
-.env
-__pycache__/
-*.pyc
-*.pyo
+# ====================================
+# RAG System with LangGraph Project
+# ====================================
 
+# Environment Variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ====================================
+# Python/Backend
+# ====================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+crowdworks-py3.10/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# ====================================
+# Node.js/Frontend
+# ====================================
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.pnpm-debug.log*
+
+# Next.js
+.next/
+out/
+
+# Production builds
+/build
+/dist
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# ====================================
+# RAG System Specific
+# ====================================
+
+# Memory/Checkpoint files
+memory_checkpoint.json
+*.checkpoint
+hierarchical_memory_*.json
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector database files
+chroma_db/
+pinecone_cache/
+vector_store/
+
+# Model files
+*.pkl
+*.joblib
+*.model
+*.bin
+models/
+checkpoints/
+
+# LangChain cache
+.langchain/
+langchain_cache/
+
+# API Keys and sensitive data
+api_keys.json
+secrets.json
+config_local.py
+
+# ====================================
+# Development Tools
+# ====================================
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.vim/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ====================================
+# Logs and Reports
+# ====================================
+
+# Log files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test reports
 /test-report/
+coverage/
+.nyc_output
+
+# ====================================
+# Temporary and Cache
+# ====================================
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+.cache/
+
+# Mac specific
+.AppleDouble
+.LSOverride
+
+# Windows specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux specific
+*~
+
+# ====================================
+# Project Specific
+# ====================================
+
+# Generated charts and assets
+generated_charts/
+exports/
+
+# User uploads
+uploads/
+user_data/
+
+# Backup files
+*.bak
+*.backup
+
+# Large data files
+data/raw/
+data/processed/
+*.csv.gz
+*.parquet
+
+# Notebooks output
+notebooks/output/
+*.html
