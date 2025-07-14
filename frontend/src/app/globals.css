@@ -1,0 +1,615 @@
+/* =====================================
+   기본 설정 및 변수
+   ===================================== */
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+:root {
+  --foreground-rgb: 51, 51, 51;
+  --background-start-rgb: 102, 126, 234;
+  --background-end-rgb: 118, 75, 162;
+  --primary-color: #667eea;
+  --secondary-color: #764ba2;
+  --success-color: #00ff88;
+  --error-color: #ff6b6b;
+  --shadow-light: 0 2px 8px rgba(0, 0, 0, 0.1);
+  --shadow-medium: 0 4px 16px rgba(0, 0, 0, 0.15);
+  --shadow-heavy: 0 8px 32px rgba(0, 0, 0, 0.1);
+}
+
+html {
+  scroll-behavior: smooth;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+    135deg,
+    var(--primary-color) 0%,
+    var(--secondary-color) 100%
+  );
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  min-height: 100vh;
+}
+
+.app {
+  min-height: 100vh;
+  color: #333;
+}
+
+/* =====================================
+     헤더
+     ===================================== */
+
+.app-header {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  padding: 2rem;
+  text-align: center;
+  box-shadow: var(--shadow-light);
+}
+
+.app-header h1 {
+  margin: 0 0 0.5rem 0;
+  font-size: 2.5rem;
+  background: linear-gradient(
+    45deg,
+    var(--primary-color),
+    var(--secondary-color)
+  );
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.app-header p {
+  margin: 0;
+  color: #666;
+  font-size: 1.1rem;
+}
+
+.conversation-info {
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  background: rgba(102, 126, 234, 0.1);
+  border-radius: 20px;
+  display: inline-block;
+}
+
+.conversation-info small {
+  color: var(--primary-color);
+  font-weight: 500;
+}
+
+/* =====================================
+     메인 컨텐츠
+     ===================================== */
+
+.app-main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.query-form {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 20px;
+  padding: 2rem;
+  box-shadow: var(--shadow-heavy);
+  margin-bottom: 2rem;
+}
+
+.input-group {
+  margin-bottom: 1.5rem;
+}
+
+.input-group textarea {
+  width: 100%;
+  border: 2px solid #e1e5e9;
+  border-radius: 12px;
+  padding: 1rem;
+  font-size: 1rem;
+  font-family: inherit;
+  resize: vertical;
+  transition: all 0.3s ease;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.input-group textarea:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+  background: rgba(255, 255, 255, 1);
+}
+
+.input-group textarea::placeholder {
+  color: #999;
+}
+
+/* =====================================
+     버튼
+     ===================================== */
+
+.button-group {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.btn {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 25px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  min-width: 160px;
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: linear-gradient(
+    45deg,
+    var(--primary-color),
+    var(--secondary-color)
+  );
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(45deg, #5a6fd8, #6a4190);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+}
+
+.btn-secondary {
+  background: linear-gradient(45deg, #ffecd2, #fcb69f);
+  color: #333;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: linear-gradient(45deg, #ffd89b, #f9a585);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 15px rgba(252, 182, 159, 0.4);
+}
+
+/* =====================================
+     응답 섹션
+     ===================================== */
+
+.response-section {
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(10px);
+  border-radius: 20px;
+  padding: 2rem;
+  box-shadow: var(--shadow-heavy);
+  animation: fadeInUp 0.5s ease;
+}
+
+.response-section h2 {
+  margin: 0 0 1.5rem 0;
+  color: #333;
+  font-size: 1.5rem;
+}
+
+/* =====================================
+     로딩
+     ===================================== */
+
+.loading {
+  text-align: center;
+  padding: 2rem;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid var(--primary-color);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto 1rem auto;
+}
+
+@keyframes spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* =====================================
+     마크다운 컨텐츠
+     ===================================== */
+
+.markdown-content {
+  font-size: 1rem;
+  color: #444;
+  line-height: 1.6;
+  position: relative;
+  scroll-margin-top: 20px;
+}
+
+.markdown-content h1 {
+  font-size: 1.8rem;
+  color: #333;
+  border-bottom: 2px solid var(--primary-color);
+  padding-bottom: 0.5rem;
+  margin: 2rem 0 1rem 0;
+}
+
+.markdown-content h2 {
+  font-size: 1.4rem;
+  color: var(--primary-color);
+  margin: 1.5rem 0 1rem 0;
+  border-left: 4px solid var(--primary-color);
+  padding-left: 1rem;
+}
+
+.markdown-content h3 {
+  font-size: 1.2rem;
+  color: var(--secondary-color);
+  margin: 1.5rem 0 1rem 0;
+}
+
+.markdown-content p {
+  margin: 1rem 0;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin: 1rem 0;
+  padding-left: 2rem;
+}
+
+.markdown-content li {
+  margin: 0.5rem 0;
+}
+
+.markdown-content strong {
+  color: #333;
+  font-weight: 600;
+}
+
+.markdown-content a {
+  color: var(--primary-color);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.3s ease;
+}
+
+.markdown-content a:hover {
+  border-bottom-color: var(--primary-color);
+}
+
+.markdown-content hr {
+  border: none;
+  height: 2px;
+  background: linear-gradient(
+    45deg,
+    var(--primary-color),
+    var(--secondary-color)
+  );
+  margin: 2rem 0;
+  border-radius: 1px;
+}
+
+/* =====================================
+     차트 관련
+     ===================================== */
+
+.chart-wrapper {
+  margin: 25px 0;
+}
+
+.chart-container {
+  margin: 25px 0;
+  padding: 20px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: var(--shadow-light);
+  border: 1px solid #e9ecef;
+  height: 400px;
+  position: relative;
+}
+
+.chart-container:hover {
+  box-shadow: var(--shadow-medium);
+  transition: box-shadow 0.3s ease;
+}
+
+.chart-fade-in {
+  animation: chartAppear 0.8s ease-out;
+  transform-origin: top center;
+}
+
+@keyframes chartAppear {
+  from {
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* 차트 로딩 스켈레톤 */
+.chart-skeleton-pulse {
+  margin: 20px 0;
+  padding: 20px;
+  border: 2px dashed #ddd;
+  border-radius: 8px;
+  background: #f9f9f9;
+  text-align: center;
+  animation: skeleton-pulse 2s infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%,
+  100% {
+    background: #f9f9f9;
+    border-color: #ddd;
+  }
+  50% {
+    background: #f0f0f0;
+    border-color: #ccc;
+  }
+}
+
+.skeleton-chart {
+  height: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.skeleton-title {
+  height: 24px;
+  background: linear-gradient(90deg, #e0e0e0 25%, #f0f0f0 50%, #e0e0e0 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: 4px;
+  margin: 0 auto;
+  width: 200px;
+}
+
+.skeleton-body {
+  flex: 1;
+  background: linear-gradient(90deg, #e0e0e0 25%, #f0f0f0 50%, #e0e0e0 75%);
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.chart-loading-text {
+  color: #666;
+  font-style: italic;
+  margin-top: 10px;
+  animation: pulse-text 2s infinite;
+}
+
+@keyframes pulse-text {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* 미완성 차트 JSON */
+.chart-json-loading {
+  color: #666;
+  background: rgba(0, 123, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  opacity: 0.6;
+  animation: pulse-typing 1.2s infinite;
+}
+
+@keyframes pulse-typing {
+  0%,
+  100% {
+    opacity: 0.6;
+    background: rgba(0, 123, 255, 0.1);
+  }
+  50% {
+    opacity: 0.8;
+    background: rgba(0, 123, 255, 0.2);
+  }
+}
+
+/* =====================================
+     스트리밍 상태
+     ===================================== */
+
+.streaming-status {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: rgba(0, 123, 255, 0.9);
+  color: white;
+  padding: 12px 20px;
+  border-radius: 20px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 1000;
+  backdrop-filter: blur(10px);
+  max-width: 300px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  flex-wrap: wrap;
+}
+
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--success-color);
+  border-radius: 50%;
+  animation: pulse-glow 1.5s infinite;
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+    box-shadow: 0 0 5px var(--success-color);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.2);
+    box-shadow: 0 0 15px var(--success-color);
+  }
+}
+
+.scroll-to-bottom-btn {
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  color: white;
+  padding: 8px 12px;
+  border-radius: 15px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 10px;
+  transition: all 0.3s ease;
+  animation: bounce-gentle 2s infinite;
+}
+
+@keyframes bounce-gentle {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-2px);
+  }
+}
+
+.scroll-to-bottom-btn:hover {
+  background: rgba(255, 255, 255, 0.4);
+  transform: translateY(-1px);
+}
+
+/* =====================================
+     푸터
+     ===================================== */
+
+.app-footer {
+  text-align: center;
+  padding: 2rem;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.9rem;
+}
+
+/* =====================================
+     애니메이션
+     ===================================== */
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* =====================================
+     반응형 디자인
+     ===================================== */
+
+@media (max-width: 768px) {
+  .app-main {
+    padding: 1rem;
+  }
+
+  .query-form {
+    padding: 1.5rem;
+  }
+
+  .button-group {
+    flex-direction: column;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .app-header h1 {
+    font-size: 2rem;
+  }
+
+  .chart-container {
+    height: 300px;
+    margin: 15px 0;
+    padding: 15px;
+  }
+
+  .streaming-status {
+    bottom: 10px;
+    right: 10px;
+    left: 10px;
+    text-align: center;
+  }
+
+  .status-indicator {
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .scroll-to-bottom-btn {
+    margin-left: 0;
+    margin-top: 5px;
+  }
+}
+
+@media (max-width: 480px) {
+  .app-header {
+    padding: 1.5rem 1rem;
+  }
+
+  .app-header h1 {
+    font-size: 1.8rem;
+  }
+
+  .response-section {
+    padding: 1.5rem;
+  }
+}
