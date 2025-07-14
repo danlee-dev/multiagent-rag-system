@@ -23,6 +23,8 @@ from models import (
     SearchResult,
     CriticResult,
     StreamingAgentState,
+    ExecutionStrategy,
+    ComplexityLevel,
 )
 from utils import create_agent_message
 
@@ -43,10 +45,11 @@ import re
 
 class PlanningAgent:
     """
-    LLM 기반 지능적 질문 분석 및 실행 계획 수립 에이전트
-    - 규칙 기반이 아닌 LLM의 추론 능력을 활용한 동적 분석
-    - 질문 의도, 복잡도, 작업 범위를 종합적으로 판단
-    - ToT(Tree of Thoughts) 원리 적용으로 최적의 실행 계획 수립
+    4단계 복잡도 분류를 지원하는 향상된 계획 수립 에이전트
+    - SIMPLE: 직접 답변 가능
+    - MEDIUM: 기본 검색 + 간단 분석
+    - COMPLEX: 풀 ReAct 에이전트 활용
+    - SUPER_COMPLEX: 다중 에이전트 협업
     """
 
     def __init__(self):
@@ -54,8 +57,8 @@ class PlanningAgent:
         self.agent_type = AgentType.PLANNING
 
     async def plan(self, state: StreamingAgentState) -> StreamingAgentState:
-        """질문을 분석하고, 지능적으로 최적의 실행 계획을 수립합니다."""
-        print(">> PLANNING 단계 시작 (LLM 기반 지능적 분석)")
+        """질문을 4단계로 분석하고 최적의 실행 계획 수립"""
+        print(">> PLANNING 단계 시작 (4단계 복잡도 분류)")
         query = state.original_query
         print(f"- 원본 쿼리: {query}")
 
@@ -64,47 +67,72 @@ class PlanningAgent:
         if feedback_context:
             print(f"- 피드백 반영: {feedback_context}")
 
-        # 1. 질문의 종합적 분석 (의도, 복잡도, 작업 범위)
-        analysis_result = await self._analyze_query_comprehensively(
+        # 1. 4단계 복잡도 분석
+        complexity_analysis = await self._analyze_query_complexity_4levels(
             query, feedback_context
         )
-        print(f"- 질문 분석 결과: {analysis_result}")
+        print(f"- 복잡도 분석 결과: {complexity_analysis}")
 
-        # 2. 분석 결과에 따른 실행 계획 수립
-        if analysis_result["complexity"] == "SIMPLE":
-            # 단순 질문: 직접 처리
-            state.query_plan = QueryPlan(
-                original_query=query, sub_queries=[query], estimated_complexity="low"
-            )
-            print("- 단순 질문으로 판단: 직접 처리")
-        else:
-            # 복잡 질문: ToT 기반 계획 수립
-            execution_plan = await self._create_execution_plan_with_tot(
-                query, analysis_result, feedback_context
-            )
-            state.query_plan = QueryPlan(
-                original_query=query,
-                sub_queries=[execution_plan],
-                estimated_complexity="high",
-            )
-            print(f"- 복잡 질문으로 판단: 실행 계획 수립 완료")
+        # 2. 복잡도별 실행 계획 수립
+        execution_plan = await self._create_execution_plan_by_complexity(
+            query, complexity_analysis, feedback_context
+        )
+
+        # 3. 복잡도와 전략 값을 소문자로 변환
+        complexity_mapping = {
+            "SIMPLE": "simple",
+            "MEDIUM": "medium",
+            "COMPLEX": "complex",
+            "SUPER_COMPLEX": "super_complex",
+            # 이미 소문자인 경우도 처리
+            "simple": "simple",
+            "medium": "medium",
+            "complex": "complex",
+            "super_complex": "super_complex",
+        }
+
+        strategy_mapping = {
+            "direct_answer": "direct_answer",
+            "basic_search": "basic_search",
+            "full_react": "full_react",
+            "multi_agent": "multi_agent",
+        }
+
+        # 원본 값들
+        raw_complexity = complexity_analysis.get("complexity_level", "MEDIUM")
+        raw_strategy = complexity_analysis.get("execution_strategy", "basic_search")
+
+        # 매핑된 값들 (소문자)
+        mapped_complexity = complexity_mapping.get(raw_complexity, "medium")
+        mapped_strategy = strategy_mapping.get(raw_strategy, "basic_search")
+
+        print(f"- 복잡도 매핑: {raw_complexity} → {mapped_complexity}")
+        print(f"- 전략 매핑: {raw_strategy} → {mapped_strategy}")
+
+        state.query_plan = QueryPlan(
+            original_query=query,
+            sub_queries=[execution_plan],
+            estimated_complexity=mapped_complexity,  # 매핑된 소문자 값 사용
+            execution_strategy=mapped_strategy,  # 매핑된 소문자 값 사용
+            resource_requirements=complexity_analysis.get("resource_requirements", {}),
+        )
 
         state.planning_complete = True
-        print(">> PLANNING 단계 완료")
+        print(f">> PLANNING 단계 완료 - 복잡도: {mapped_complexity}")
         return state
 
     def _collect_feedback(self, state: StreamingAgentState) -> Optional[str]:
-        """이전 단계의 피드백을 수집합니다."""
+        """이전 단계의 피드백을 수집"""
         if state.critic2_result and state.critic2_result.status == "insufficient":
             return f"최종 검수 피드백: {state.critic2_result.suggestion}"
         elif state.critic1_result and state.critic1_result.status == "insufficient":
             return f"초기 수집 피드백: {state.critic1_result.suggestion}"
         return None
 
-    async def _analyze_query_comprehensively(
+    async def _analyze_query_complexity_4levels(
         self, query: str, feedback: Optional[str] = None
     ) -> Dict:
-        """질문을 종합적으로 분석하여 의도, 복잡도, 작업 범위를 판단합니다."""
+        """질문을 4단계 복잡도로 분석"""
 
         feedback_section = ""
         if feedback:
@@ -115,58 +143,79 @@ class PlanningAgent:
 위 피드백을 고려하여 분석해주세요.
 """
 
-        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트입니다. 사용자의 질문을 정확히 분석하여 최적의 처리 방식을 결정해야 합니다.
+        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트입니다. 사용자의 질문을 4단계 복잡도로 정확히 분류해야 합니다.
 
-{{feedback_section}}
+{feedback_section}
 
 ## 분석 대상 질문
 "{query}"
 
-## 분석 기준
+## 4단계 복잡도 분류 기준
 
-### 1. 질문 의도 (INTENT)
-- CAPABILITY_INQUIRY: AI 능력이나 기능에 대한 문의
-  예: "뭘 할 수 있어?", "어떤 도움을 줄 수 있나요?", "가능한 서비스는?"
+### SIMPLE (직접 답변)
+- 단일 정보 요청, 기본 정의, 간단한 계산
+- 추가 검색이나 분석 불필요
+- 1-2개 문장으로 답변 가능
+- 예: "아마란스가 뭐야?", "칼로리 알려줘"
 
-- INFORMATION_REQUEST: 특정 정보나 지식에 대한 단순 요청
-  예: "아마란스가 뭐야?", "칼로리 알려줘", "영양성분은?"
+### MEDIUM (기본 검색 + 간단 분석)
+- 최신 정보나 간단한 비교가 필요
+- 1-2개 소스에서 정보 수집 후 종합
+- 단순한 분석이나 요약 필요
+- 예: "오늘 채소 시세는?", "A와 B 차이점은?"
 
-- TASK_REQUEST: 구체적인 작업이나 분석 수행 요청
-  예: "시장 분석해줘", "전략 수립해줘", "보고서 작성해줘"
+### COMPLEX (풀 ReAct 에이전트)
+- 다단계 추론과 여러 소스 종합 필요
+- 전략적 사고와 맥락적 분석 필요
+- 복잡한 의사결정 지원
+- 예: "마케팅 전략 수립해줘", "시장 분석 보고서"
 
-### 2. 복잡도 (COMPLEXITY)
-- SIMPLE: 단일 정보 제공이나 간단한 설명으로 충분한 질문
-  - 사전적 정의, 기본 정보, 단순 계산
-  - 1-2개 문장으로 답변 가능
-  - 추가 리서치나 다단계 분석 불필요
+### SUPER_COMPLEX (다중 에이전트 협업)
+- 매우 복잡한 다영역 분석
+- 장기적 계획이나 종합적 전략 필요
+- 여러 전문가 관점 종합 필요
+- 예: "글로벌 진출 전략", "5년 사업 계획"
 
-- COMPLEX: 다단계 분석, 종합적 판단, 전략적 사고가 필요한 질문
-  - 시장 분석, 경쟁사 비교, 트렌드 예측
-  - 전략 수립, 계획 작성, 종합 보고서
-  - 여러 관점의 정보 수집과 통합 분석 필요
+## 실행 전략 매핑
 
-### 3. 작업 범위 (SCOPE)
-- NARROW: 특정 주제나 영역에 국한된 질문
-- BROAD: 여러 영역을 아우르는 종합적 질문
-- STRATEGIC: 전략적 의사결정이나 장기적 관점이 필요한 질문
+### SIMPLE → "direct_answer"
+- SimpleAnswererAgent만 사용
+- 즉시 답변 생성
+
+### MEDIUM → "basic_search"
+- 기본 Vector/RDB 검색
+- 간단한 LLM 분석
+- ReAct 없이 직접 처리
+
+### COMPLEX → "full_react"
+- 완전한 ReAct 에이전트 활용
+- 다단계 검색 및 추론
+- 상세한 분석 및 종합
+
+### SUPER_COMPLEX → "multi_agent"
+- 여러 전문 에이전트 협업
+- 단계별 검증 및 피드백
+- 종합적 보고서 생성
 
 ## 출력 형식
 다음 JSON 형식으로만 응답하세요:
 
 ```json
-{{{{
-  "intent": "CAPABILITY_INQUIRY|INFORMATION_REQUEST|TASK_REQUEST",
-  "complexity": "SIMPLE|COMPLEX",
-  "scope": "NARROW|BROAD|STRATEGIC",
+{{
+  "complexity_level": "SIMPLE|MEDIUM|COMPLEX|SUPER_COMPLEX",
+  "execution_strategy": "direct_answer|basic_search|full_react|multi_agent",
   "reasoning": "판단 근거를 2-3문장으로 설명",
-  "requires_research": true|false,
-  "estimated_response_length": "short|medium|long"
-}}}}
+  "resource_requirements": {{
+    "search_needed": true|false,
+    "react_needed": true|false,
+    "multi_agent_needed": true|false,
+    "estimated_time": "fast|medium|slow|very_slow"
+  }},
+  "expected_output_type": "simple_text|analysis|report|comprehensive_strategy"
+}}
 ```
 
-정확한 JSON 형식을 준수하고, 질문의 진짜 의도를 파악하여 판단하세요.""".format(
-            feedback_section=feedback_section
-        )
+정확한 JSON 형식을 준수하고, 질문의 진짜 복잡도를 신중히 판단하세요."""
 
         try:
             response = await self.chat.ainvoke(prompt)
@@ -184,43 +233,51 @@ class PlanningAgent:
             return result
 
         except Exception as e:
-            print(f"분석 파싱 오류: {e}")
-            # 폴백: 기본값 반환
+            print(f"복잡도 분석 파싱 오류: {e}")
             return {
-                "intent": "INFORMATION_REQUEST",
-                "complexity": "SIMPLE",
-                "scope": "NARROW",
+                "complexity_level": "MEDIUM",
+                "execution_strategy": "basic_search",
                 "reasoning": "분석 중 오류 발생으로 기본값 적용",
-                "requires_research": False,
-                "estimated_response_length": "short",
+                "resource_requirements": {
+                    "search_needed": True,
+                    "react_needed": False,
+                    "multi_agent_needed": False,
+                    "estimated_time": "medium",
+                },
+                "expected_output_type": "analysis",
             }
 
-    async def _create_execution_plan_with_tot(
+    async def _create_execution_plan_by_complexity(
+        self, query: str, complexity_analysis: Dict, feedback: Optional[str] = None
+    ) -> str:
+        """복잡도별 맞춤 실행 계획 생성"""
+
+        complexity_level = complexity_analysis["complexity_level"]
+        execution_strategy = complexity_analysis["execution_strategy"]
+
+        if complexity_level == "SIMPLE":
+            return f"직접 답변 생성: {query}"
+
+        elif complexity_level == "MEDIUM":
+            return f"기본 검색 후 분석: {query} - Vector DB 및 RDB 검색 활용"
+
+        elif complexity_level == "COMPLEX":
+            return await self._create_complex_execution_plan(
+                query, complexity_analysis, feedback
+            )
+
+        elif complexity_level == "SUPER_COMPLEX":
+            return await self._create_super_complex_execution_plan(
+                query, complexity_analysis, feedback
+            )
+
+        else:
+            return f"기본 실행 계획: {query}"
+
+    async def _create_complex_execution_plan(
         self, query: str, analysis: Dict, feedback: Optional[str] = None
     ) -> str:
-        """ToT 기반으로 복잡한 질문에 대한 최적의 실행 계획을 수립합니다."""
-
-        # 1. 다양한 관점의 실행 계획 생성
-        alternative_plans = await self._generate_strategic_plans(
-            query, analysis, feedback
-        )
-        print(f"\n>> 생성된 실행 계획 후보 ({len(alternative_plans)}개):")
-        for i, plan in enumerate(alternative_plans, 1):
-            print(f"   {i}. {plan[:100]}...")
-
-        # 2. 최적 계획 선택
-        if len(alternative_plans) == 1:
-            return alternative_plans[0]
-
-        best_plan = await self._select_optimal_plan(query, analysis, alternative_plans)
-        print(f"\n- 선택된 최적 계획: {best_plan[:100]}...")
-
-        return best_plan
-
-    async def _generate_strategic_plans(
-        self, query: str, analysis: Dict, feedback: Optional[str] = None
-    ) -> List[str]:
-        """전략적 관점에서 다양한 실행 계획을 생성합니다."""
+        """COMPLEX 레벨 실행 계획 - 기존 ToT 방식 활용"""
 
         feedback_section = ""
         if feedback:
@@ -231,8 +288,7 @@ class PlanningAgent:
 위 피드백을 반드시 해결하는 새로운 접근법을 포함해야 합니다.
 """
 
-        prompt = f"""당신은 McKinsey, BCG, Bain 출신의 세계 최고 전략 컨설턴트입니다.
-클라이언트의 요청을 완벽히 해결하기 위한 3가지 차별화된 실행 계획을 수립해야 합니다.
+        prompt = f"""당신은 전략 컨설턴트입니다. 복합적 분석이 필요한 질문에 대한 체계적 실행 계획을 수립하세요.
 
 {feedback_section}
 
@@ -240,143 +296,63 @@ class PlanningAgent:
 "{query}"
 
 ## 요청 분석 결과
-- 의도: {analysis.get('intent', 'TASK_REQUEST')}
-- 복잡도: {analysis.get('complexity', 'COMPLEX')}
-- 범위: {analysis.get('scope', 'BROAD')}
+- 복잡도: {analysis.get('complexity_level', 'COMPLEX')}
+- 예상 결과물: {analysis.get('expected_output_type', 'analysis')}
 - 판단 근거: {analysis.get('reasoning', '')}
 
 ## 실행 계획 수립 지침
 
-### 품질 기준
-1. **완전성**: 클라이언트 요청의 모든 핵심 요소를 빠짐없이 포함
-2. **실행 가능성**: 구체적이고 명확한 단계별 실행 방안
-3. **차별화**: 각 계획은 서로 다른 접근법과 관점 반영
-4. **결과 지향**: 고품질의 최종 산출물 창출 가능
+다음 단계로 체계적인 실행 계획을 작성하세요:
 
-### 접근 관점
-- **관점 1**: 데이터 중심 분석적 접근 (정량적 분석, 시장 데이터, 통계적 검증)
-- **관점 2**: 전략적 컨설팅 접근 (프레임워크 활용, 경쟁 분석, 포지셔닝)
-- **관점 3**: 혁신적 실무 접근 (창의적 솔루션, 실무 경험, 실행 중심)
+1. **정보 수집 전략**: 어떤 정보를 어떤 방식으로 수집할지
+2. **분석 접근법**: 수집된 정보를 어떻게 분석하고 종합할지
+3. **결과물 구성**: 최종 답변을 어떤 형태로 제공할지
 
 ## 출력 형식
-각 계획은 완전한 실행 지시문이 되어야 하며, 다음 형식으로 작성하세요:
+구체적인 실행 지시문 형태로 작성 (200-300자):
 
-**계획 1 (데이터 분석 중심):**
-[구체적인 실행 계획 - 200-300자]
-
-**계획 2 (전략 컨설팅 중심):**
-[구체적인 실행 계획 - 200-300자]
-
-**계획 3 (혁신 실무 중심):**
-[구체적인 실행 계획 - 200-300자]
-
-각 계획은 후속 AI 에이전트가 그대로 실행할 수 있을 정도로 구체적이어야 합니다."""
+**실행 계획:**
+[ReAct 에이전트가 그대로 실행할 수 있을 정도로 구체적이고 명확한 계획]
+"""
 
         try:
             response = await self.chat.ainvoke(prompt)
-
-            # 계획들을 파싱
-            content = response.content
-            plans = []
-
-            # **계획 X**로 시작하는 섹션들을 찾아서 추출
-            import re
-
-            pattern = r"\*\*계획 \d+[^:]*:\*\*\s*\n?(.*?)(?=\*\*계획 \d+|$)"
-            matches = re.findall(pattern, content, re.DOTALL)
-
-            for match in matches:
-                plan = match.strip()
-                if plan and len(plan) > 50:  # 최소 길이 체크
-                    plans.append(plan)
-
-            # 파싱 실패 시 폴백
-            if not plans:
-                lines = [line.strip() for line in content.split("\n") if line.strip()]
-                plans = [line for line in lines if len(line) > 100][:3]
-
-            # 최소 1개는 보장
-            if not plans:
-                plans = [
-                    f"클라이언트 요청 '{query}'에 대한 종합적 분석과 실행 방안을 수립하여 완성도 높은 결과물을 제공합니다."
-                ]
-
-            return plans[:3]  # 최대 3개만 반환
-
+            return response.content.strip()
         except Exception as e:
-            print(f"계획 생성 오류: {e}")
-            # 폴백 계획
-            return [f"'{query}' 요청에 대한 체계적 분석과 전략적 솔루션을 제공합니다."]
+            print(f"복합 계획 생성 오류: {e}")
+            return f"'{query}' 요청에 대한 체계적 분석과 전략적 솔루션을 제공합니다."
 
-    async def _select_optimal_plan(
-        self, query: str, analysis: Dict, plans: List[str]
+    async def _create_super_complex_execution_plan(
+        self, query: str, analysis: Dict, feedback: Optional[str] = None
     ) -> str:
-        """생성된 실행 계획들 중 최적의 계획을 선택합니다."""
+        """SUPER_COMPLEX 레벨 실행 계획 - 다중 에이전트 협업"""
 
-        if not plans:
-            return f"'{query}' 요청에 대한 종합적 분석과 솔루션을 제공합니다."
+        prompt = f"""당신은 McKinsey 시니어 파트너입니다. 매우 복잡한 전략적 과제에 대한 다단계 실행 계획을 수립하세요.
 
-        if len(plans) == 1:
-            return plans[0]
-
-        plans_text = "\n\n".join(
-            [f"**후보 {i+1}:**\n{plan}" for i, plan in enumerate(plans)]
-        )
-
-        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트이자 의사결정 전문가입니다.
-여러 실행 계획 중에서 클라이언트에게 최고의 가치를 제공할 수 있는 최적의 계획을 선택해야 합니다.
-
-## 클라이언트 요청
+## 전략적 과제
 "{query}"
 
-## 요청 분석 컨텍스트
-- 의도: {analysis.get('intent')}
-- 복잡도: {analysis.get('complexity')}
-- 범위: {analysis.get('scope')}
-- 리서치 필요: {analysis.get('requires_research')}
+## 다중 에이전트 협업 계획
 
-## 실행 계획 후보들
-{plans_text}
+다음 관점에서 종합적 실행 계획을 수립하세요:
 
-## 평가 기준 (우선순위 순)
+1. **1단계 - 현황 분석**: 시장/상황 분석 전문가 관점
+2. **2단계 - 전략 수립**: 전략 기획 전문가 관점
+3. **3단계 - 실행 방안**: 실행 전문가 관점
+4. **4단계 - 리스크 관리**: 위험 관리 전문가 관점
+5. **5단계 - 종합 검증**: 통합 검증 및 최종 제안
 
-### 1. 요구사항 충족도 (40%)
-- 클라이언트 요청의 모든 핵심 요소가 포함되었는가?
-- 요청의 진짜 의도와 목적을 정확히 이해했는가?
+각 단계별로 어떤 정보를 수집하고 어떻게 분석할지 구체적으로 명시하세요.
 
-### 2. 실행 가능성 (30%)
-- 계획이 구체적이고 명확한가?
-- 후속 AI 에이전트가 바로 실행할 수 있는 수준인가?
-- 필요한 정보 수집과 분석 단계가 체계적인가?
-
-### 3. 결과 품질 잠재력 (20%)
-- 최종 산출물의 완성도와 통찰력이 높을 것으로 예상되는가?
-- 클라이언트에게 실질적 가치를 제공할 수 있는가?
-
-### 4. 효율성 (10%)
-- 불필요한 중복이나 비효율적 단계가 없는가?
-- 적절한 수준의 깊이와 범위를 가지는가?
-
-## 선택 결과
-
-위 평가 기준에 따라 종합적으로 판단하여, 가장 우수한 계획의 **전체 내용을 그대로** 반환하세요.
-선택 이유나 부가 설명 없이, 선택된 계획의 내용만 정확히 출력하세요."""
+**다단계 실행 계획 (300-400자):**
+"""
 
         try:
             response = await self.chat.ainvoke(prompt)
-            selected_plan = response.content.strip()
-
-            # 혹시 "후보 X:" 같은 표시가 있다면 제거
-            import re
-
-            selected_plan = re.sub(r"^\*\*후보 \d+:\*\*\s*\n?", "", selected_plan)
-
-            return selected_plan
-
+            return response.content.strip()
         except Exception as e:
-            print(f"계획 선택 오류: {e}")
-            # 폴백: 첫 번째 계획 반환
-            return plans[0]
+            print(f"초복합 계획 생성 오류: {e}")
+            return f"'{query}' 요청에 대한 다단계 협업 분석과 종합적 전략을 제공합니다."
 
 
 # RetrieverAgentX: Graph DB 중심 검색 + 피드백
@@ -492,17 +468,9 @@ from langchain.agents import create_react_agent, AgentExecutor
 from langchain.prompts import PromptTemplate
 
 
-import time
-import asyncio
-from datetime import datetime
-from typing import Set, Dict
-from langchain_openai import ChatOpenAI
-from langchain import hub
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.prompts import PromptTemplate
-
-
 class RetrieverAgentY:
+    """복잡도별 차등 검색 전략을 지원하는 향상된 검색 에이전트"""
+
     def __init__(self, vector_db=None, rdb=None):
         self.vector_db = vector_db
         self.rdb = rdb
@@ -527,141 +495,418 @@ class RetrieverAgentY:
         self.current_year = self.current_date.year
         self.current_date_en = self.current_date.strftime("%B %d, %Y")
 
-        # ReAct 에이전트 설정 - 날짜 정보 포함
+        # ReAct 에이전트 설정 (복잡한 쿼리용)
         self.react_agent_executor = self._create_improved_react_agent()
 
-    def _create_improved_react_agent(self):
-        """개선된 ReAct 에이전트 생성 - 날짜 정보 및 무한루프 방지 기능 포함"""
-        try:
-            base_prompt = hub.pull("hwchase17/react")
-
-            # LLM 기반 지능적 시간 맥락 판단이 포함된 시스템 프롬프트
-            system_instruction = f"""
-You are an intelligent research assistant with advanced temporal reasoning capabilities and strict anti-loop protection.
-
-AVAILABLE TOOLS - USE EXACT NAMES:
-- debug_web_search: For web searches
-- mock_vector_search: For vector database searches
-- mock_rdb_search: For relational database searches
-- mock_graph_db_search: For graph database searches
-
-MANDATORY ACTION FORMAT:
-Action: [EXACT_TOOL_NAME]
-Action Input: "search query"
-
-CORRECT EXAMPLES:
-Action: debug_web_search
-Action Input: "Tesla stock price 2024"
-
-Action: mock_vector_search
-Action Input: "quinoa market trends"
-
-WRONG EXAMPLES (NEVER DO THIS):
-Action: I will search for Tesla stock price
-Action Input: "Tesla stock price"
-
-Action: Let me find information about
-Action Input: "search query"
-
-TEMPORAL AWARENESS CONTEXT:
-- Today's Date: {self.current_date_str} ({self.current_date_en})
-- Current Year: {self.current_year}
-- Use LLM reasoning to determine temporal intent, not keyword matching
-
-TEMPORAL INTENT ANALYSIS:
-Before starting any search, analyze the query to determine:
-1. CURRENT/RECENT INTENT: User wants latest, up-to-date information
-2. HISTORICAL INTENT: User asks about specific past time periods
-3. GENERAL INTENT: User wants comprehensive information regardless of time
-
-CRITICAL RULES:
-1. ALWAYS use exact tool names in Action field
-2. INTELLIGENT TEMPORAL DETECTION: Use LLM reasoning to understand query intent
-3. NO REPETITION: Never use the exact same search query twice
-4. TOOL DIVERSITY: If one tool fails, try a different tool type
-5. KEYWORD EVOLUTION: Each search must use different keywords/approach
-6. 3-STRIKE RULE: After 3 failed attempts, provide answer with available info
-
-SEARCH STRATEGY PROGRESSION:
-- Step 1: Determine temporal intent using LLM reasoning
-- Step 2: Use debug_web_search with keywords appropriate to detected temporal context
-- Step 3: Try mock_vector_search with alternative keywords within same temporal context
-- Step 4: Try mock_rdb_search or mock_graph_db_search with broader terms
-- Step 5: Synthesize available information and conclude
-
-TEMPORAL CONTEXT EXAMPLES:
-For CURRENT Intent queries:
-Action: debug_web_search
-Action Input: "Tesla stock price July 2025 current"
-
-For HISTORICAL Intent queries:
-Action: debug_web_search
-Action Input: "Tesla stock price 2020 COVID impact"
-
-For GENERAL Intent queries:
-Action: mock_vector_search
-Action Input: "Tesla company information general"
-
-EFFICIENCY RULES:
-- Use exact tool names only in Action field
-- Match search strategy to detected intent context
-- If search yields insufficient results, try different tool with different keywords
-- Always explain your temporal intent detection and search strategy changes
-- Focus on insights appropriate to the detected temporal context
-- Clearly state temporal scope and data limitations when relevant
-
-Remember: Always use EXACT tool names in Action field!
-System reference date: {self.current_date_str}
-"""
-
-            new_prompt_template = system_instruction + "\n\n" + base_prompt.template
-            react_prompt = PromptTemplate.from_template(new_prompt_template)
-
-            react_agent_runnable = create_react_agent(
-                self.llm, self.available_tools, react_prompt
-            )
-
-            return AgentExecutor(
-                agent=react_agent_runnable,
-                tools=self.available_tools,
-                verbose=True,
-                handle_parsing_errors=True,
-                max_iterations=5,
-                max_execution_time=60,
-            )
-
-        except Exception as e:
-            print(f">> ReAct 에이전트 초기화 실패: {e}")
-            return None
-
     async def search(self, state: StreamingAgentState) -> StreamingAgentState:
-        """개선된 검색 로직 - 날짜 정보 및 무한루프 방지 포함"""
-        print(">> RETRIEVER_Y 시작 (날짜 정보 포함 + 무한루프 방지 버전)")
-        print(f"- 현재 날짜: {self.current_date_str}")
-        print(f"- 분석 기준년도: {self.current_year}")
-
-        if not self.react_agent_executor:
-            print("- ReAct 에이전트가 초기화되지 않아 검색을 건너뜁니다.")
-            return state
+        """복잡도별 차등 검색 실행"""
+        print(">> RETRIEVER_Y 시작 (복잡도별 차등 처리)")
 
         if not state.query_plan or not state.query_plan.sub_queries:
             print("- 처리할 쿼리가 없어 RETRIEVER_Y를 종료합니다.")
             return state
 
+        complexity_level = state.get_complexity_level()
+        execution_strategy = state.execution_mode
         original_query = state.query_plan.sub_queries[0]
 
-        # 무한루프 방지: 타임아웃 설정
-        start_time = time.time()
-        timeout_seconds = 90
-
+        print(f"- 복잡도: {complexity_level}")
+        print(f"- 실행 전략: {execution_strategy}")
         print(f"- 원본 쿼리: {original_query}")
-        print(f"- 최대 시도 횟수: {self.max_total_attempts}")
-        print(f"- 타임아웃: {timeout_seconds}초")
+
+        # 복잡도별 실행 분기
+        if execution_strategy == ExecutionStrategy.DIRECT_ANSWER:
+            # SIMPLE - 검색 없이 바로 패스
+            print("- SIMPLE 레벨: 검색 생략")
+            return state
+
+        elif execution_strategy == ExecutionStrategy.BASIC_SEARCH:
+            # MEDIUM - 기본 검색만 수행
+            return await self._execute_basic_search(state, original_query)
+
+        elif execution_strategy == ExecutionStrategy.FULL_REACT:
+            # COMPLEX - 풀 ReAct 에이전트 활용
+            return await self._execute_full_react(state, original_query)
+
+        elif execution_strategy == ExecutionStrategy.MULTI_AGENT:
+            # SUPER_COMPLEX - 다단계 협업 검색
+            return await self._execute_multi_agent_search(state, original_query)
+
+        else:
+            # 기본값 - MEDIUM으로 처리
+            return await self._execute_basic_search(state, original_query)
+
+    async def _execute_basic_search(
+        self, state: StreamingAgentState, query: str
+    ) -> StreamingAgentState:
+        """MEDIUM 복잡도 - 기본 검색 + 간단 분석"""
+        print("\n>> 기본 검색 모드 실행")
 
         try:
-            # LLM 기반 지능적 맥락 판단이 포함된 쿼리 구성
-            enhanced_query_prompt = f"""
-Research Query: {original_query}
+            # 1. Vector DB 검색
+            vector_results = await self._simple_vector_search(query)
+            if vector_results:
+                for result in vector_results:
+                    state.add_multi_source_result(result)
+                print(f"- Vector DB 검색 완료: {len(vector_results)}개 결과")
+
+            # 2. RDB 검색 (간단한 쿼리)
+            rdb_results = await self._simple_rdb_search(query)
+            if rdb_results:
+                for result in rdb_results:
+                    state.add_multi_source_result(result)
+                print(f"- RDB 검색 완료: {len(rdb_results)}개 결과")
+
+            # 3. 간단한 LLM 분석
+            if len(state.multi_source_results_stream) > 0:
+                analysis_result = await self._simple_llm_analysis(
+                    query, state.multi_source_results_stream
+                )
+                if analysis_result:
+                    state.add_multi_source_result(analysis_result)
+                    print("- 간단 LLM 분석 완료")
+
+            state.add_step_result(
+                "basic_search",
+                {
+                    "vector_results": len(vector_results) if vector_results else 0,
+                    "rdb_results": len(rdb_results) if rdb_results else 0,
+                    "analysis_completed": True,
+                },
+            )
+
+        except Exception as e:
+            print(f"- 기본 검색 실패: {e}")
+            # 폴백으로 간단한 분석 제공
+            fallback_result = self._create_fallback_result(query, "basic_search_error")
+            state.add_multi_source_result(fallback_result)
+
+        print(">> 기본 검색 모드 완료")
+        return state
+
+    async def _execute_full_react(
+        self, state: StreamingAgentState, query: str
+    ) -> StreamingAgentState:
+        """COMPLEX 복잡도 - 풀 ReAct 에이전트 활용 (기존 로직)"""
+        print("\n>> 풀 ReAct 모드 실행")
+
+        if not self.react_agent_executor:
+            print("- ReAct 에이전트가 초기화되지 않아 기본 검색으로 대체")
+            return await self._execute_basic_search(state, query)
+
+        # 기존 ReAct 로직 그대로 사용
+        start_time = time.time()
+        timeout_seconds = 120  # 복잡한 쿼리이므로 시간 더 줌
+
+        try:
+            enhanced_query_prompt = self._create_enhanced_query_prompt(query)
+
+            result = await asyncio.wait_for(
+                self.react_agent_executor.ainvoke({"input": enhanced_query_prompt}),
+                timeout=timeout_seconds,
+            )
+
+            output = result.get("output", "No output")
+
+            if len(output) < 100 or "did not yield" in output.lower():
+                output = self._generate_fallback_analysis(query)
+                print("- 검색 결과가 부족하여 기본 분석으로 대체")
+
+            search_result = SearchResult(
+                source="full_react_agent",
+                content=output,
+                relevance_score=0.9,
+                metadata={
+                    "query": query,
+                    "execution_strategy": "full_react",
+                    "execution_time": time.time() - start_time,
+                    "analysis_date": self.current_date_str,
+                },
+                search_query=query,
+            )
+
+            state.add_multi_source_result(search_result)
+            state.add_step_result(
+                "full_react",
+                {
+                    "execution_time": time.time() - start_time,
+                    "output_length": len(output),
+                    "success": True,
+                },
+            )
+
+            print(f"- ReAct 검색 결과 추가: {len(output)}자")
+
+        except asyncio.TimeoutError:
+            print(f"- ReAct 검색 타임아웃 ({timeout_seconds}초 초과)")
+            fallback_result = self._create_fallback_result(query, "react_timeout")
+            state.add_multi_source_result(fallback_result)
+
+        except Exception as e:
+            print(f"- ReAct 검색 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "react_error")
+            state.add_multi_source_result(fallback_result)
+
+        print(">> 풀 ReAct 모드 완료")
+        return state
+
+    async def _execute_multi_agent_search(
+        self, state: StreamingAgentState, query: str
+    ) -> StreamingAgentState:
+        """SUPER_COMPLEX 복잡도 - 다단계 협업 검색"""
+        print("\n>> 다중 에이전트 협업 모드 실행")
+
+        try:
+            # 1단계: 기본 정보 수집
+            print("- 1단계: 기본 정보 수집")
+            basic_results = await self._execute_basic_search(state, query)
+
+            # 2단계: 심화 분석 (ReAct)
+            print("- 2단계: 심화 ReAct 분석")
+            enhanced_query = (
+                f"심화 분석 요청: {query} - 기존 정보를 바탕으로 더 깊이 있는 분석"
+            )
+            react_state = await self._execute_full_react(state, enhanced_query)
+
+            # 3단계: 전략적 종합
+            print("- 3단계: 전략적 종합 분석")
+            synthesis_result = await self._strategic_synthesis(
+                query, state.multi_source_results_stream
+            )
+            if synthesis_result:
+                state.add_multi_source_result(synthesis_result)
+
+            # 4단계: 최종 검증
+            print("- 4단계: 최종 검증")
+            validation_result = await self._final_validation(
+                query, state.multi_source_results_stream
+            )
+            if validation_result:
+                state.add_multi_source_result(validation_result)
+
+            state.add_step_result(
+                "multi_agent_search",
+                {
+                    "total_steps": 4,
+                    "basic_results": len(
+                        [
+                            r
+                            for r in state.multi_source_results_stream
+                            if "basic" in r.source
+                        ]
+                    ),
+                    "react_results": len(
+                        [
+                            r
+                            for r in state.multi_source_results_stream
+                            if "react" in r.source
+                        ]
+                    ),
+                    "synthesis_completed": True,
+                    "validation_completed": True,
+                },
+            )
+
+        except Exception as e:
+            print(f"- 다중 에이전트 검색 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "multi_agent_error")
+            state.add_multi_source_result(fallback_result)
+
+        print(">> 다중 에이전트 협업 모드 완료")
+        return state
+
+    async def _simple_vector_search(self, query: str) -> List[SearchResult]:
+        """간단한 Vector DB 검색"""
+        try:
+            if not self.vector_db:
+                return []
+
+            # Mock vector search 실행
+            vector_results = mock_vector_search.invoke({"query": query})
+
+            results = []
+            if isinstance(vector_results, dict) and "results" in vector_results:
+                for i, doc in enumerate(vector_results["results"][:3]):  # 상위 3개만
+                    result = SearchResult(
+                        source="vector_db_basic",
+                        content=doc.get("content", ""),
+                        relevance_score=doc.get("similarity_score", 0.7),
+                        metadata={"search_type": "basic_vector", "rank": i + 1},
+                        search_query=query,
+                    )
+                    results.append(result)
+
+            return results
+
+        except Exception as e:
+            print(f"- Vector 검색 오류: {e}")
+            return []
+
+    async def _simple_rdb_search(self, query: str) -> List[SearchResult]:
+        """간단한 RDB 검색"""
+        try:
+            # Mock RDB search 실행
+            rdb_results = mock_rdb_search.invoke({"query": query})
+
+            results = []
+            if isinstance(rdb_results, dict) and "results" in rdb_results:
+                for i, doc in enumerate(rdb_results["results"][:2]):  # 상위 2개만
+                    result = SearchResult(
+                        source="rdb_basic",
+                        content=doc.get("content", ""),
+                        relevance_score=0.8,
+                        metadata={"search_type": "basic_rdb", "rank": i + 1},
+                        search_query=query,
+                    )
+                    results.append(result)
+
+            return results
+
+        except Exception as e:
+            print(f"- RDB 검색 오류: {e}")
+            return []
+
+    async def _simple_llm_analysis(
+        self, query: str, search_results: List[SearchResult]
+    ) -> SearchResult:
+        """간단한 LLM 분석"""
+        try:
+            # 검색 결과 요약
+            context = ""
+            for result in search_results[-5:]:  # 최근 5개 결과만 사용
+                context += f"- {result.content[:200]}\n"
+
+            if not context.strip():
+                return None
+
+            prompt = f"""
+다음 검색 결과를 바탕으로 사용자 질문에 대한 간단한 분석을 제공하세요.
+
+사용자 질문: {query}
+
+검색 결과:
+{context}
+
+간단한 분석 (200자 이내):
+- 핵심 포인트 2-3개만 정리
+- 실용적인 인사이트 제공
+- 간결하고 명확하게 작성
+"""
+
+            response = await self.llm.ainvoke(prompt)
+
+            return SearchResult(
+                source="llm_basic_analysis",
+                content=response.content,
+                relevance_score=0.85,
+                metadata={
+                    "analysis_type": "basic_llm",
+                    "source_count": len(search_results),
+                    "analysis_date": self.current_date_str,
+                },
+                search_query=query,
+            )
+
+        except Exception as e:
+            print(f"- LLM 분석 오류: {e}")
+            return None
+
+    async def _strategic_synthesis(
+        self, query: str, search_results: List[SearchResult]
+    ) -> SearchResult:
+        """전략적 종합 분석 (SUPER_COMPLEX용)"""
+        try:
+            # 모든 검색 결과 종합
+            context = ""
+            for result in search_results:
+                context += f"출처({result.source}): {result.content[:300]}\n\n"
+
+            prompt = f"""
+당신은 전략 컨설턴트입니다. 수집된 모든 정보를 종합하여 전략적 인사이트를 제공하세요.
+
+사용자 요청: {query}
+
+수집된 정보:
+{context}
+
+전략적 종합 분석:
+1. 핵심 발견사항 (3가지)
+2. 전략적 시사점 (2가지)
+3. 실행 가능한 제안 (2가지)
+
+500자 이내로 체계적으로 정리해주세요.
+"""
+
+            response = await self.llm.ainvoke(prompt)
+
+            return SearchResult(
+                source="strategic_synthesis",
+                content=response.content,
+                relevance_score=0.95,
+                metadata={
+                    "analysis_type": "strategic_synthesis",
+                    "total_sources": len(search_results),
+                    "synthesis_date": self.current_date_str,
+                },
+                search_query=query,
+            )
+
+        except Exception as e:
+            print(f"- 전략적 종합 오류: {e}")
+            return None
+
+    async def _final_validation(
+        self, query: str, search_results: List[SearchResult]
+    ) -> SearchResult:
+        """최종 검증 분석 (SUPER_COMPLEX용)"""
+        try:
+            # 최근 분석 결과들만 검증
+            recent_results = (
+                search_results[-3:] if len(search_results) >= 3 else search_results
+            )
+
+            context = ""
+            for result in recent_results:
+                context += f"{result.source}: {result.content[:200]}\n"
+
+            prompt = f"""
+최종 검증자로서 분석 결과의 일관성과 완성도를 평가하고 보완하세요.
+
+원본 요청: {query}
+
+분석 결과들:
+{context}
+
+최종 검증 및 보완:
+- 분석의 일관성 검토
+- 누락된 중요 관점 식별
+- 최종 결론 및 권고사항
+
+300자 이내로 간결하게 제시하세요.
+"""
+
+            response = await self.llm.ainvoke(prompt)
+
+            return SearchResult(
+                source="final_validation",
+                content=response.content,
+                relevance_score=0.9,
+                metadata={
+                    "analysis_type": "final_validation",
+                    "validated_sources": len(recent_results),
+                    "validation_date": self.current_date_str,
+                },
+                search_query=query,
+            )
+
+        except Exception as e:
+            print(f"- 최종 검증 오류: {e}")
+            return None
+
+    def _create_enhanced_query_prompt(self, query: str) -> str:
+        """ReAct용 향상된 쿼리 프롬프트 (기존 로직 사용)"""
+        return f"""
+Research Query: {query}
 
 SYSTEM DATE REFERENCE:
 - Current Date: {self.current_date_str} ({self.current_date_en})
@@ -698,78 +943,95 @@ Session start: {self.current_date_str}
 Begin by analyzing the temporal intent of the query, then proceed with appropriate searches.
 """
 
-            # 타임아웃과 함께 비동기 실행
-            result = await asyncio.wait_for(
-                self.react_agent_executor.ainvoke({"input": enhanced_query_prompt}),
-                timeout=timeout_seconds,
+    def _create_fallback_result(self, query: str, error_type: str) -> SearchResult:
+        """오류 시 폴백 결과 생성"""
+        fallback_content = f"""
+**분석 기준일: {self.current_date_str}**
+**오류 타입: {error_type}**
+
+검색 중 오류가 발생했지만, {self.current_year}년 현재 시점의 일반적인 정보를 기반으로 분석을 제공합니다:
+
+## 쿼리: {query}
+
+일반적인 시장 동향과 업계 표준을 바탕으로 한 기본 분석을 제공합니다.
+더 정확한 정보를 위해서는 다시 요청해 주시기 바랍니다.
+
+**데이터 한계사항:**
+- 실시간 검색 데이터를 확보하지 못함
+- 일반적인 업계 정보를 기반으로 함
+- 보다 정확한 분석을 위해서는 재요청 권장
+"""
+
+        return SearchResult(
+            source=f"fallback_{error_type}",
+            content=fallback_content,
+            relevance_score=0.4,
+            metadata={
+                "query": query,
+                "error_type": error_type,
+                "analysis_date": self.current_date_str,
+                "reference_year": self.current_year,
+            },
+            search_query=query,
+        )
+
+    def _create_improved_react_agent(self):
+        """개선된 ReAct 에이전트 생성 (기존 로직 유지)"""
+        try:
+            base_prompt = hub.pull("hwchase17/react")
+
+            system_instruction = f"""
+You are an intelligent research assistant with advanced temporal reasoning capabilities and strict anti-loop protection.
+
+AVAILABLE TOOLS - USE EXACT NAMES:
+- debug_web_search: For web searches
+- mock_vector_search: For vector database searches
+- mock_rdb_search: For relational database searches
+- mock_graph_db_search: For graph database searches
+
+MANDATORY ACTION FORMAT:
+Action: [EXACT_TOOL_NAME]
+Action Input: "search query"
+
+TEMPORAL AWARENESS CONTEXT:
+- Today's Date: {self.current_date_str} ({self.current_date_en})
+- Current Year: {self.current_year}
+- Use LLM reasoning to determine temporal intent, not keyword matching
+
+CRITICAL RULES:
+1. ALWAYS use exact tool names in Action field
+2. INTELLIGENT TEMPORAL DETECTION: Use LLM reasoning to understand query intent
+3. NO REPETITION: Never use the exact same search query twice
+4. TOOL DIVERSITY: If one tool fails, try a different tool type
+5. KEYWORD EVOLUTION: Each search must use different keywords/approach
+6. 3-STRIKE RULE: After 3 failed attempts, provide answer with available info
+
+Remember: Always use EXACT tool names in Action field!
+System reference date: {self.current_date_str}
+"""
+
+            new_prompt_template = system_instruction + "\n\n" + base_prompt.template
+            react_prompt = PromptTemplate.from_template(new_prompt_template)
+
+            react_agent_runnable = create_react_agent(
+                self.llm, self.available_tools, react_prompt
             )
 
-            output = result.get("output", "No output")
-
-            # 결과가 너무 짧거나 의미없으면 날짜 정보가 포함된 기본 정보 제공
-            if len(output) < 100 or "did not yield" in output.lower():
-                output = self._generate_fallback_analysis(original_query)
-                print("- 검색 결과가 부족하여 날짜 정보가 포함된 기본 분석으로 대체")
-
-            search_result = SearchResult(
-                source="react_agent_with_date",
-                content=output,
-                relevance_score=0.8,
-                metadata={
-                    "query": original_query,
-                    "search_attempts": len(self.search_history),
-                    "execution_time": time.time() - start_time,
-                    "analysis_date": self.current_date_str,
-                    "reference_year": self.current_year,
-                },
-                search_query=original_query,
+            return AgentExecutor(
+                agent=react_agent_runnable,
+                tools=self.available_tools,
+                verbose=True,
+                handle_parsing_errors=True,
+                max_iterations=5,
+                max_execution_time=60,
             )
-
-            state.add_multi_source_result(search_result)
-            print(f"- ReAct 검색 결과 추가: {len(output)}자")
-            print(f"- 실행 시간: {time.time() - start_time:.2f}초")
-
-        except asyncio.TimeoutError:
-            print(f"- ReAct 검색 타임아웃 ({timeout_seconds}초 초과)")
-            fallback_output = self._generate_fallback_analysis(original_query)
-
-            search_result = SearchResult(
-                source="timeout_fallback_with_date",
-                content=fallback_output,
-                relevance_score=0.6,
-                metadata={
-                    "query": original_query,
-                    "reason": "timeout",
-                    "analysis_date": self.current_date_str,
-                    "reference_year": self.current_year,
-                },
-                search_query=original_query,
-            )
-            state.add_multi_source_result(search_result)
 
         except Exception as e:
-            print(f"- ReAct 검색 실패: {e}")
-            fallback_output = self._generate_fallback_analysis(original_query)
-
-            search_result = SearchResult(
-                source="error_fallback_with_date",
-                content=fallback_output,
-                relevance_score=0.5,
-                metadata={
-                    "query": original_query,
-                    "error": str(e),
-                    "analysis_date": self.current_date_str,
-                    "reference_year": self.current_year,
-                },
-                search_query=original_query,
-            )
-            state.add_multi_source_result(search_result)
-
-        print(">> RETRIEVER_Y 완료")
-        return state
+            print(f">> ReAct 에이전트 초기화 실패: {e}")
+            return None
 
     def _generate_fallback_analysis(self, query: str) -> str:
-        """검색 실패 시 날짜 정보가 포함된 기본 분석 제공"""
+        """검색 실패 시 기본 분석 (기존 로직 유지)"""
         return f"""
 **분석 기준일: {self.current_date_str}**
 **참조 연도: {self.current_year}년**
@@ -779,34 +1041,24 @@ Begin by analyzing the temporal intent of the query, then proceed with appropria
 ## 쿼리: {query}
 
 ### 시장 현황 분석 ({self.current_year}년 기준)
-- 퀴노아 시장은 2024년 111억 달러 규모로 평가되었으며, 2031년까지 268억 달러에 도달할 것으로 예상
-- 연평균 성장률(CAGR) 12.90%의 높은 성장세 예상 ({self.current_year}년 현재 기준)
-- 영양가 높고 편리한 식품에 대한 소비자 선호도 증가 추세 (최근 트렌드)
+- 관련 시장의 일반적인 동향과 전망
+- 주요 성장 동력 및 변화 요인
+- 업계 표준 및 일반적인 관행
 
-### 소비자 트렌드 인사이트 ({self.current_year}년 현재)
-- 건강 의식 증가로 인한 슈퍼푸드 수요 확대
-- 바로 먹을 수 있는(RTE) 제품에 대한 수요 증가
-- 완전 단백질과 필수 아미노산에 대한 관심 증가
-- 글루텐 프리 제품에 대한 선호도 상승
+### 주요 인사이트 ({self.current_year}년 현재)
+- 현재 시점에서의 주요 트렌드
+- 소비자 행동 변화
+- 기술 발전 및 혁신
 
-### 주요 성장 동력 (현재 시점 기준)
-- 영양 밀도가 높은 식품에 대한 수요 증가
-- 식물 기반 단백질에 대한 관심 확산
-- 건강한 라이프스타일 추구 트렌드
-- 아시아 태평양 지역의 급성장
-
-### 마케팅 전략 제안 ({self.current_year}년 하반기 기준)
-- MZ세대를 타겟으로 한 소셜미디어 마케팅 강화
-- 완전 단백질과 영양 밀도를 강조한 포지셔닝
-- 편의성과 건강함을 동시에 어필하는 제품 개발
-- 글루텐 프리, 비건 등 특수 니즈 대응 제품 확대
+### 실행 가능한 제안
+- 현재 상황에서 고려할 수 있는 방안
+- 일반적인 모범 사례
+- 향후 모니터링 포인트
 
 **데이터 한계사항:**
-- 위 분석은 {self.current_date_str} 현재 접근 가능한 일반적 시장 정보를 기반으로 함
-- 최신 소비자 설문조사나 실시간 시장 데이터는 포함되지 않음
-- 보다 정확한 분석을 위해서는 최신 시장 조사 데이터 확보 필요
-
-이러한 {self.current_year}년 현재 기준의 전반적인 트렌드를 바탕으로 마케팅 전략을 수립하는 것을 권장합니다.
+- 위 분석은 {self.current_date_str} 현재 접근 가능한 일반적 정보를 기반으로 함
+- 최신 실시간 데이터는 포함되지 않음
+- 보다 정확한 분석을 위해서는 최신 데이터 확보 필요
 """
 
 
@@ -1502,7 +1754,7 @@ TRANSLATIONS = {
 class ReportGeneratorAgent:
     def __init__(self):
         self.streaming_chat = ChatOpenAI(
-            model="gpt-4o-mini", temperature=0.6, streaming=True
+            model="gpt-4o-mini", temperature=0.9, streaming=True
         )
         self.non_streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         self.agent_type = "REPORT_GENERATOR"
@@ -1802,8 +2054,8 @@ class ReportGeneratorAgent:
 **이전 대화 맥락 및 사용자 정보:**
 {memory_context}
 
-중요: 위 정보는 이전 대화에서 나눈 내용입니다. 사용자가 이름을 알려줬다면 보고서에서 그 이름으로 언급하고,
-이전에 관심을 보인 주제나 전문 분야가 있다면 해당 내용을 보고서에 반영해주세요.
+중요: 위 정보는 이전 대화에서 나눈 내용입니다. 이 대화를 참고를 참고해서 답변해주세요.(예: 사용자가 이름을 알려줬다면 보고서에서 그 이름으로 언급하고,
+이전에 관심을 보인 주제나 전문 분야가 있다면 해당 내용을 보고서에 반영)
 """
 
         # 개인화 정보
@@ -1983,7 +2235,7 @@ class SimpleAnswererAgent:
         self.vector_db = vector_db
         # 스트리밍용과 일반 호출용 모델을 분리하여 안정성 확보
         self.streaming_chat = ChatOpenAI(
-            model="gpt-3.5-turbo", temperature=0.7, streaming=True
+            model="gpt-3.5-turbo", temperature=0.9, streaming=True
         )
         self.non_streaming_chat = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.3)
         self.agent_type = "SIMPLE_ANSWERER"

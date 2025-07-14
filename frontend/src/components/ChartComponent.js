@@ -184,6 +184,7 @@ const chartComponents = {
   gauge: Doughnut,
   timeseries: Line,
   timeline: Line,
+  gantt: Bar, // Gantt 차트는 수평 바 차트로 처리
 };
 
 // 고급 옵션 설정
@@ -419,12 +420,13 @@ const getAdvancedOptions = (chartType, chartConfig) => {
     case "stacked":
     case "funnel":
     case "waterfall":
+    case "gantt":
       return {
         ...baseOptions,
         scales: {
           x: {
             grid: {
-              display: chartType === "horizontalBar",
+              display: chartType === "horizontalBar" || chartType === "gantt",
             },
             ticks: {
               font: {
@@ -434,7 +436,8 @@ const getAdvancedOptions = (chartType, chartConfig) => {
               },
               color: "#6B7280",
               padding: 12,
-              maxRotation: chartType === "horizontalBar" ? 0 : 45,
+              maxRotation:
+                chartType === "horizontalBar" || chartType === "gantt" ? 0 : 45,
             },
             border: {
               display: false,
@@ -443,7 +446,7 @@ const getAdvancedOptions = (chartType, chartConfig) => {
           y: {
             beginAtZero: true,
             grid: {
-              display: chartType !== "horizontalBar",
+              display: chartType !== "horizontalBar" && chartType !== "gantt",
               color: "rgba(156, 163, 175, 0.3)",
               lineWidth: 1,
               drawBorder: false,
@@ -465,7 +468,8 @@ const getAdvancedOptions = (chartType, chartConfig) => {
             },
           },
         },
-        indexAxis: chartType === "horizontalBar" ? "y" : "x",
+        indexAxis:
+          chartType === "horizontalBar" || chartType === "gantt" ? "y" : "x",
         elements: {
           bar: {
             borderRadius: {
@@ -629,7 +633,7 @@ const getAdvancedOptions = (chartType, chartConfig) => {
   }
 };
 
-// 고급 데이터 전처리 함수
+
 const preprocessAdvancedChartData = (chartType, data) => {
   if (!data || typeof data !== "object") {
     return { labels: [], datasets: [] };
@@ -645,7 +649,6 @@ const preprocessAdvancedChartData = (chartType, data) => {
   let processedData = { ...convertedData };
   const palette = colorPalettes.modern;
 
-  // 데이터셋 스타일링 적용
   processedData.datasets = processedData.datasets.map(
     (dataset, datasetIndex) => {
       const baseColor = palette[datasetIndex % palette.length];
@@ -805,7 +808,7 @@ const preprocessAdvancedChartData = (chartType, data) => {
   return processedData;
 };
 
-// 백엔드에서 받은 차트 설정(JSON)을 props로 받습니다.
+// 백엔드에서 받은 차트 설정(JSON)을 props로 받음
 export function ChartComponent({ chartConfig }) {
   const chartId = React.useMemo(() => {
     return `${chartConfig?.type || "unknown"}-${
@@ -965,7 +968,7 @@ export function ChartComponent({ chartConfig }) {
     );
   }
 
-  // 고급 데이터 전처리
+  // 데이터 전처리
   const processedData = preprocessAdvancedChartData(
     chartType,
     chartConfig.data
@@ -1000,7 +1003,7 @@ export function ChartComponent({ chartConfig }) {
     );
   }
 
-  // 고급 옵션 적용
+
   const advancedOptions = getAdvancedOptions(chartType, chartConfig);
   const finalOptions = {
     ...advancedOptions,

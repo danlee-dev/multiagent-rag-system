@@ -11,57 +11,68 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export default function Home() {
   const [query, setQuery] = useState("");
-  const [reportMarkdown, setReportMarkdown] = useState("");
+  const [currentConversation, setCurrentConversation] = useState([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [conversationId, setConversationId] = useState("");
   const [statusMessage, setStatusMessage] = useState("");
-  const [chartsData, setChartsData] = useState([]);
+  const [currentStreamingMessage, setCurrentStreamingMessage] = useState("");
+  const [currentStreamingCharts, setCurrentStreamingCharts] = useState([]);
+
+  // 사이드바 관련 상태
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [conversations, setConversations] = useState([]);
 
   // 스크롤 관리
-  const [userScrolledUp, setUserScrolledUp] = useState(false);
-  const userScrolledUpRef = useRef(userScrolledUp);
+  const messagesEndRef = useRef(null);
+  const textareaRef = useRef(null);
 
   // 차트 중복 방지를 위한 ID 추적
   const processedChartIds = useRef(new Set());
 
-  useEffect(() => {
-    userScrolledUpRef.current = userScrolledUp;
-  }, [userScrolledUp]);
-
+  // 메시지 끝으로 스크롤
   const scrollToBottom = useCallback(() => {
-    if (!userScrolledUpRef.current) {
-      setTimeout(() => {
-        window.scrollTo({
-          top: document.documentElement.scrollHeight,
-          behavior: "smooth",
-        });
-      }, 100);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [currentConversation, currentStreamingMessage, currentStreamingCharts]);
+
+  // 로컬 스토리지에서 대화 히스토리 로드
+  useEffect(() => {
+    const savedConversations = localStorage.getItem("chatConversations");
+    if (savedConversations) {
+      setConversations(JSON.parse(savedConversations));
     }
   }, []);
 
-  const handleScroll = useCallback(() => {
-    if (!isStreaming) return;
-    const scrollable = document.documentElement;
-    const isAtBottom =
-      scrollable.scrollHeight - scrollable.scrollTop <=
-      scrollable.clientHeight + 15;
-    setUserScrolledUp(!isAtBottom);
-  }, [isStreaming]);
+  // 대화 히스토리 저장
+  const saveConversations = useCallback((newConversations) => {
+    localStorage.setItem("chatConversations", JSON.stringify(newConversations));
+    setConversations(newConversations);
+  }, []);
 
-  useEffect(() => {
-    window.addEventListener("scroll", handleScroll, { passive: true });
-    return () => {
-      window.removeEventListener("scroll", handleScroll);
-    };
-  }, [handleScroll]);
+  // 새 채팅 시작
+  const startNewChat = () => {
+    setCurrentConversation([]);
+    setConversationId("");
+    setCurrentStreamingMessage("");
+    setCurrentStreamingCharts([]);
+    processedChartIds.current.clear();
+    setQuery("");
+  };
 
-  useEffect(() => {
-    if (isStreaming) {
-      scrollToBottom();
-    }
-  }, [reportMarkdown, chartsData.length, isStreaming, scrollToBottom]);
+  // 기존 대화 로드
+  const loadConversation = (conv) => {
+    setCurrentConversation(conv.messages || []);
+    setConversationId(conv.id);
+    setCurrentStreamingMessage("");
+    setCurrentStreamingCharts([]);
+    processedChartIds.current.clear();
+    setQuery("");
+  };
 
-  // 차트 고유 ID 생성 함수 (기존 방식 유지)
+  // 차트 고유 ID 생성 함수
   const generateChartId = (chartData) => {
     let sampleData = "";
     if (chartData.data) {
@@ -78,22 +89,40 @@ export default function Home() {
       data_sample: sampleData,
     });
 
-    console.log("프론트엔드 차트 ID 생성:", chartKey.substring(0, 100) + "...");
     return chartKey;
   };
 
-  // 스트리밍 처리 (일반 요청 분기 제거)
+  // 메시지 전송
   const handleSubmit = async () => {
     if (!query.trim() || isStreaming) return;
 
-    console.log("스트리밍 요청 시작");
+    const userMessage = {
+      id: Date.now(),
+      type: "user",
+      content: query.trim(),
+      timestamp: new Date().toISOString(),
+    };
 
+    setCurrentConversation((prev) => [...prev, userMessage]);
+    const currentQuery = query.trim();
+    setQuery("");
     setIsStreaming(true);
-    setReportMarkdown("");
-    setChartsData([]);
+    setCurrentStreamingMessage("");
+    setCurrentStreamingCharts([]);
     processedChartIds.current.clear();
-    setStatusMessage("요청을 보내는 중...");
-    setUserScrolledUp(false);
+    setStatusMessage("생각하는 중...");
+
+    // 빈 어시스턴트 메시지 추가 (스트리밍용)
+    const assistantMessage = {
+      id: Date.now() + 1,
+      type: "assistant",
+      content: "",
+      charts: [],
+      timestamp: new Date().toISOString(),
+      isStreaming: true,
+    };
+
+    setCurrentConversation((prev) => [...prev, assistantMessage]);
 
     try {
       const res = await fetch(`${API_BASE_URL}/api/query/stream`, {
@@ -104,27 +133,22 @@ export default function Home() {
           Connection: "keep-alive",
         },
         body: JSON.stringify({
-          query: query.trim(),
+          query: currentQuery,
           conversation_id: conversationId || undefined,
         }),
       });
-
-      console.log("Response status:", res.status);
 
       if (!res.body) throw new Error("Response body is null");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-
-      console.log("스트리밍 읽기 시작");
+      let finalContent = "";
+      let finalCharts = [];
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) {
-          console.log("스트리밍 완료");
-          break;
-        }
+        if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
         buffer += chunk;
@@ -138,161 +162,164 @@ export default function Home() {
           if (eventText.startsWith("data: ")) {
             try {
               const data = JSON.parse(eventText.slice(6));
-              console.log("파싱된 데이터 타입:", data.type);
 
-              if (data.conversation_id) {
+              if (data.conversation_id && !conversationId) {
                 setConversationId(data.conversation_id);
               }
 
               switch (data.type) {
                 case "status":
-                  console.log("상태 업데이트:", data.content);
                   setStatusMessage(data.content);
                   break;
 
                 case "text_chunk":
-                  console.log("텍스트 청크 수신:", data.content.length, "자");
-                  setReportMarkdown((prev) => prev + data.content);
+                  finalContent += data.content;
+                  setCurrentConversation((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessage.id
+                        ? { ...msg, content: finalContent }
+                        : msg
+                    )
+                  );
                   break;
 
                 case "chart":
-                  console.log("차트 데이터 수신");
-                  console.log(
-                    "받은 차트 데이터:",
-                    JSON.stringify(data.chart_data).substring(0, 200) + "..."
-                  );
-
                   const chartId = generateChartId(data.chart_data);
 
-                  // 중복 차트 체크
-                  if (processedChartIds.current.has(chartId)) {
-                    console.log(
-                      "중복 차트 무시:",
-                      chartId.substring(0, 100) + "..."
-                    );
-                    break;
-                  }
-
-                  // 새로운 차트 추가
-                  processedChartIds.current.add(chartId);
-                  console.log(
-                    "새 차트 추가, 총 차트 수:",
-                    processedChartIds.current.size
-                  );
-
-                  // 차트 데이터 추가
-                  setChartsData((prevCharts) => {
-                    const newCharts = [...prevCharts, data.chart_data];
-                    console.log(
-                      "차트 배열 업데이트, 총 개수:",
-                      newCharts.length
-                    );
-                    return newCharts;
-                  });
-
-                  // 차트 플레이스홀더 추가
-                  setReportMarkdown((prev) => {
+                  if (!processedChartIds.current.has(chartId)) {
+                    processedChartIds.current.add(chartId);
+                    finalCharts.push(data.chart_data);
                     const chartIndex = processedChartIds.current.size - 1;
-                    const newMarkdown =
-                      prev + `\n\n[CHART-PLACEHOLDER-${chartIndex}]\n\n`;
-                    console.log(
-                      "마크다운 업데이트, 플레이스홀더 추가:",
-                      `[CHART-PLACEHOLDER-${chartIndex}]`
+                    finalContent += `\n\n[CHART-PLACEHOLDER-${chartIndex}]\n\n`;
+
+                    setCurrentConversation((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessage.id
+                          ? {
+                              ...msg,
+                              content: finalContent,
+                              charts: [...finalCharts],
+                            }
+                          : msg
+                      )
                     );
-                    return newMarkdown;
-                  });
+                  }
                   break;
 
                 case "complete":
-                  console.log("완료 이벤트 수신");
-                  setStatusMessage(
-                    `분석이 완료되었습니다. (차트 ${processedChartIds.current.size}개 생성)`
-                  );
+                  // 스트리밍 완료 - 최종 메시지 업데이트
+                  setCurrentConversation((prev) => {
+                    const newConversation = prev.map((msg) =>
+                      msg.id === assistantMessage.id
+                        ? {
+                            ...msg,
+                            content: finalContent,
+                            charts: finalCharts,
+                            isStreaming: false,
+                          }
+                        : msg
+                    );
+
+                    // 대화 히스토리 업데이트
+                    const conversationData = {
+                      id: conversationId || Date.now().toString(),
+                      title:
+                        currentQuery.slice(0, 30) +
+                        (currentQuery.length > 30 ? "..." : ""),
+                      messages: newConversation,
+                      lastUpdated: new Date().toISOString(),
+                    };
+
+                    const updatedConversations = conversations.filter(
+                      (c) => c.id !== conversationData.id
+                    );
+                    updatedConversations.unshift(conversationData);
+                    saveConversations(updatedConversations.slice(0, 50));
+
+                    return newConversation;
+                  });
+
                   setIsStreaming(false);
-                  setTimeout(() => scrollToBottom(), 500);
+                  setStatusMessage("");
                   return;
 
                 case "error":
-                  console.log("오류 이벤트 수신:", data.content);
-                  setStatusMessage(`스트리밍 오류: ${data.content}`);
+                  setStatusMessage(`오류: ${data.content}`);
                   setIsStreaming(false);
                   return;
-
-                default:
-                  console.log("알 수 없는 이벤트 타입:", data.type);
               }
             } catch (parseError) {
-              console.error(
-                "JSON 파싱 오류:",
-                parseError,
-                "원본:",
-                eventText.substring(0, 100)
-              );
+              console.error("JSON 파싱 오류:", parseError);
             }
           }
         }
       }
     } catch (error) {
       console.error("API 오류:", error);
-      setStatusMessage(
-        `오류 발생: ${
-          error instanceof Error ? error.message : "알 수 없는 오류"
-        }`
-      );
-    } finally {
+      setStatusMessage(`오류: ${error.message}`);
       setIsStreaming(false);
     }
   };
 
-  // 차트 렌더링 (기존 방식 유지)
-  const renderReportWithCharts = () => {
-    if (!reportMarkdown) return null;
+  // Enter 키 처리
+  const handleKeyPress = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  };
 
-    const parts = reportMarkdown.split(/(\[CHART-PLACEHOLDER-\d+\])/g);
+  // 대화 삭제
+  const deleteConversation = (convId) => {
+    const updatedConversations = conversations.filter((c) => c.id !== convId);
+    saveConversations(updatedConversations);
+
+    if (conversationId === convId) {
+      startNewChat();
+    }
+  };
+
+  // 메시지 렌더링 (차트 포함)
+  const renderMessageContent = (message) => {
+    const content = message.content || "";
+    const charts = message.charts || [];
+    const parts = content.split(/(\[CHART-PLACEHOLDER-\d+\])/g);
 
     return parts.map((part, index) => {
       const match = part.match(/\[CHART-PLACEHOLDER-(\d+)\]/);
       if (match) {
         const chartIndex = parseInt(match[1], 10);
-        const chartConfig = chartsData[chartIndex];
-
+        const chartConfig = charts[chartIndex];
         if (chartConfig) {
           const chartKey = `chart-${chartIndex}-${chartConfig.type}-${
             chartConfig.title || "untitled"
           }-${index}`;
-
           return (
-            <div key={chartKey} className="chart-wrapper">
-              <div className="chart-fade-in">
-                <ChartComponent
-                  chartConfig={JSON.parse(JSON.stringify(chartConfig))}
-                />
-              </div>
+            <div key={chartKey} className="message-chart">
+              <ChartComponent chartConfig={chartConfig} />
             </div>
           );
         } else {
           return (
             <div
-              key={`chart-skeleton-${chartIndex}-${index}`}
-              className="chart-skeleton-pulse"
+              key={`chart-loading-${chartIndex}-${index}`}
+              className="chart-loading"
             >
-              <div className="skeleton-chart">
+              <div className="chart-skeleton">
                 <div className="skeleton-title"></div>
                 <div className="skeleton-body"></div>
               </div>
-              <p className="chart-loading-text">
-                차트 #{chartIndex}를 실시간 생성하는 중...
-              </p>
+              <span className="chart-loading-text">차트 생성 중...</span>
             </div>
           );
         }
       }
-
       return (
         <ReactMarkdown
-          key={`md-${index}-${part.length}`}
+          key={`md-${index}`}
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeRaw]}
+          components={{ img: () => null }} // disable markdown <img> tag
         >
           {part}
         </ReactMarkdown>
@@ -300,71 +327,199 @@ export default function Home() {
     });
   };
 
+  // textarea 자동 높이 조절
+  const adjustTextareaHeight = useCallback(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height =
+        Math.min(textareaRef.current.scrollHeight, 120) + "px";
+    }
+  }, []);
+
+  useEffect(() => {
+    adjustTextareaHeight();
+  }, [query, adjustTextareaHeight]);
+
   return (
-    <div className="app">
-      <header className="app-header">
-        <h1>Crowdworks</h1>
-        <p>Multi-Agent RAG System</p>
-        {conversationId && (
-          <div className="conversation-info">
-            <small>대화 ID: {conversationId}</small>
+    <div className="chat-app">
+      {/* 사이드바 */}
+      <div
+        className={`sidebar ${sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}
+      >
+        <div className="sidebar-header">
+          <button
+            className="sidebar-toggle"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            title={sidebarOpen ? "사이드바 닫기" : "사이드바 열기"}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+              <line x1="9" y1="9" x2="15" y2="15" />
+              <line x1="15" y1="9" x2="9" y2="15" />
+            </svg>
+          </button>
+          {sidebarOpen && (
+            <button className="new-chat-btn" onClick={startNewChat}>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              새 채팅
+            </button>
+          )}
+        </div>
+
+        {sidebarOpen && (
+          <div className="conversations-list">
+            {conversations.length === 0 ? (
+              <div className="no-conversations">
+                <p>대화 기록이 없습니다</p>
+              </div>
+            ) : (
+              conversations.map((conv) => (
+                <div
+                  key={conv.id}
+                  className={`conversation-item ${
+                    conversationId === conv.id ? "active" : ""
+                  }`}
+                  onClick={() => loadConversation(conv)}
+                >
+                  <div className="conversation-content">
+                    <div className="conversation-title">{conv.title}</div>
+                    <div className="conversation-date">
+                      {new Date(conv.lastUpdated).toLocaleDateString("ko-KR")}
+                    </div>
+                  </div>
+                  <button
+                    className="delete-conversation"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteConversation(conv.id);
+                    }}
+                    title="대화 삭제"
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                  </button>
+                </div>
+              ))
+            )}
           </div>
         )}
-      </header>
+      </div>
 
-      <main className="app-main">
-        <form
-          className="query-form"
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSubmit();
-          }}
-        >
-          <div className="input-group">
+      {/* 메인 채팅 영역 */}
+      <div className="chat-main">
+        {/* 메시지 영역 */}
+        <div className="messages-container">
+          {currentConversation.length === 0 ? (
+            <div className="welcome-screen">
+              <div className="welcome-content">
+                <h1>안녕하세요!</h1>
+                <p>무엇을 도와드릴까요?</p>
+              </div>
+            </div>
+          ) : (
+            <>
+              {currentConversation.map((message) => (
+                <div
+                  key={message.id}
+                  className={`message-wrapper ${message.type}`}
+                >
+                  {message.type === "assistant" && (
+                    <div className="assistant-avatar">
+                      <svg
+                        width="24"
+                        height="24"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                      >
+                        <circle cx="12" cy="12" r="10" fill="#10a37f" />
+                        <path
+                          d="M8 12h8M12 8v8"
+                          stroke="white"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </div>
+                  )}
+                  <div className="message-content">
+                    {renderMessageContent(message)}
+                  </div>
+                </div>
+              ))}
+
+              {isStreaming && (
+                <div className="streaming-status">
+                  <div className="status-content">
+                    <div className="pulse-dot"></div>
+                    <span>{statusMessage}</span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* 입력 영역 */}
+        <div className="input-area">
+          <div className="input-container">
             <textarea
+              ref={textareaRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="질문을 입력하세요... (예: 퀴노아의 영양성분과 마케팅 전략을 분석해줘)"
-              rows={4}
+              onKeyPress={handleKeyPress}
+              placeholder="메시지 보내기..."
               disabled={isStreaming}
+              className="message-input"
+              rows={1}
             />
-          </div>
-          <div className="button-group">
             <button
-              type="submit"
+              onClick={handleSubmit}
               disabled={isStreaming || !query.trim()}
-              className="btn btn-secondary"
+              className="send-button"
+              title="메시지 전송"
             >
-              {isStreaming ? "분석 중..." : "분석 시작"}
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+              >
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22,2 15,22 11,13 2,9 22,2" />
+              </svg>
             </button>
           </div>
-        </form>
-
-        {(isStreaming || reportMarkdown) && (
-          <div className="response-section">
-            <h2>분석 결과</h2>
-            {isStreaming && !reportMarkdown.trim() && (
-              <div className="loading">
-                <div className="spinner"></div>
-                <p>{statusMessage}</p>
-              </div>
-            )}
-            <div className="markdown-content">{renderReportWithCharts()}</div>
-            {isStreaming && (
-              <div className="streaming-status">
-                <div className="status-indicator">
-                  <div className="pulse-dot"></div>
-                  <span>{statusMessage}</span>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </main>
-
-      <footer className="app-footer">
-        <p>RAG System v1.0.0</p>
-      </footer>
+        </div>
+      </div>
     </div>
   );
 }
