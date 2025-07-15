@@ -67,7 +67,7 @@ body {
 .sidebar-closed {
   width: 0;
   border-right: none;
-  overflow: visible; /* 플로팅 버튼이 보이도록 */
+  overflow: visible;
 }
 
 .sidebar-closed .sidebar-header {
@@ -318,20 +318,6 @@ body {
   margin-top: 4px;
 }
 
-.user-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background-color: var(--text-primary);
-  color: white;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-top: 4px;
-  font-size: 14px;
-  font-weight: 600;
-}
 
 .message-content {
   flex: 1;
@@ -344,7 +330,7 @@ body {
 .message-wrapper.user .message-content {
   background-color: var(--user-bg);
   border: 1px solid var(--message-border);
-  border-radius: 18px 18px 0px 18px;
+  border-radius: 14px 14px 0px 14px;
   padding: 12px 16px;
   max-width: 70%;
   word-wrap: break-word;

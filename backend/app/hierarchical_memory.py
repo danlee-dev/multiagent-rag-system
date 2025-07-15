@@ -11,7 +11,7 @@ class MemoryEntry:
     id: str
     timestamp: datetime
     content: str
-    importance: float  # 0.0 ~ 1.0
+    importance: float  
     access_count: int = 0
     last_accessed: Optional[datetime] = None
 

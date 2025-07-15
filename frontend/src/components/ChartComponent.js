@@ -97,13 +97,12 @@ const colorPalettes = {
   ],
 };
 
-// 백엔드 데이터를 Chart.js 형태로 변환하는 함수
+
 const convertBackendDataToChartData = (rawData, chartType) => {
-  // 이벤트 데이터인 경우 (타임라인)
   if (rawData.events && Array.isArray(rawData.events)) {
     const events = rawData.events;
 
-    // 타임라인 차트로 변환
+
     if (chartType === "timeline" || chartType === "timeseries") {
       return {
         labels: events.map((event) => event.date),
@@ -126,7 +125,7 @@ const convertBackendDataToChartData = (rawData, chartType) => {
       };
     }
 
-    // 바 차트로 변환 (이벤트 수)
+
     if (chartType === "bar" || chartType === "column") {
       return {
         labels: events.map((event) => event.event),
@@ -141,42 +140,41 @@ const convertBackendDataToChartData = (rawData, chartType) => {
     }
   }
 
-  // 기존 Chart.js 형태 데이터는 그대로 반환
+
   if (rawData.labels && rawData.datasets) {
     return rawData;
   }
 
-  // 기본 빈 데이터
+
   return {
     labels: [],
     datasets: [],
   };
 };
 
-// 애니메이션 설정 (실시간 업데이트 중에는 애니메이션 최소화)
+
 const getAdvancedAnimations = (chartType) => {
-  // 애니메이션을 매우 짧게 설정하거나 비활성화
   return {
-    duration: 150, // 매우 짧은 애니메이션
+    duration: 150,
     easing: "linear",
   };
 };
 
-// 차트 타입에 따라 적절한 컴포넌트를 매핑
+
 const chartComponents = {
   line: Line,
   bar: Bar,
   pie: Pie,
   doughnut: Doughnut,
   radar: Radar,
-  polarArea: PolarArea,
+  polararea: PolarArea,
   scatter: Scatter,
   bubble: Bubble,
   area: Line,
   column: Bar,
   donut: Doughnut,
   polar: PolarArea,
-  horizontalBar: Bar,
+  horizontalbar: Bar,
   stacked: Bar,
   mixed: Line,
   funnel: Bar,
@@ -184,7 +182,7 @@ const chartComponents = {
   gauge: Doughnut,
   timeseries: Line,
   timeline: Line,
-  gantt: Bar, // Gantt 차트는 수평 바 차트로 처리
+  gantt: Bar,
 };
 
 // 고급 옵션 설정
@@ -224,7 +222,6 @@ const getAdvancedOptions = (chartType, chartConfig) => {
           },
           color: "#374151",
           generateLabels: function (chart) {
-            // 안전하게 original generateLabels 함수 가져오기
             let original;
             try {
               const chartType = chart.config.type;
@@ -241,14 +238,14 @@ const getAdvancedOptions = (chartType, chartConfig) => {
               console.warn("generateLabels 함수를 찾을 수 없습니다:", error);
             }
 
-            // original이 없으면 기본 함수 사용
+
             if (!original || typeof original !== "function") {
               original = ChartJS.defaults.plugins.legend.labels.generateLabels;
             }
 
             const labels = original.call(this, chart);
 
-            // 라벨에 값 추가 (파이, 도넛 차트 등에서만)
+
             if (
               [
                 "pie",

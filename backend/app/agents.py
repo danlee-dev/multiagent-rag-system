@@ -1,44 +1,44 @@
-import os
-import re
-import requests
-import random
-import time
-import json
+# 표준 라이브러리
 import asyncio
-from typing import Dict, Any, List, Optional, AsyncGenerator
+import json
+import os
+import random
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set
 
-from langchain_openai import ChatOpenAI
-from langchain_core.tools import tool
+# 서드파티 라이브러리
+import requests
+
+# LangChain 관련
+from langchain import hub
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
-from langchain import hub
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
 
+# 로컬 모듈
 from .models import (
-    AgentType,
-    DatabaseType,
-    QueryPlan,
     AgentMessage,
-    MessageType,
-    SearchResult,
-    CriticResult,
-    StreamingAgentState,
-    ExecutionStrategy,
+    AgentType,
     ComplexityLevel,
+    CriticResult,
+    DatabaseType,
+    ExecutionStrategy,
+    MessageType,
+    QueryPlan,
+    SearchResult,
+    StreamingAgentState,
 )
-from .utils import create_agent_message
-
 from .search_tools import (
     debug_web_search,
+    mock_graph_db_search,
     mock_rdb_search,
     mock_vector_search,
-    mock_graph_db_search,
 )
-
-from typing import Dict, List, Optional
-from langchain_openai import ChatOpenAI
-import re
-
+from .utils import create_agent_message
 
 class PlanningAgent:
     """
@@ -64,18 +64,18 @@ class PlanningAgent:
         if feedback_context:
             print(f"- 피드백 반영: {feedback_context}")
 
-        # 1. 4단계 복잡도 분석
+        # 4단계 복잡도 분석
         complexity_analysis = await self._analyze_query_complexity_4levels(
             query, feedback_context
         )
         print(f"- 복잡도 분석 결과: {complexity_analysis}")
 
-        # 2. 복잡도별 실행 계획 수립
+        # 복잡도별 실행 계획 수립
         execution_plan = await self._create_execution_plan_by_complexity(
             query, complexity_analysis, feedback_context
         )
 
-        # 3. 복잡도와 전략 값을 소문자로 변환
+        # 복잡도와 전략 값을 소문자로 변환
         complexity_mapping = {
             "SIMPLE": "simple",
             "MEDIUM": "medium",
@@ -351,151 +351,48 @@ class PlanningAgent:
             return f"'{query}' 요청에 대한 다단계 협업 분석과 종합적 전략을 제공합니다."
 
 
-# RetrieverAgentX: Graph DB 중심 검색 + 피드백
-class RetrieverAgentX:
-    def __init__(self, graph_db):
-        self.graph_db = graph_db
-        self.chat = ChatOpenAI(model="gpt-3.5-turbo")
-        self.agent_type = AgentType.RETRIEVER_X
 
-    async def search(self, state: StreamingAgentState) -> StreamingAgentState:
-        print(">> RETRIEVER_X (단일 쿼리 모드) 시작")
+class RetrieverAgent:
+    """통합 검색 에이전트 - 복잡도별 차등 + 병렬 처리"""
 
-        # PlanningAgent가 선택한 단 하나의 최적 쿼리를 가져옵니다.
-        if not state.query_plan or not state.query_plan.sub_queries:
-            print("- 처리할 쿼리가 없어 RETRIEVER_X를 종료합니다.")
-            return state
-
-        single_query = state.query_plan.sub_queries[0]
-
-        all_graph_results = []
-        extracted_hints_for_integration = []
-
-        keywords = await self._optimize_keywords(single_query)
-        print(f"- Graph DB 키워드: {keywords}")
-
-        for keyword in keywords[:2]:
-            graph_result = self.graph_db.search(keyword)
-
-            for node in graph_result["nodes"]:
-                search_result = SearchResult(
-                    source="graph_db",
-                    content=f"{node['properties'].get('name', 'Unknown')}: {str(node['properties'])}",
-                    relevance_score=random.uniform(0.7, 0.95),
-                    metadata=node,
-                    search_query=keyword,
-                )
-                all_graph_results.append(search_result)
-
-                if "properties" in node:
-                    props = node["properties"]
-                    hint_data = {
-                        "entity": props.get("name", ""),
-                        "category": props.get("category", ""),
-                        "search_query": keyword,
-                    }
-                    extracted_hints_for_integration.append(hint_data)
-
-        for result in all_graph_results:
-            state.add_graph_result(result)
-
-        state.x_extracted_hints = extracted_hints_for_integration
-        print(
-            f"- State에 Graph DB 결과 {len(all_graph_results)}개 및 힌트 {len(extracted_hints_for_integration)}개 저장"
-        )
-
-        memory = state.get_agent_memory(AgentType.RETRIEVER_X)
-        memory.add_finding(f"Graph DB 검색 완료: {len(all_graph_results)}개 결과")
-
-        print(">> RETRIEVER_X 완료")
-        return state
-
-    async def _optimize_keywords(self, query):
-        prompt = f"""
-        당신은 Graph Database 검색을 위한 핵심 키워드를 추출하는 전문가입니다.
-        주어진 질문에서 Graph DB에 저장된 식품재료, 가격정보, 트렌드, 뉴스 등의 정보를 검색하는 데 가장 효율적인 키워드를 식별합니다.
-
-        ---
-        **키워드 추출 지침:**
-        1.  원본 질문의 주요 명사, 동사, 그리고 핵심 개념을 파악합니다.
-        2.  Graph DB의 데이터 유형(식품재료, 가격정보, 트렌드, 뉴스)을 고려하여 관련성 높은 키워드를 선택합니다.
-        3.  최대 2-3개의 가장 중요한 키워드를 선정합니다.
-        ---
-
-        <질문>
-        {query}
-        </질문>
-
-        **출력 형식:**
-        추출된 키워드들을 쉼표(,)로 구분하여 답변해주세요. 다른 설명은 포함하지 마세요.
-        예시: `쌀, 영양성분, 효능`
-
-        답변:
-        """
-        response = await self.chat.ainvoke(prompt)
-        keywords = [kw.strip() for kw in response.content.split(",")]
-        return keywords[:3]
-
-
-
-
-class RetrieverAgentY:
-    """복잡도별 차등 검색 전략을 지원하는 향상된 검색 에이전트"""
-
-    def __init__(self, vector_db=None, rdb=None):
+    def __init__(self, vector_db=None, rdb=None, graph_db=None):
         self.vector_db = vector_db
         self.rdb = rdb
+        self.graph_db = graph_db
+
+        # 사용 가능한 도구들
         self.available_tools = [
             debug_web_search,
             mock_vector_search,
             mock_rdb_search,
             mock_graph_db_search,
         ]
+
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        self.chat = ChatOpenAI(model="gpt-3.5-turbo")
 
-        # 무한루프 방지를 위한 추적 시스템
-        self.search_history: Set[str] = set()
-        self.tool_usage_count: Dict[str, int] = {}
-        self.max_tool_usage = 2
-        self.max_total_attempts = 5
-        self.current_attempts = 0
-
-        # 날짜 정보 설정
+        # 날짜 정보
         self.current_date = datetime.now()
         self.current_date_str = self.current_date.strftime("%Y년 %m월 %d일")
         self.current_year = self.current_date.year
-        self.current_date_en = self.current_date.strftime("%B %d, %Y")
 
-        # ReAct 에이전트 설정 (복잡한 쿼리용)
-        self.react_agent_executor = self._create_improved_react_agent()
+        # ReAct 에이전트 (복잡한 쿼리용)
+        self.react_agent_executor = self._create_react_agent()
+
+        # 병렬 처리용 스레드 풀
+        self.thread_pool = ThreadPoolExecutor(max_workers=4)
 
     async def search(self, state: StreamingAgentState) -> StreamingAgentState:
-        """복잡도별 차등 검색 실행"""
-        print(">> RETRIEVER_Y 시작 (복잡도별 차등 처리)")
+        """복잡도별 차등 + 병렬 검색 실행"""
+        print(">> 통합 RETRIEVER 시작")
 
         if not state.query_plan or not state.query_plan.sub_queries:
-            print("- 처리할 쿼리가 없어 RETRIEVER_Y를 종료합니다.")
+            print("- 처리할 쿼리가 없어 RETRIEVER를 종료합니다.")
             return state
 
-        # 복잡도 정보 추출
+        # 복잡도 및 실행 전략 결정
         complexity_level = state.get_complexity_level()
-
-        # execution_mode 확인 (Enum 또는 None)
-        execution_strategy = state.execution_mode
-        if not execution_strategy and state.query_plan:
-            execution_strategy = state.query_plan.execution_strategy
-
-        # 여전히 없으면 복잡도로 추론
-        if not execution_strategy:
-            from .models import ExecutionStrategy
-            if complexity_level == "super_complex":
-                execution_strategy = ExecutionStrategy.MULTI_AGENT
-            elif complexity_level == "complex":
-                execution_strategy = ExecutionStrategy.FULL_REACT
-            elif complexity_level == "medium":
-                execution_strategy = ExecutionStrategy.BASIC_SEARCH
-            else:
-                execution_strategy = ExecutionStrategy.DIRECT_ANSWER
+        execution_strategy = self._determine_execution_strategy(state, complexity_level)
 
         original_query = state.query_plan.sub_queries[0]
 
@@ -503,169 +400,185 @@ class RetrieverAgentY:
         print(f"- 실행 전략: {execution_strategy}")
         print(f"- 원본 쿼리: {original_query}")
 
-        # 실행 전략에 따른 분기 (Enum 비교)
-        from .models import ExecutionStrategy
-
+        # 실행 전략에 따른 병렬 검색
         if execution_strategy == ExecutionStrategy.DIRECT_ANSWER:
-            # SIMPLE - 검색 없이 바로 패스
-            print("- SIMPLE 레벨: 검색 생략")
+            print("- SIMPLE: 검색 생략")
             return state
 
         elif execution_strategy == ExecutionStrategy.BASIC_SEARCH:
-            # MEDIUM - 기본 검색만 수행
-            print("- MEDIUM 레벨: 기본 검색 실행")
-            return await self._execute_basic_search(state, original_query)
+            print("- BASIC: 기본 병렬 검색")
+            return await self._execute_basic_parallel_search(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.FULL_REACT:
-            # COMPLEX - 풀 ReAct 에이전트 활용
-            print("- COMPLEX 레벨: 풀 ReAct 실행")
-            return await self._execute_full_react(state, original_query)
+            print("- COMPLEX: 풀 병렬 검색 + ReAct")
+            return await self._execute_full_parallel_search(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.MULTI_AGENT:
-            # SUPER_COMPLEX - 다단계 협업 검색
-            print("- SUPER_COMPLEX 레벨: 다중 에이전트 실행")
-            return await self._execute_multi_agent_search(state, original_query)
+            print("- SUPER_COMPLEX: 다단계 병렬 검색")
+            return await self._execute_multi_stage_parallel_search(state, original_query)
 
         else:
-            # 기본값 - MEDIUM으로 처리
-            print(f"- 알 수 없는 전략 ({execution_strategy}): 기본 검색으로 대체")
-            return await self._execute_basic_search(state, original_query)
+            return await self._execute_basic_parallel_search(state, original_query)
 
-
-    async def _execute_basic_search(
+    async def _execute_basic_parallel_search(
         self, state: StreamingAgentState, query: str
     ) -> StreamingAgentState:
-        """MEDIUM 복잡도 - 기본 검색 + 간단 분석"""
-        print("\n>> 기본 검색 모드 실행")
+        """기본 병렬 검색 (BASIC 복잡도)"""
+        print("\n>> 기본 병렬 검색 실행")
+
+        # 병렬로 실행할 검색 작업들
+        search_tasks = []
+
+        # 1. Vector DB 검색
+        if self.vector_db:
+            search_tasks.append(self._async_vector_search(query))
+
+        # 2. Graph DB 검색
+        if self.graph_db:
+            search_tasks.append(self._async_graph_search(query))
+
+        # 3. 간단한 웹 검색
+        search_tasks.append(self._async_web_search(query))
 
         try:
-            # 1. Vector DB 검색
-            vector_results = await self._simple_vector_search(query)
-            if vector_results:
-                for result in vector_results:
-                    state.add_multi_source_result(result)
-                print(f"- Vector DB 검색 완료: {len(vector_results)}개 결과")
+            # 모든 검색을 병렬로 실행
+            start_time = time.time()
+            search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+            execution_time = time.time() - start_time
 
-            # 2. RDB 검색 (간단한 쿼리)
-            rdb_results = await self._simple_rdb_search(query)
-            if rdb_results:
-                for result in rdb_results:
-                    state.add_multi_source_result(result)
-                print(f"- RDB 검색 완료: {len(rdb_results)}개 결과")
+            print(f"- 병렬 검색 완료: {execution_time:.2f}초")
 
-            # 3. 간단한 LLM 분석
-            if len(state.multi_source_results_stream) > 0:
+            # 결과 처리
+            total_results = 0
+            for result_group in search_results:
+                if isinstance(result_group, Exception):
+                    print(f"- 검색 오류: {result_group}")
+                    continue
+
+                if isinstance(result_group, list):
+                    for result in result_group:
+                        state.add_multi_source_result(result)
+                        total_results += 1
+
+            # 간단한 LLM 분석 (결과가 있을 때만)
+            if total_results > 0:
                 analysis_result = await self._simple_llm_analysis(
                     query, state.multi_source_results_stream
                 )
                 if analysis_result:
                     state.add_multi_source_result(analysis_result)
-                    print("- 간단 LLM 분석 완료")
+                    total_results += 1
 
-            state.add_step_result(
-                "basic_search",
-                {
-                    "vector_results": len(vector_results) if vector_results else 0,
-                    "rdb_results": len(rdb_results) if rdb_results else 0,
-                    "analysis_completed": True,
-                },
-            )
+            state.add_step_result("basic_parallel_search", {
+                "execution_time": execution_time,
+                "total_results": total_results,
+                "search_types": len(search_tasks)
+            })
 
-        except Exception as e:
-            print(f"- 기본 검색 실패: {e}")
-            # 폴백으로 간단한 분석 제공
-            fallback_result = self._create_fallback_result(query, "basic_search_error")
-            state.add_multi_source_result(fallback_result)
-
-        print(">> 기본 검색 모드 완료")
-        return state
-
-    async def _execute_full_react(
-        self, state: StreamingAgentState, query: str
-    ) -> StreamingAgentState:
-        """COMPLEX 복잡도 - 풀 ReAct 에이전트 활용 (기존 로직)"""
-        print("\n>> 풀 ReAct 모드 실행")
-
-        if not self.react_agent_executor:
-            print("- ReAct 에이전트가 초기화되지 않아 기본 검색으로 대체")
-            return await self._execute_basic_search(state, query)
-
-        # 기존 ReAct 로직 그대로 사용
-        start_time = time.time()
-        timeout_seconds = 120  # 복잡한 쿼리이므로 시간 더 줌
-
-        try:
-            enhanced_query_prompt = self._create_enhanced_query_prompt(query)
-
-            result = await asyncio.wait_for(
-                self.react_agent_executor.ainvoke({"input": enhanced_query_prompt}),
-                timeout=timeout_seconds,
-            )
-
-            output = result.get("output", "No output")
-
-            if len(output) < 100 or "did not yield" in output.lower():
-                output = self._generate_fallback_analysis(query)
-                print("- 검색 결과가 부족하여 기본 분석으로 대체")
-
-            search_result = SearchResult(
-                source="full_react_agent",
-                content=output,
-                relevance_score=0.9,
-                metadata={
-                    "query": query,
-                    "execution_strategy": "full_react",
-                    "execution_time": time.time() - start_time,
-                    "analysis_date": self.current_date_str,
-                },
-                search_query=query,
-            )
-
-            state.add_multi_source_result(search_result)
-            state.add_step_result(
-                "full_react",
-                {
-                    "execution_time": time.time() - start_time,
-                    "output_length": len(output),
-                    "success": True,
-                },
-            )
-
-            print(f"- ReAct 검색 결과 추가: {len(output)}자")
-
-        except asyncio.TimeoutError:
-            print(f"- ReAct 검색 타임아웃 ({timeout_seconds}초 초과)")
-            fallback_result = self._create_fallback_result(query, "react_timeout")
-            state.add_multi_source_result(fallback_result)
+            print(f"- 총 {total_results}개 결과 추가")
 
         except Exception as e:
-            print(f"- ReAct 검색 실패: {e}")
-            fallback_result = self._create_fallback_result(query, "react_error")
+            print(f"- 기본 병렬 검색 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "basic_parallel_error")
             state.add_multi_source_result(fallback_result)
 
-        print(">> 풀 ReAct 모드 완료")
         return state
 
-    async def _execute_multi_agent_search(
+    async def _execute_full_parallel_search(
         self, state: StreamingAgentState, query: str
     ) -> StreamingAgentState:
-        """SUPER_COMPLEX 복잡도 - 다단계 협업 검색"""
-        print("\n>> 다중 에이전트 협업 모드 실행")
+        """풀 병렬 검색 (COMPLEX 복잡도)"""
+        print("\n>> 풀 병렬 검색 + ReAct 실행")
+
+        # 1단계: 모든 DB 병렬 검색
+        db_search_tasks = [
+            self._async_vector_search(query),
+            self._async_graph_search(query),
+            self._async_rdb_search(query),
+            self._async_web_search(query)
+        ]
+
+        # 2단계: ReAct 에이전트 (병렬 실행)
+        react_task = self._async_react_search(query)
 
         try:
-            # 1단계: 기본 정보 수집
-            print("- 1단계: 기본 정보 수집")
-            basic_results = await self._execute_basic_search(state, query)
+            start_time = time.time()
 
-            # 2단계: 심화 분석 (ReAct)
-            print("- 2단계: 심화 ReAct 분석")
-            enhanced_query = (
-                f"심화 분석 요청: {query} - 기존 정보를 바탕으로 더 깊이 있는 분석"
-            )
-            react_state = await self._execute_full_react(state, enhanced_query)
+            # DB 검색들과 ReAct를 병렬로 실행
+            all_tasks = db_search_tasks + [react_task]
+            results = await asyncio.gather(*all_tasks, return_exceptions=True)
 
-            # 3단계: 전략적 종합
-            print("- 3단계: 전략적 종합 분석")
+            execution_time = time.time() - start_time
+            print(f"- 풀 병렬 검색 완료: {execution_time:.2f}초")
+
+            # DB 검색 결과 처리
+            total_results = 0
+            for i, result_group in enumerate(results[:-1]):  # ReAct 제외
+                if isinstance(result_group, Exception):
+                    print(f"- DB 검색 {i} 오류: {result_group}")
+                    continue
+
+                if isinstance(result_group, list):
+                    for result in result_group:
+                        state.add_multi_source_result(result)
+                        total_results += 1
+
+            # ReAct 결과 처리
+            react_result = results[-1]
+            if not isinstance(react_result, Exception) and react_result:
+                state.add_multi_source_result(react_result)
+                total_results += 1
+
+            state.add_step_result("full_parallel_search", {
+                "execution_time": execution_time,
+                "total_results": total_results,
+                "db_searches": len(db_search_tasks),
+                "react_included": True
+            })
+
+            print(f"- 총 {total_results}개 결과 추가")
+
+        except Exception as e:
+            print(f"- 풀 병렬 검색 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "full_parallel_error")
+            state.add_multi_source_result(fallback_result)
+
+        return state
+
+    async def _execute_multi_stage_parallel_search(
+        self, state: StreamingAgentState, query: str
+    ) -> StreamingAgentState:
+        """다단계 병렬 검색 (SUPER_COMPLEX 복잡도)"""
+        print("\n>> 다단계 병렬 검색 실행")
+
+        try:
+            # 1단계: 초기 정보 수집 (병렬)
+            print("- 1단계: 초기 정보 수집")
+            await self._execute_full_parallel_search(state, query)
+
+            # 2단계: 키워드 확장 및 심화 검색 (병렬)
+            print("- 2단계: 키워드 확장 검색")
+            expanded_keywords = await self._generate_expanded_keywords(query)
+
+            expanded_search_tasks = []
+            for keyword in expanded_keywords[:3]:  # 상위 3개만
+                expanded_search_tasks.extend([
+                    self._async_vector_search(keyword),
+                    self._async_graph_search(keyword)
+                ])
+
+            if expanded_search_tasks:
+                expanded_results = await asyncio.gather(
+                    *expanded_search_tasks, return_exceptions=True
+                )
+
+                for result_group in expanded_results:
+                    if isinstance(result_group, list):
+                        for result in result_group:
+                            state.add_multi_source_result(result)
+
+            # 3단계: 전략적 종합 분석
+            print("- 3단계: 전략적 종합")
             synthesis_result = await self._strategic_synthesis(
                 query, state.multi_source_results_stream
             )
@@ -680,126 +593,255 @@ class RetrieverAgentY:
             if validation_result:
                 state.add_multi_source_result(validation_result)
 
-            state.add_step_result(
-                "multi_agent_search",
-                {
-                    "total_steps": 4,
-                    "basic_results": len(
-                        [
-                            r
-                            for r in state.multi_source_results_stream
-                            if "basic" in r.source
-                        ]
-                    ),
-                    "react_results": len(
-                        [
-                            r
-                            for r in state.multi_source_results_stream
-                            if "react" in r.source
-                        ]
-                    ),
-                    "synthesis_completed": True,
-                    "validation_completed": True,
-                },
-            )
+            state.add_step_result("multi_stage_parallel_search", {
+                "stages_completed": 4,
+                "expanded_keywords": len(expanded_keywords),
+                "total_results": len(state.multi_source_results_stream)
+            })
 
         except Exception as e:
-            print(f"- 다중 에이전트 검색 실패: {e}")
-            fallback_result = self._create_fallback_result(query, "multi_agent_error")
+            print(f"- 다단계 병렬 검색 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "multi_stage_error")
             state.add_multi_source_result(fallback_result)
 
-        print(">> 다중 에이전트 협업 모드 완료")
         return state
 
-    async def _simple_vector_search(self, query: str) -> List[SearchResult]:
-        """간단한 Vector DB 검색"""
-        try:
-            if not self.vector_db:
-                return []
+    # ========== 개별 검색 메서드들 (비동기) ==========
 
-            # Mock vector search 실행
-            vector_results = mock_vector_search.invoke({"query": query})
+    async def _async_vector_search(self, query: str) -> List[SearchResult]:
+        """비동기 Vector DB 검색"""
+        try:
+            print(f"  └ Vector DB 검색: {query[:30]}...")
+
+            # 실제로는 비동기이지만 mock은 동기라서 스레드 풀 사용
+            loop = asyncio.get_event_loop()
+            vector_results = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: mock_vector_search.invoke({"query": query})
+            )
 
             results = []
             if isinstance(vector_results, dict) and "results" in vector_results:
-                for i, doc in enumerate(vector_results["results"][:3]):  # 상위 3개만
+                for i, doc in enumerate(vector_results["results"][:3]):
                     result = SearchResult(
-                        source="vector_db_basic",
+                        source="vector_db",
                         content=doc.get("content", ""),
                         relevance_score=doc.get("similarity_score", 0.7),
-                        metadata={"search_type": "basic_vector", "rank": i + 1},
+                        metadata={"search_type": "vector", "rank": i + 1},
                         search_query=query,
                     )
                     results.append(result)
 
+            print(f"    ✓ Vector DB: {len(results)}개 결과")
             return results
 
         except Exception as e:
-            print(f"- Vector 검색 오류: {e}")
+            print(f"    ✗ Vector DB 오류: {e}")
             return []
 
-    async def _simple_rdb_search(self, query: str) -> List[SearchResult]:
-        """간단한 RDB 검색"""
+    async def _async_graph_search(self, query: str) -> List[SearchResult]:
+        """비동기 Graph DB 검색"""
         try:
-            # Mock RDB search 실행
-            rdb_results = mock_rdb_search.invoke({"query": query})
+            print(f"  └ Graph DB 검색: {query[:30]}...")
+
+            # 키워드 최적화
+            keywords = await self._optimize_keywords(query)
+
+            loop = asyncio.get_event_loop()
+
+            results = []
+            for keyword in keywords[:2]:  # 상위 2개만
+                graph_result = await loop.run_in_executor(
+                    self.thread_pool,
+                    lambda k=keyword: mock_graph_db_search.invoke({"query": k})
+                )
+
+                if isinstance(graph_result, dict) and "nodes" in graph_result:
+                    for node in graph_result["nodes"][:2]:  # 각 키워드당 2개씩
+                        result = SearchResult(
+                            source="graph_db",
+                            content=f"{node['properties'].get('name', 'Unknown')}: {str(node['properties'])}",
+                            relevance_score=0.8,
+                            metadata=node,
+                            search_query=keyword,
+                        )
+                        results.append(result)
+
+            print(f"    ✓ Graph DB: {len(results)}개 결과")
+            return results
+
+        except Exception as e:
+            print(f"    ✗ Graph DB 오류: {e}")
+            return []
+
+    async def _async_rdb_search(self, query: str) -> List[SearchResult]:
+        """비동기 RDB 검색"""
+        try:
+            print(f"  └ RDB 검색: {query[:30]}...")
+
+            loop = asyncio.get_event_loop()
+            rdb_results = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: mock_rdb_search.invoke({"query": query})
+            )
 
             results = []
             if isinstance(rdb_results, dict) and "results" in rdb_results:
-                for i, doc in enumerate(rdb_results["results"][:2]):  # 상위 2개만
+                for i, doc in enumerate(rdb_results["results"][:2]):
                     result = SearchResult(
-                        source="rdb_basic",
+                        source="rdb",
                         content=doc.get("content", ""),
                         relevance_score=0.8,
-                        metadata={"search_type": "basic_rdb", "rank": i + 1},
+                        metadata={"search_type": "rdb", "rank": i + 1},
                         search_query=query,
                     )
                     results.append(result)
 
+            print(f"    ✓ RDB: {len(results)}개 결과")
             return results
 
         except Exception as e:
-            print(f"- RDB 검색 오류: {e}")
+            print(f"    ✗ RDB 오류: {e}")
             return []
 
-    async def _simple_llm_analysis(
-        self, query: str, search_results: List[SearchResult]
-    ) -> SearchResult:
-        """간단한 LLM 분석"""
+    async def _async_web_search(self, query: str) -> List[SearchResult]:
+        """비동기 웹 검색"""
         try:
-            # 검색 결과 요약
-            context = ""
-            for result in search_results[-5:]:  # 최근 5개 결과만 사용
-                context += f"- {result.content[:200]}\n"
+            print(f"  └ Web 검색: {query[:30]}...")
 
-            if not context.strip():
+            loop = asyncio.get_event_loop()
+            web_results = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: debug_web_search.invoke({"query": query})
+            )
+
+            results = []
+            if isinstance(web_results, str) and len(web_results) > 50:
+                result = SearchResult(
+                    source="web_search",
+                    content=web_results,
+                    relevance_score=0.75,
+                    metadata={"search_type": "web"},
+                    search_query=query,
+                )
+                results.append(result)
+
+            print(f"    ✓ Web: {len(results)}개 결과")
+            return results
+
+        except Exception as e:
+            print(f"    ✗ Web 검색 오류: {e}")
+            return []
+
+    async def _async_react_search(self, query: str) -> Optional[SearchResult]:
+        """비동기 ReAct 검색"""
+        try:
+            print(f"  └ ReAct 검색: {query[:30]}...")
+
+            if not self.react_agent_executor:
                 return None
 
-            prompt = f"""
-다음 검색 결과를 바탕으로 사용자 질문에 대한 간단한 분석을 제공하세요.
+            enhanced_prompt = self._create_enhanced_query_prompt(query)
 
-사용자 질문: {query}
+            result = await asyncio.wait_for(
+                self.react_agent_executor.ainvoke({"input": enhanced_prompt}),
+                timeout=120
+            )
+
+            output = result.get("output", "")
+            if len(output) > 50:
+                search_result = SearchResult(
+                    source="react_agent",
+                    content=output,
+                    relevance_score=0.9,
+                    metadata={"search_type": "react"},
+                    search_query=query,
+                )
+                print(f"    ✓ ReAct: 분석 완료")
+                return search_result
+
+            return None
+
+        except Exception as e:
+            print(f"    ✗ ReAct 오류: {e}")
+            return None
+
+    # ========== 유틸리티 메서드들 ==========
+
+    def _determine_execution_strategy(self, state: StreamingAgentState, complexity_level: str) -> ExecutionStrategy:
+        """실행 전략 결정"""
+        execution_strategy = state.execution_mode
+        if not execution_strategy and state.query_plan:
+            execution_strategy = state.query_plan.execution_strategy
+
+        if not execution_strategy:
+            if complexity_level == "super_complex":
+                execution_strategy = ExecutionStrategy.MULTI_AGENT
+            elif complexity_level == "complex":
+                execution_strategy = ExecutionStrategy.FULL_REACT
+            elif complexity_level == "medium":
+                execution_strategy = ExecutionStrategy.BASIC_SEARCH
+            else:
+                execution_strategy = ExecutionStrategy.DIRECT_ANSWER
+
+        return execution_strategy
+
+    async def _optimize_keywords(self, query: str) -> List[str]:
+        """Graph DB용 키워드 최적화"""
+        prompt = f"""
+        다음 질문에서 검색에 효과적인 핵심 키워드 2-3개를 추출하세요:
+
+        질문: {query}
+
+        키워드들을 쉼표로 구분해서 답변해주세요:
+        """
+
+        response = await self.chat.ainvoke(prompt)
+        keywords = [kw.strip() for kw in response.content.split(",")]
+        return keywords[:3]
+
+    async def _generate_expanded_keywords(self, query: str) -> List[str]:
+        """확장 키워드 생성 (SUPER_COMPLEX용)"""
+        prompt = f"""
+        다음 질문과 관련된 확장 검색 키워드를 생성하세요:
+
+        원본 질문: {query}
+
+        관련 키워드, 유사어, 상위/하위 개념을 포함하여 5개의 확장 키워드를 제시하세요:
+        """
+
+        response = await self.llm.ainvoke(prompt)
+        keywords = [kw.strip() for kw in response.content.split(",")]
+        return keywords[:5]
+
+    async def _simple_llm_analysis(self, query: str, search_results: List[SearchResult]) -> Optional[SearchResult]:
+        """간단한 LLM 분석"""
+        try:
+            if not search_results:
+                return None
+
+            context = ""
+            for result in search_results[-5:]:
+                context += f"- {result.source}: {result.content[:200]}\n"
+
+            prompt = f"""
+검색 결과를 바탕으로 질문에 대한 간단한 분석을 제공하세요.
+
+질문: {query}
 
 검색 결과:
 {context}
 
 간단한 분석 (200자 이내):
-- 핵심 포인트 2-3개만 정리
-- 실용적인 인사이트 제공
-- 간결하고 명확하게 작성
 """
 
             response = await self.llm.ainvoke(prompt)
 
             return SearchResult(
-                source="llm_basic_analysis",
+                source="llm_analysis",
                 content=response.content,
                 relevance_score=0.85,
-                metadata={
-                    "analysis_type": "basic_llm",
-                    "source_count": len(search_results),
-                    "analysis_date": self.current_date_str,
-                },
+                metadata={"analysis_type": "simple_llm"},
                 search_query=query,
             )
 
@@ -900,162 +942,107 @@ class RetrieverAgentY:
             return None
 
     def _create_enhanced_query_prompt(self, query: str) -> str:
-        """ReAct용 향상된 쿼리 프롬프트 (기존 로직 사용)"""
+        """ReAct용 향상된 프롬프트"""
         return f"""
-Research Query: {query}
+    Research this topic thoroughly: {query}
 
-SYSTEM DATE REFERENCE:
-- Current Date: {self.current_date_str} ({self.current_date_en})
-- Current Year: {self.current_year}
+    Current Date: {self.current_date_str}
 
-SEARCH INSTRUCTIONS:
+    Please use the available tools to research this topic.
 
-1. TEMPORAL INTENT ANALYSIS:
-First, use your LLM reasoning to determine the temporal intent of this query:
-- Does the user want CURRENT/RECENT information?
-- Does the user want HISTORICAL information from a specific time period?
-- Does the user want GENERAL information regardless of time?
+    IMPORTANT: Use this exact format for tools:
+    Action: tool_name
+    Action Input: search_query
 
-2. SEARCH STRATEGY BASED ON INTENT:
-After determining intent, apply appropriate search strategy:
-- For CURRENT intent: Include current year or recent timeframe in searches
-- For HISTORICAL intent: Focus on the specific time period the user mentioned
-- For GENERAL intent: Search for comprehensive information without temporal bias
+    DO NOT use parentheses or function call syntax.
 
-3. ITERATION AND OPTIMIZATION:
-- Never repeat the exact same search query
-- If a search approach fails, try different keywords within the same temporal context
-- After 3 search attempts, synthesize available information
-- Always explain your temporal intent detection and strategy changes
+    Begin your research now.
+    """
 
-4. RESULT QUALITY:
-- Focus on insights appropriate to the detected temporal context
-- Clearly state any temporal limitations of the data you find
-- Provide actionable information within the appropriate time scope
-
-Previous search attempts: {len(self.search_history)}
-Session start: {self.current_date_str}
-
-Begin by analyzing the temporal intent of the query, then proceed with appropriate searches.
-"""
-
-    def _create_fallback_result(self, query: str, error_type: str) -> SearchResult:
-        """오류 시 폴백 결과 생성"""
-        fallback_content = f"""
-**분석 기준일: {self.current_date_str}**
-**오류 타입: {error_type}**
-
-검색 중 오류가 발생했지만, {self.current_year}년 현재 시점의 일반적인 정보를 기반으로 분석을 제공합니다:
-
-## 쿼리: {query}
-
-일반적인 시장 동향과 업계 표준을 바탕으로 한 기본 분석을 제공합니다.
-더 정확한 정보를 위해서는 다시 요청해 주시기 바랍니다.
-
-**데이터 한계사항:**
-- 실시간 검색 데이터를 확보하지 못함
-- 일반적인 업계 정보를 기반으로 함
-- 보다 정확한 분석을 위해서는 재요청 권장
-"""
-
-        return SearchResult(
-            source=f"fallback_{error_type}",
-            content=fallback_content,
-            relevance_score=0.4,
-            metadata={
-                "query": query,
-                "error_type": error_type,
-                "analysis_date": self.current_date_str,
-                "reference_year": self.current_year,
-            },
-            search_query=query,
-        )
-
-    def _create_improved_react_agent(self):
-        """개선된 ReAct 에이전트 생성 (기존 로직 유지)"""
+    def _create_react_agent(self):
+        """ReAct 에이전트 생성"""
         try:
+            # 기본 ReAct 프롬프트 가져오기
             base_prompt = hub.pull("hwchase17/react")
 
+            # 매우 명확한 시스템 지시사항
             system_instruction = f"""
-You are an intelligent research assistant with advanced temporal reasoning capabilities and strict anti-loop protection.
+    You are an expert research assistant for agricultural and food industry analysis.
+    Current Date: {self.current_date_str}
 
-AVAILABLE TOOLS - USE EXACT NAMES:
-- debug_web_search: For web searches
-- mock_vector_search: For vector database searches
-- mock_rdb_search: For relational database searches
-- mock_graph_db_search: For graph database searches
+    CRITICAL: TOOL USAGE FORMAT
+    When using tools, you MUST follow this EXACT format:
 
-MANDATORY ACTION FORMAT:
-Action: [EXACT_TOOL_NAME]
-Action Input: "search query"
+    Action: tool_name
+    Action Input: your_query_here
 
-TEMPORAL AWARENESS CONTEXT:
-- Today's Date: {self.current_date_str} ({self.current_date_en})
-- Current Year: {self.current_year}
-- Use LLM reasoning to determine temporal intent, not keyword matching
+    NEVER use function call syntax like tool_name("query") - this will cause errors.
 
-CRITICAL RULES:
-1. ALWAYS use exact tool names in Action field
-2. INTELLIGENT TEMPORAL DETECTION: Use LLM reasoning to understand query intent
-3. NO REPETITION: Never use the exact same search query twice
-4. TOOL DIVERSITY: If one tool fails, try a different tool type
-5. KEYWORD EVOLUTION: Each search must use different keywords/approach
-6. 3-STRIKE RULE: After 3 failed attempts, provide answer with available info
+    CORRECT EXAMPLES:
+    Action: debug_web_search
+    Action Input: MZ세대 소비 패턴 2025
 
-Remember: Always use EXACT tool names in Action field!
-System reference date: {self.current_date_str}
-"""
+    Action: mock_vector_search
+    Action Input: 농산물 가격 동향 분석
 
-            new_prompt_template = system_instruction + "\n\n" + base_prompt.template
-            react_prompt = PromptTemplate.from_template(new_prompt_template)
+    Action: mock_rdb_search
+    Action Input: 사과 영양성분 데이터
 
+    Action: mock_graph_db_search
+    Action Input: 농업 연구기관 관계 분석
+
+    AVAILABLE TOOLS:
+    1. debug_web_search - For latest web information, current events, breaking news
+    2. mock_vector_search - For document content analysis, research papers, news articles
+    3. mock_rdb_search - For structured data, statistics, numerical information
+    4. mock_graph_db_search - For entity relationships, knowledge graph analysis
+
+    RESEARCH STRATEGY:
+    1. Start with the most relevant tool for the query type
+    2. Use multiple tools if comprehensive analysis is needed
+    3. Always analyze results before providing final answer
+    4. Synthesize information from all sources
+
+    Remember: Use the EXACT Action/Action Input format shown above.
+    """
+
+            # 프롬프트 템플릿 생성
+            react_prompt = PromptTemplate(
+                template=system_instruction + "\n\n" + base_prompt.template,
+                input_variables=base_prompt.input_variables
+            )
+
+            # ReAct 에이전트 생성
             react_agent_runnable = create_react_agent(
                 self.llm, self.available_tools, react_prompt
             )
 
+            # 에이전트 실행기 - 더 관대한 설정
             return AgentExecutor(
                 agent=react_agent_runnable,
                 tools=self.available_tools,
                 verbose=True,
-                handle_parsing_errors=True,
-                max_iterations=5,
-                max_execution_time=60,
+                handle_parsing_errors=True,  # 파싱 에러 자동 처리
+                max_iterations=6,  # 반복 횟수 증가
+                max_execution_time=200,  # 실행 시간 충분히 확보
+                early_stopping_method="generate",
+                return_intermediate_steps=True,
             )
 
         except Exception as e:
-            print(f">> ReAct 에이전트 초기화 실패: {e}")
+            print(f"ReAct 에이전트 초기화 실패: {e}")
             return None
 
-    def _generate_fallback_analysis(self, query: str) -> str:
-        """검색 실패 시 기본 분석 (기존 로직 유지)"""
-        return f"""
-**분석 기준일: {self.current_date_str}**
-**참조 연도: {self.current_year}년**
 
-검색을 통해 구체적인 최신 데이터를 확보하지는 못했지만, {self.current_year}년 현재 시점의 일반적인 시장 동향을 기반으로 분석을 제공합니다:
-
-## 쿼리: {query}
-
-### 시장 현황 분석 ({self.current_year}년 기준)
-- 관련 시장의 일반적인 동향과 전망
-- 주요 성장 동력 및 변화 요인
-- 업계 표준 및 일반적인 관행
-
-### 주요 인사이트 ({self.current_year}년 현재)
-- 현재 시점에서의 주요 트렌드
-- 소비자 행동 변화
-- 기술 발전 및 혁신
-
-### 실행 가능한 제안
-- 현재 상황에서 고려할 수 있는 방안
-- 일반적인 모범 사례
-- 향후 모니터링 포인트
-
-**데이터 한계사항:**
-- 위 분석은 {self.current_date_str} 현재 접근 가능한 일반적 정보를 기반으로 함
-- 최신 실시간 데이터는 포함되지 않음
-- 보다 정확한 분석을 위해서는 최신 데이터 확보 필요
-"""
+    def _create_fallback_result(self, query: str, error_type: str) -> SearchResult:
+        """폴백 결과 생성"""
+        return SearchResult(
+            source=f"fallback_{error_type}",
+            content=f"검색 중 오류가 발생했습니다. 질문: {query}",
+            relevance_score=0.3,
+            metadata={"error_type": error_type},
+            search_query=query,
+        )
 
 
 # CriticAgent1: 정보량 충분성 평가
@@ -1250,6 +1237,8 @@ class ContextIntegratorAgent:
 # 차트 생성 지침
 CHART_GENERATION_INSTRUCTIONS = """
 ## 차트 데이터 생성 지침
+
+**중요: 테이블 데이터는 마크다운 테이블로 작성하고, 시각화가 필요한 데이터만 차트로 생성하세요.**
 
 보고서에 차트가 필요한 부분에서는 아래 형식을 정확히 따라 완전한 JSON 데이터를 생성해야 합니다.
 

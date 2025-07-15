@@ -13,13 +13,13 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-// 메타데이터 설정
+
 export const metadata: Metadata = {
   title: "Crowdworks B2B | 식품 데이터 인텔리전스",
   description:
     "크라우드웍스 B2B 서비스를 통해 식품 제조 및 개발을 위한 고품질 데이터 기반 인사이트를 확보하세요.",
   icons: {
-    icon: "/favicon.ico", // public/favicon.ico
+    icon: "/favicon.ico",
   },
   viewport: {
     width: "device-width",

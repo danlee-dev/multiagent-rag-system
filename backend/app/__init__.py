@@ -1,14 +1,3 @@
-"""
-RAG 시스템 메인 애플리케이션 패키지
-
-주요 모듈:
-- agents: 각종 AI 에이전트들
-- models: Pydantic 데이터 모델들
-- search_tools: 검색 도구들
-- utils: 유틸리티 함수들
-- main: FastAPI 메인 애플리케이션
-"""
-
 from .models import (
     AgentType,
     MessageType,
@@ -22,8 +11,7 @@ from .models import (
 
 from .agents import (
     PlanningAgent,
-    RetrieverAgentX,
-    RetrieverAgentY,
+    RetrieverAgent,
     CriticAgent1,
     CriticAgent2,
     ContextIntegratorAgent,
@@ -45,8 +33,7 @@ __all__ = [
     "QueryPlan",
     "CriticResult",
     "PlanningAgent",
-    "RetrieverAgentX",
-    "RetrieverAgentY",
+    "RetrieverAgent",
     "CriticAgent1",
     "CriticAgent2",
     "ContextIntegratorAgent",
