@@ -70,7 +70,7 @@ class ComplexityLevel(str, Enum):
 
 
 class ExecutionStrategy(str, Enum):
-    """실행 전략"""
+    """실행 전략 - 4단계 복잡도 대응"""
 
     DIRECT_ANSWER = "direct_answer"  # 직접 답변
     BASIC_SEARCH = "basic_search"  # 기본 검색
@@ -113,9 +113,7 @@ class QueryPlan(BaseModel):
 
     # 4단계 복잡도 관련 필드
     estimated_complexity: ComplexityLevel = Field(default=ComplexityLevel.MEDIUM)
-    execution_strategy: ExecutionStrategy = Field(
-        default=ExecutionStrategy.BASIC_SEARCH
-    )
+    execution_strategy: ExecutionStrategy = Field(default=ExecutionStrategy.BASIC_SEARCH)
 
     # 리소스 요구사항
     resource_requirements: Dict[str, Any] = Field(default_factory=dict)
@@ -124,9 +122,7 @@ class QueryPlan(BaseModel):
 
     # 메모리 및 사용자 컨텍스트
     memory_context_needed: bool = Field(default=True)
-    expected_expertise_level: ExpertiseLevel = Field(
-        default=ExpertiseLevel.INTERMEDIATE
-    )
+    expected_expertise_level: ExpertiseLevel = Field(default=ExpertiseLevel.INTERMEDIATE)
 
     # 실행 단계 정보
     execution_steps: List[str] = Field(default_factory=list)
@@ -188,152 +184,108 @@ class MemoryRetrievalResult(BaseModel):
     context_summary: str = Field(default="")
 
 
+class SimpleAgentMemory:
+    """간단한 에이전트별 메모리 클래스 (Pydantic 없이)"""
+
+    def __init__(self):
+        self.findings: List[str] = []
+        self.metrics: Dict[str, float] = {}
+        self.context: Dict[str, Any] = {}
+
+    def add_finding(self, finding: str):
+        """발견사항 추가"""
+        self.findings.append(finding)
+
+    def update_metric(self, name: str, value: float):
+        """메트릭 업데이트"""
+        self.metrics[name] = value
+
+    def set_context(self, key: str, value: Any):
+        """컨텍스트 설정"""
+        self.context[key] = value
+
+
 class StreamingAgentState(BaseModel):
-    """향상된 스트리밍 상태 - 4단계 복잡도 지원"""
+    """스트리밍 에이전트 상태 - 4단계 복잡도 지원"""
 
-    # 기본 정보
-    original_query: str
-    current_iteration: int = Field(default=0, ge=0)
-    max_iterations: int = Field(default=2, ge=1, le=5)
-    start_time: str = Field(default_factory=lambda: datetime.now().isoformat())
+    # 기본 상태
+    original_query: str = ""
+    user_id: str = "default_user"
 
-    # 계획 정보
+    # 계획 및 실행 (Optional로 변경!)
     query_plan: Optional[QueryPlan] = None
-    planning_complete: bool = False
+    execution_mode: Optional[ExecutionStrategy] = None
 
-    # 실행 전략별 상태
-    execution_mode: ExecutionStrategy = Field(default=ExecutionStrategy.BASIC_SEARCH)
-    current_step: int = Field(default=0)
-    step_results: List[Dict[str, Any]] = Field(default_factory=list)
+    # 결과 상태
+    final_answer: str = ""
+    info_sufficient: bool = False
+    context_sufficient: bool = False
+    search_complete: bool = False
+    planning_complete: bool = False
 
     # 검색 결과
     graph_results_stream: List[SearchResult] = Field(default_factory=list)
     multi_source_results_stream: List[SearchResult] = Field(default_factory=list)
-    memory_results_stream: List[SearchResult] = Field(default_factory=list)
 
-    # Agent 상태
-    x_active: bool = False
-    y_active: bool = False
-    memory_active: bool = False
-    search_complete: bool = False
+    # 통합 결과
+    integrated_context: str = ""
 
-    # Critic 평가 결과
+    # 반복 제어
+    current_iteration: int = 0
+    max_iterations: int = 3
+
+    # 메모리 컨텍스트
+    memory_context: str = ""
+    additional_context: str = ""
+
+    # Critic 결과
     critic1_result: Optional[CriticResult] = None
     critic2_result: Optional[CriticResult] = None
-    info_sufficient: bool = False
-    context_sufficient: bool = False
 
-    # 최종 결과
-    integrated_context: str = ""
-    final_answer: str = ""
+    # 단계별 결과 추적
+    step_results: Dict[str, Any] = Field(default_factory=dict)
 
-    # 사용자 및 메모리 컨텍스트
-    user_context: UserContext = Field(default_factory=UserContext)
-    memory_context: str = Field(default="")
-    additional_context: str = Field(default="")
+    # 에이전트 메모리 (선택적 - Simple 클래스 사용)
+    agent_memories: Dict[str, Any] = Field(default_factory=dict)
 
-    # Agent 메모리 관리
-    agent_memories: Dict[AgentType, AgentMemory] = Field(default_factory=dict)
+    # X 에이전트 힌트
+    x_extracted_hints: List[Dict[str, Any]] = Field(default_factory=list)
 
-    # 기존 메서드들
-    def should_use_react(self) -> bool:
-        """ReAct 에이전트 사용 여부 판단"""
-        return self.execution_mode in [
-            ExecutionStrategy.FULL_REACT,
-            ExecutionStrategy.MULTI_AGENT,
-        ]
+    def get_complexity_level(self) -> str:
+        """복잡도 레벨 반환"""
+        if self.query_plan and hasattr(self.query_plan, 'estimated_complexity'):
+            return str(self.query_plan.estimated_complexity)
+        return "medium"
 
-    def should_use_basic_search(self) -> bool:
-        """기본 검색 사용 여부 판단"""
-        return self.execution_mode == ExecutionStrategy.BASIC_SEARCH
-
-    def should_use_direct_answer(self) -> bool:
-        """직접 답변 사용 여부 판단"""
-        return self.execution_mode == ExecutionStrategy.DIRECT_ANSWER
-
-    def get_complexity_level(self) -> ComplexityLevel:
-        """현재 복잡도 레벨 반환"""
-        if not self.query_plan:
-            return ComplexityLevel.MEDIUM
-        return self.query_plan.estimated_complexity
-
-    def get_expected_processing_time(self) -> str:
-        """예상 처리 시간 반환"""
-        if not self.query_plan:
-            return "medium"
-        return self.query_plan.estimated_processing_time
-
-    def add_step_result(self, step_name: str, result: Any):
-        """단계별 결과 기록"""
-        self.step_results.append(
-            {
-                "step": step_name,
-                "result": result,
-                "timestamp": datetime.now().isoformat(),
-            }
-        )
-        self.current_step += 1
-
-    # 새로 추가된 메서드들
     def add_graph_result(self, result: SearchResult):
-        """Graph DB 검색 결과 추가"""
+        """Graph DB 결과 추가"""
         self.graph_results_stream.append(result)
 
     def add_multi_source_result(self, result: SearchResult):
-        """Multi-source 검색 결과 추가"""
+        """Multi Source 결과 추가"""
         self.multi_source_results_stream.append(result)
 
-    def add_memory_result(self, result: SearchResult):
-        """메모리 검색 결과 추가"""
-        self.memory_results_stream.append(result)
+    def add_step_result(self, step_name: str, result: Any):
+        """단계별 결과 추가"""
+        self.step_results[step_name] = result
+
+    def get_agent_memory(self, agent_type: AgentType):
+        """에이전트별 메모리 반환"""
+        agent_key = str(agent_type)
+        if agent_key not in self.agent_memories:
+            self.agent_memories[agent_key] = SimpleAgentMemory()
+        return self.agent_memories[agent_key]
 
     def should_terminate(self) -> bool:
-        """최대 반복 횟수 도달 여부 체크"""
+        """종료 조건 확인"""
         return self.current_iteration >= self.max_iterations
 
     def reset_for_new_iteration(self):
         """새로운 반복을 위한 상태 리셋"""
         self.current_iteration += 1
         self.search_complete = False
-        self.x_active = False
-        self.y_active = False
-        self.memory_active = False
-
-    def clear_search_results(self):
-        """검색 결과 초기화 (완전 재시작시)"""
-        self.graph_results_stream.clear()
-        self.multi_source_results_stream.clear()
-        self.memory_results_stream.clear()
-
-    def get_total_results_count(self) -> int:
-        """전체 검색 결과 개수 반환"""
-        return (
-            len(self.graph_results_stream)
-            + len(self.multi_source_results_stream)
-            + len(self.memory_results_stream)
-        )
-
-    def get_agent_memory(self, agent_type: AgentType) -> AgentMemory:
-        """특정 에이전트의 메모리 반환 (없으면 새로 생성)"""
-        if agent_type not in self.agent_memories:
-            self.agent_memories[agent_type] = AgentMemory(agent_type=agent_type)
-        return self.agent_memories[agent_type]
-
-    def update_agent_memory(self, agent_type: AgentType, memory: AgentMemory):
-        """특정 에이전트의 메모리 업데이트"""
-        self.agent_memories[agent_type] = memory
-
-    def add_agent_finding(self, agent_type: AgentType, finding: str):
-        """특정 에이전트에 발견사항 추가"""
-        memory = self.get_agent_memory(agent_type)
-        memory.add_finding(finding)
-
-    def get_user_id(self) -> str:
-        """사용자 ID 반환"""
-        return getattr(self.user_context, "user_id", "default_user")
 
 
-# 추가 모델들
 class ChartData(BaseModel):
     """차트 데이터"""
 
@@ -393,6 +345,7 @@ __all__ = [
     "QueryPlan",
     "CriticResult",
     "AgentMemory",
+    "SimpleAgentMemory",
     "UserContext",
     "MemoryRetrievalResult",
     "StreamingAgentState",

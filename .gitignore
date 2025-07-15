@@ -183,6 +183,7 @@ yarn-error.log*
 
 # Test reports
 /test-report/
+**/test-report/
 coverage/
 .nyc_output
 

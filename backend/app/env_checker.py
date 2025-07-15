@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # .env 파일 로드
-load_dotenv()
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 
 def check_api_keys():

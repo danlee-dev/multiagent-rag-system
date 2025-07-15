@@ -11,11 +11,9 @@ from typing import Dict, List, Any
 from langchain_core.tools import tool
 
 # 로컬 mock_databases 파일에서 DB 인스턴스 생성 함수를 가져옵니다.
-from mock_databases import create_mock_databases
+from .mock_databases import create_mock_databases
 
-# 1. 스크립트 시작 시 Mock DB 인스턴스들을 한 번만 생성합니다.
-#    - 이렇게 하면 매번 도구를 호출할 때마다 DB를 새로 초기화하는 것을 방지할 수 있습니다.
-#    - MockWebSearch는 실제 API를 사용하는 debug_web_search로 대체하므로 '_'로 무시합니다.
+
 mock_graph_db, mock_vector_db, mock_rdb = create_mock_databases()
 
 

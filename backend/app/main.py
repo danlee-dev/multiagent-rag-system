@@ -17,13 +17,13 @@ from pydantic import BaseModel
 load_dotenv()
 
 # env_checker 사용
-from env_checker import check_api_keys
+from .env_checker import check_api_keys
 
 check_api_keys()
 
 # 이제 다른 모듈들 import
-from mock_databases import create_mock_databases
-from models import (
+from .mock_databases import create_mock_databases
+from .models import (
     AgentType,
     DatabaseType,
     QueryPlan,
@@ -34,8 +34,9 @@ from models import (
     StreamingAgentState,
     ExecutionStrategy,
     ComplexityLevel,
+    SimpleAgentMemory,  # 새로 추가
 )
-from agents import (
+from .agents import (
     PlanningAgent,
     RetrieverAgentX,
     RetrieverAgentY,
@@ -49,7 +50,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 # 새로운 계층 메모리 시스템 import
-from hierarchical_memory import HierarchicalMemorySystem, ConversationMemory
+from .hierarchical_memory import HierarchicalMemorySystem, ConversationMemory
 
 
 # Request/Response 모델들
@@ -160,37 +161,37 @@ class RAGWorkflow:
         return self.graph.compile(checkpointer=self.memory)
 
     def route_by_4level_complexity(self, state: StreamingAgentState) -> str:
-        """4단계 복잡도 기반 라우팅 - execution_mode 매핑 수정"""
+        print("\n>> route_by_4level_complexity 시작")
+
         if not state.query_plan:
-            # 기본값 설정
-            state.execution_mode = "basic_search"
+            print("- query_plan 없음, medium으로 기본 라우팅")
+            state.execution_mode = ExecutionStrategy.BASIC_SEARCH
             return "medium"
 
-        complexity = state.query_plan.estimated_complexity
+        execution_strategy = state.query_plan.execution_strategy
+        print(f"- query_plan.execution_strategy: {execution_strategy}")
 
-        print(f"\n>> 라우팅 결정: 복잡도 = {complexity}")
+        # execution_mode를 여기서 설정!
+        state.execution_mode = execution_strategy
+        print(f"- state.execution_mode 설정: {state.execution_mode}")
 
-        # 복잡도에 따른 execution_mode 설정 및 라우팅
-        if hasattr(state.query_plan, "estimated_complexity"):
-            complexity_str = str(complexity).lower()
-
-            if "simple" in complexity_str:
-                state.execution_mode = "direct_answer"
-                return "simple"
-            elif "medium" in complexity_str:
-                state.execution_mode = "basic_search"
-                return "medium"
-            elif "super" in complexity_str:
-                state.execution_mode = "multi_agent"
-                return "super_complex"
-            elif "complex" in complexity_str:
-                state.execution_mode = "full_react"
-                return "complex"
-
-        # 기본값
-        state.execution_mode = "basic_search"
-        print(f">> 설정된 execution_mode: {state.execution_mode}")
-        return "medium"
+        # 라우팅 결정 (Enum 비교)
+        if execution_strategy == ExecutionStrategy.DIRECT_ANSWER:
+            print("- 라우팅: simple")
+            return "simple"
+        elif execution_strategy == ExecutionStrategy.BASIC_SEARCH:
+            print("- 라우팅: medium")
+            return "medium"
+        elif execution_strategy == ExecutionStrategy.FULL_REACT:
+            print("- 라우팅: complex")
+            return "complex"
+        elif execution_strategy == ExecutionStrategy.MULTI_AGENT:
+            print("- 라우팅: super_complex")
+            return "super_complex"
+        else:
+            print(f"- 알 수 없는 전략 ({execution_strategy}), medium으로 기본 라우팅")
+            state.execution_mode = ExecutionStrategy.BASIC_SEARCH
+            return "medium"
 
     async def planning_node(self, state: StreamingAgentState) -> StreamingAgentState:
         print("\n>>> PLANNING 단계 시작")
@@ -656,11 +657,11 @@ class RAGWorkflow:
                 # 사용자 프로필 업데이트
                 self._update_user_interaction_pattern(user_id, query)
 
-                # execution_mode를 valid한 값으로 초기화
+                # execution_mode를 None으로 초기화하여 planning에서 결정하도록 함
                 new_input = {
                     "original_query": query,
                     "user_id": user_id,
-                    "query_plan": None,
+                    # query_plan과 execution_mode는 Optional이므로 생략
                     "final_answer": "",
                     "info_sufficient": False,
                     "context_sufficient": False,
@@ -672,7 +673,6 @@ class RAGWorkflow:
                     "max_iterations": 3,
                     "memory_context": "",
                     "additional_context": "",
-                    "execution_mode": "basic_search",  # None 대신 기본값 사용
                 }
 
                 last_state = None
@@ -745,8 +745,6 @@ class RAGWorkflow:
 
                 else:
                     print("\n>> 복잡한 보고서 경로 처리 (COMPLEX/SUPER_COMPLEX)")
-
-                    from models import StreamingAgentState
 
                     state_obj = StreamingAgentState(
                         original_query=last_state.get("original_query", query),
@@ -919,7 +917,6 @@ class RAGWorkflow:
         )
 
 
-# FastAPI 앱 초기화
 app = FastAPI(
     title="RAG System API",
     description="Multi-Agent RAG System with Hierarchical Memory",
@@ -931,16 +928,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# RAG 워크플로우 인스턴스 생성
 rag_workflow = RAGWorkflow()
-
 
 @app.post("/api/query/stream")
 async def stream_query(request: QueryRequest):
@@ -949,46 +943,30 @@ async def stream_query(request: QueryRequest):
         conversation_id=request.conversation_id,
         user_id=request.user_id,
     )
-    # 스트리밍 헤더 추가
     response.headers["Cache-Control"] = "no-cache"
     response.headers["Connection"] = "keep-alive"
-    response.headers["X-Accel-Buffering"] = "no"  # nginx 버퍼링 방지
+    response.headers["X-Accel-Buffering"] = "no"
     return response
-
 
 @app.get("/api/memory/stats")
 async def get_memory_stats(user_id: str = None):
-    """메모리 통계 조회"""
     return rag_workflow.get_memory_summary(user_id=user_id)
-
 
 @app.post("/api/memory/save")
 async def save_memory_checkpoint():
-    """메모리 체크포인트 저장"""
     rag_workflow.save_memory_checkpoint()
     return {"status": "메모리 체크포인트가 저장되었습니다."}
 
-
 @app.post("/api/memory/load")
 async def load_memory_checkpoint():
-    """메모리 체크포인트 로드"""
     rag_workflow.load_memory_checkpoint()
     return {"status": "메모리 체크포인트가 로드되었습니다."}
 
-
 @app.get("/api/health")
 async def health_check():
-    """헬스 체크 엔드포인트"""
     memory_stats = rag_workflow.get_memory_summary()
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "memory_info": memory_stats,
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    print(">> FastAPI RAG System with Hierarchical Memory 시작")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

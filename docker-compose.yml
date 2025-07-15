@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/.env:/app/.env
+    working_dir: /app
+    env_file:
+      - ./backend/.env
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    networks:
+      - rag-network
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules  # node_modules 캐싱
+    working_dir: /app
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    stdin_open: true
+    tty: true
+    networks:
+      - rag-network
+    depends_on:
+      - backend
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  node_modules:

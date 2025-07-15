@@ -14,7 +14,7 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
 from langchain import hub
 
-from models import (
+from .models import (
     AgentType,
     DatabaseType,
     QueryPlan,
@@ -26,20 +26,17 @@ from models import (
     ExecutionStrategy,
     ComplexityLevel,
 )
-from utils import create_agent_message
+from .utils import create_agent_message
 
-from search_tools import (
+from .search_tools import (
     debug_web_search,
     mock_rdb_search,
     mock_vector_search,
     mock_graph_db_search,
 )
 
-
-# PlanningAgent: ToT(Tree of Thoughts) 적용된 쿼리 분석 및 작업 플랜 수립 담당
 from typing import Dict, List, Optional
 from langchain_openai import ChatOpenAI
-from models import StreamingAgentState, QueryPlan, AgentType
 import re
 
 
@@ -84,7 +81,6 @@ class PlanningAgent:
             "MEDIUM": "medium",
             "COMPLEX": "complex",
             "SUPER_COMPLEX": "super_complex",
-            # 이미 소문자인 경우도 처리
             "simple": "simple",
             "medium": "medium",
             "complex": "complex",
@@ -441,31 +437,6 @@ class RetrieverAgentX:
         return keywords[:3]
 
 
-# RetrieverAgentY: Multi-Source 검색 + 피드백
-import asyncio
-import time
-from typing import Dict, List, Set
-from langchain_openai import ChatOpenAI
-from langchain.agents import AgentExecutor, create_react_agent
-from langchain.prompts import PromptTemplate
-from langchain import hub
-from models import StreamingAgentState, SearchResult
-from search_tools import (
-    debug_web_search,
-    mock_vector_search,
-    mock_rdb_search,
-    mock_graph_db_search,
-)
-
-
-import time
-import asyncio
-from datetime import datetime
-from typing import Set, Dict
-from langchain_openai import ChatOpenAI
-from langchain import hub
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain.prompts import PromptTemplate
 
 
 class RetrieverAgentY:
@@ -506,15 +477,35 @@ class RetrieverAgentY:
             print("- 처리할 쿼리가 없어 RETRIEVER_Y를 종료합니다.")
             return state
 
+        # 복잡도 정보 추출
         complexity_level = state.get_complexity_level()
+
+        # execution_mode 확인 (Enum 또는 None)
         execution_strategy = state.execution_mode
+        if not execution_strategy and state.query_plan:
+            execution_strategy = state.query_plan.execution_strategy
+
+        # 여전히 없으면 복잡도로 추론
+        if not execution_strategy:
+            from .models import ExecutionStrategy
+            if complexity_level == "super_complex":
+                execution_strategy = ExecutionStrategy.MULTI_AGENT
+            elif complexity_level == "complex":
+                execution_strategy = ExecutionStrategy.FULL_REACT
+            elif complexity_level == "medium":
+                execution_strategy = ExecutionStrategy.BASIC_SEARCH
+            else:
+                execution_strategy = ExecutionStrategy.DIRECT_ANSWER
+
         original_query = state.query_plan.sub_queries[0]
 
         print(f"- 복잡도: {complexity_level}")
         print(f"- 실행 전략: {execution_strategy}")
         print(f"- 원본 쿼리: {original_query}")
 
-        # 복잡도별 실행 분기
+        # 실행 전략에 따른 분기 (Enum 비교)
+        from .models import ExecutionStrategy
+
         if execution_strategy == ExecutionStrategy.DIRECT_ANSWER:
             # SIMPLE - 검색 없이 바로 패스
             print("- SIMPLE 레벨: 검색 생략")
@@ -522,19 +513,24 @@ class RetrieverAgentY:
 
         elif execution_strategy == ExecutionStrategy.BASIC_SEARCH:
             # MEDIUM - 기본 검색만 수행
+            print("- MEDIUM 레벨: 기본 검색 실행")
             return await self._execute_basic_search(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.FULL_REACT:
             # COMPLEX - 풀 ReAct 에이전트 활용
+            print("- COMPLEX 레벨: 풀 ReAct 실행")
             return await self._execute_full_react(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.MULTI_AGENT:
             # SUPER_COMPLEX - 다단계 협업 검색
+            print("- SUPER_COMPLEX 레벨: 다중 에이전트 실행")
             return await self._execute_multi_agent_search(state, original_query)
 
         else:
             # 기본값 - MEDIUM으로 처리
+            print(f"- 알 수 없는 전략 ({execution_strategy}): 기본 검색으로 대체")
             return await self._execute_basic_search(state, original_query)
+
 
     async def _execute_basic_search(
         self, state: StreamingAgentState, query: str
@@ -1250,10 +1246,6 @@ class ContextIntegratorAgent:
         return response.content
 
 
-import re
-from typing import AsyncGenerator, Dict, List, Any
-from langchain_openai import ChatOpenAI
-from models import StreamingAgentState
 
 # 차트 생성 지침
 CHART_GENERATION_INSTRUCTIONS = """
