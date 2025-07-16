@@ -34,11 +34,60 @@ from .models import (
 )
 from .search_tools import (
     debug_web_search,
-    mock_graph_db_search,
+    graph_db_search,
     mock_rdb_search,
     mock_vector_search,
 )
 from .utils import create_agent_message
+
+class DataExtractor:
+    """검색 결과에서 실제 수치 데이터를 추출하는 클래스"""
+
+    def __init__(self):
+        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    async def extract_numerical_data(self, search_results: List[SearchResult], query: str) -> Dict[str, Any]:
+        """검색 결과에서 수치 데이터를 추출"""
+
+
+        combined_text = ""
+        for result in search_results:
+            combined_text += f"{result.content}\n"
+
+        prompt = f"""
+        다음 텍스트에서 숫자, 퍼센트, 통계 데이터를 추출하고 JSON 형태로 정리해주세요.
+
+        원본 질문: {query}
+
+        텍스트:
+        {combined_text[:]}  # 너무 길면 잘라서
+
+        다음 형식으로 추출해주세요:
+        {{
+            "extracted_numbers": [
+                {{"value": 숫자, "unit": "단위", "context": "설명", "source": "출처"}}
+            ],
+            "percentages": [
+                {{"value": 숫자, "context": "설명"}}
+            ],
+            "trends": [
+                {{"period": "기간", "change": "변화율", "description": "설명"}}
+            ],
+            "categories": {{
+                "category_name": {{"value": 숫자, "description": "설명"}}
+            }}
+        }}
+
+        실제 숫자가 없으면 빈 배열이나 객체를 반환하세요.
+        """
+
+        try:
+            response = await self.llm.ainvoke(prompt)
+            return json.loads(response.content)
+        except:
+            return {"extracted_numbers": [], "percentages": [], "trends": [], "categories": {}}
+
+
 
 class PlanningAgent:
     """
@@ -365,7 +414,7 @@ class RetrieverAgent:
             debug_web_search,
             mock_vector_search,
             mock_rdb_search,
-            mock_graph_db_search,
+            graph_db_search,
         ]
 
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
@@ -653,7 +702,7 @@ class RetrieverAgent:
             for keyword in keywords[:2]:  # 상위 2개만
                 graph_result = await loop.run_in_executor(
                     self.thread_pool,
-                    lambda k=keyword: mock_graph_db_search.invoke({"query": k})
+                    lambda k=keyword: graph_db_search.invoke({"query": k})
                 )
 
                 if isinstance(graph_result, dict) and "nodes" in graph_result:
@@ -988,14 +1037,14 @@ class RetrieverAgent:
     Action: mock_rdb_search
     Action Input: 사과 영양성분 데이터
 
-    Action: mock_graph_db_search
+    Action: graph_db_search
     Action Input: 농업 연구기관 관계 분석
 
     AVAILABLE TOOLS:
     1. debug_web_search - For latest web information, current events, breaking news
     2. mock_vector_search - For document content analysis, research papers, news articles
     3. mock_rdb_search - For structured data, statistics, numerical information
-    4. mock_graph_db_search - For entity relationships, knowledge graph analysis
+    4. graph_db_search - For entity relationships, knowledge graph analysis
 
     RESEARCH STRATEGY:
     1. Start with the most relevant tool for the query type
@@ -1238,14 +1287,30 @@ class ContextIntegratorAgent:
 CHART_GENERATION_INSTRUCTIONS = """
 ## 차트 데이터 생성 지침
 
-**중요: 테이블 데이터는 마크다운 테이블로 작성하고, 시각화가 필요한 데이터만 차트로 생성하세요.**
+**중요: 모든 차트에는 데이터 출처를 명시해야 합니다.**
 
 보고서에 차트가 필요한 부분에서는 아래 형식을 정확히 따라 완전한 JSON 데이터를 생성해야 합니다.
 
-### 올바른 차트 형식:
+### 실제 데이터 기반 차트 형식:
 {{CHART_START}}
-{"title": "타겟 세그먼트별 관심사 분포", "type": "pie", "data": {"labels": ["환경친화성", "가성비", "브랜드 신뢰도", "건강 기능성", "SNS 트렌드"], "datasets": [{"label": "관심도 (%)", "data": [35, 25, 20, 15, 5]}]}}
+{"title": "지역별 물류 경로 효율성 (실제 데이터)", "type": "line", "data": {"labels": ["서울", "부산", "대전", "광주"], "datasets": [{"label": "배송 시간 (시간)", "data": [4, 3, 5, 4]}]}, "source": "실제 추출 데이터", "data_type": "real"}
 {{CHART_END}}
+
+### 추정 데이터 기반 차트 형식:
+{{CHART_START}}
+{"title": "타겟 세그먼트별 관심사 분포 (추정 데이터)", "type": "pie", "data": {"labels": ["환경친화성", "가성비", "브랜드 신뢰도"], "datasets": [{"label": "관심도 (%)", "data": [35, 25, 20]}]}, "source": "시장조사 기반 추정", "data_type": "estimated"}
+{{CHART_END}}
+
+### 데이터 출처 표기 규칙:
+1. **실제 데이터**: 검색 결과에서 추출된 수치 → 제목에 "(실제 데이터)" 표시, "data_type": "real"
+2. **추정 데이터**: 일반적인 시장 지식 기반 → 제목에 "(추정 데이터)" 표시, "data_type": "estimated"
+3. **source 필드**: 데이터의 구체적 출처 명시
+4. **차트 하단 설명**: 각 차트마다 데이터 신뢰도와 출처 간단 설명 추가
+
+### 필수 사항:
+- 모든 차트 제목에 데이터 유형 명시 (실제/추정)
+- source와 data_type 필드 반드시 포함
+- 차트별로 데이터 신뢰도 설명 제공
 """
 
 # 보고서 템플릿 정의
@@ -1731,7 +1796,6 @@ TRANSLATIONS = {
     },
 }
 
-
 class ReportGeneratorAgent:
     def __init__(self):
         self.streaming_chat = ChatOpenAI(
@@ -1740,16 +1804,16 @@ class ReportGeneratorAgent:
         self.non_streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         self.agent_type = "REPORT_GENERATOR"
         self.use_plan_first = False
+        self.data_extractor = DataExtractor()
 
     async def generate_streaming(
         self, state: StreamingAgentState
     ) -> AsyncGenerator[str, None]:
-        """실시간 스트리밍으로 답변을 생성 - 메모리 컨텍스트 포함"""
-        print("\n>> STREAMING REPORT_GENERATOR 시작")
+        """실제 데이터 기반 스트리밍으로 답변을 생성"""
+        print("\n>> ENHANCED STREAMING REPORT_GENERATOR 시작")
         integrated_context = state.integrated_context
         original_query = state.original_query
 
-        # 메모리 컨텍스트 추출
         memory_context = getattr(state, "memory_context", "")
         user_context = getattr(state, "user_context", None)
 
@@ -1765,19 +1829,24 @@ class ReportGeneratorAgent:
             yield error_msg
             return
 
-        # 질문 복잡도 분석 (사용자 전문성 수준 고려)
+        # 검색 결과에서 실제 데이터 추출
+        all_results = getattr(state, 'graph_results_stream', []) + getattr(state, 'multi_source_results_stream', [])
+        extracted_data = await self.data_extractor.extract_numerical_data(all_results, original_query)
+
+        print(f"- 추출된 실제 데이터: {len(extracted_data.get('extracted_numbers', []))}개 수치")
+
+        # 실제 데이터 기반 차트 생성
+        real_charts = await self._create_data_driven_charts(extracted_data, original_query)
+        print(f"- 생성된 실제 데이터 차트: {len(real_charts)}개")
+
         complexity_analysis = self._analyze_query_complexity(
             original_query, user_context
         )
         print(f"- 질문 복잡도: {complexity_analysis['report_type']}")
-        print(f"- 권장 길이: {complexity_analysis['recommended_length']}")
-        print(
-            f"- 사용자 전문성: {complexity_analysis.get('user_expertise', 'intermediate')}"
-        )
 
-        # 메모리 컨텍스트를 포함한 프롬프트 생성
-        prompt = self._create_prompt(
-            original_query, integrated_context, memory_context, user_context
+        # 실제 데이터를 포함한 프롬프트 생성
+        prompt = self._create_enhanced_prompt(
+            original_query, integrated_context, memory_context, user_context, extracted_data, real_charts
         )
         full_response = ""
 
@@ -1792,7 +1861,155 @@ class ReportGeneratorAgent:
             full_response = error_msg
 
         state.final_answer = full_response
-        print(f"\n- 실시간 스트리밍 완료")
+        print(f"\n- 실제 데이터 기반 스트리밍 완료")
+
+    async def _create_data_driven_charts(self, extracted_data: Dict, query: str) -> List[Dict]:
+        """추출된 실제 데이터를 기반으로 차트 생성"""
+        charts = []
+
+        # 1. 퍼센트 데이터가 있으면 파이 차트
+        percentages = extracted_data.get('percentages', [])
+        if len(percentages) >= 2:
+            labels = [p['context'][:20] + "..." if len(p['context']) > 20 else p['context'] for p in percentages[:5]]
+            values = [p['value'] for p in percentages[:5]]
+
+            charts.append({
+                "title": f"{query} 관련 비율 분석 (실제 데이터)",
+                "type": "pie",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{"label": "비율 (%)", "data": values}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            })
+
+        # 2. 카테고리 데이터가 있으면 바 차트
+        categories = extracted_data.get('categories', {})
+        if len(categories) >= 2:
+            labels = list(categories.keys())[:6]
+            values = [categories[label].get('value', 0) for label in labels]
+
+            charts.append({
+                "title": f"{query} 카테고리별 분석 (실제 데이터)",
+                "type": "bar",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{"label": "수치", "data": values}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            })
+
+        # 3. 트렌드 데이터가 있으면 라인 차트
+        trends = extracted_data.get('trends', [])
+        if len(trends) >= 2:
+            labels = [t['period'] for t in trends[:6]]
+            values = []
+            for t in trends[:6]:
+                change_str = str(t.get('change', '0'))
+                numbers = re.findall(r'-?\d+\.?\d*', change_str)
+                values.append(float(numbers[0]) if numbers else 0)
+
+            charts.append({
+                "title": f"{query} 시간별 변화 추이 (실제 데이터)",
+                "type": "line",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{"label": "변화율", "data": values}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            })
+
+        # 4. 일반 수치 데이터가 있으면 바 차트
+        numbers = extracted_data.get('extracted_numbers', [])
+        if len(numbers) >= 2:
+            labels = [n['context'][:15] + "..." if len(n['context']) > 15 else n['context'] for n in numbers[:5]]
+            values = [n['value'] for n in numbers[:5]]
+            units = [n.get('unit', '') for n in numbers[:5]]
+
+            charts.append({
+                "title": f"{query} 주요 수치 분석 (실제 데이터)",
+                "type": "bar",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{"label": f"수치 ({units[0] if units[0] else '단위'})", "data": values}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            })
+
+        return charts
+
+    def _create_enhanced_prompt(
+        self, query: str, context: str, memory_context: str = "", user_context=None,
+        extracted_data: Dict = None, real_charts: List[Dict] = None
+    ) -> str:
+        """실제 데이터를 포함한 향상된 프롬프트 생성"""
+
+        # 기존 프롬프트 생성
+        base_prompt = self._create_prompt(query, context, memory_context, user_context)
+
+        # 실제 데이터 정보 추가
+        data_info = ""
+        if extracted_data:
+            data_info += "\n**검색 결과에서 추출된 실제 데이터:**\n"
+
+            if extracted_data.get('extracted_numbers'):
+                data_info += "주요 수치:\n"
+                for num in extracted_data['extracted_numbers'][:3]:
+                    data_info += f"- {num.get('value')} {num.get('unit', '')}: {num.get('context', '')}\n"
+
+            if extracted_data.get('percentages'):
+                data_info += "비율 데이터:\n"
+                for pct in extracted_data['percentages'][:3]:
+                    data_info += f"- {pct.get('value')}%: {pct.get('context', '')}\n"
+
+        # 실제 데이터 차트 정보 추가
+        chart_info = ""
+        if real_charts:
+            chart_info += "\n**사용 가능한 실제 데이터 기반 차트:**\n"
+            for i, chart in enumerate(real_charts, 1):
+                chart_json = json.dumps(chart, ensure_ascii=False)
+                chart_info += f"""
+{i}. {chart['title']}
+   {{CHART_START}}
+   {chart_json}
+   {{CHART_END}}
+   (출처: {chart['source']})
+"""
+
+        enhanced_instructions = f"""
+
+{data_info}
+
+{chart_info}
+
+**데이터 출처 표기 지침 (필수):**
+1. **실제 데이터 우선 사용**: 검색 결과에서 추출된 수치가 있으면 반드시 "(실제 데이터)"로 표시
+2. **추정 데이터 명시**: 일반 지식으로 생성한 차트는 "(추정 데이터)"로 표시
+3. **출처 신뢰도**: 각 차트에 데이터 신뢰도와 한계점 언급
+4. **차트 설명**: 모든 차트 아래에 데이터 출처와 해석 주의사항 제공
+
+**차트 사용 우선순위:**
+1. 실제 추출 데이터 차트 (최우선)
+2. 검색 결과 기반 추정 차트
+3. 일반 시장 지식 기반 차트 (최후)
+
+**실제 데이터 활용 지침:**
+1. **우선순위**: 위에 제공된 실제 데이터 기반 차트를 먼저 사용하세요 중요
+2. **데이터 출처 명시**: 각 차트에 "(실제 데이터)" 또는 "(추정 데이터)" 표시 중요
+3. **인사이트 제공**: 실제 데이터에서 발견되는 패턴이나 트렌드 해석
+4. **추가 차트**: 실제 데이터 차트가 부족한 경우에만 추정 데이터로 보완
+
+**차트 사용 규칙:**
+- 실제 데이터 차트가 있으면 반드시 사용하고 해석 제공
+- 차트별로 데이터 신뢰도 언급 (실제/추정)
+- 각 차트에 대한 구체적인 비즈니스 인사이트 제공
+"""
+
+        return base_prompt + enhanced_instructions
 
     def _analyze_query_complexity(self, query: str, user_context=None) -> dict:
         """질문의 복잡도와 요구되는 보고서 길이 분석 - 사용자 컨텍스트 포함"""
@@ -1807,50 +2024,18 @@ class ReportGeneratorAgent:
         query_lower = query.lower().strip()
         complexity_score = 0
 
-        # 복잡한 분석 요구 키워드
         complex_keywords = [
-            "보고서",
-            "report",
-            "전략",
-            "strategy",
-            "분석",
-            "analysis",
-            "계획",
-            "plan",
-            "로드맵",
-            "roadmap",
-            "컨설팅",
-            "consulting",
-            "상세",
-            "detailed",
-            "자세",
-            "comprehensive",
-            "심층",
-            "deep",
-            "종합",
-            "전체",
-            "완전",
-            "포괄적",
+            "보고서", "report", "전략", "strategy", "분석", "analysis",
+            "계획", "plan", "로드맵", "roadmap", "컨설팅", "consulting",
+            "상세", "detailed", "자세", "comprehensive", "심층", "deep",
+            "종합", "전체", "완전", "포괄적",
         ]
 
-        # 간단한 정보 요청 키워드
         simple_keywords = [
-            "간단히",
-            "briefly",
-            "짧게",
-            "요약",
-            "summary",
-            "개요",
-            "overview",
-            "뭐야",
-            "what is",
-            "알려줘",
-            "tell me",
-            "빠르게",
-            "quick",
+            "간단히", "briefly", "짧게", "요약", "summary", "개요", "overview",
+            "뭐야", "what is", "알려줘", "tell me", "빠르게", "quick",
         ]
 
-        # 점수 계산
         for keyword in complex_keywords:
             if keyword in query_lower:
                 complexity_score += 1.5
@@ -1859,13 +2044,11 @@ class ReportGeneratorAgent:
             if keyword in query_lower:
                 complexity_score -= 1.5
 
-        # 질문 길이도 고려
         if len(query) > 100:
             complexity_score += 1.5
         elif len(query) > 50:
             complexity_score += 0.5
 
-        # 사용자 전문성 수준 고려
         user_expertise = "intermediate"
         if user_context:
             expertise_level = getattr(user_context, "expertise_level", None)
@@ -1876,13 +2059,11 @@ class ReportGeneratorAgent:
                     else str(expertise_level)
                 )
 
-                # 전문가일수록 더 복잡한 보고서 선호
                 if user_expertise == "expert":
                     complexity_score += 1.0
                 elif user_expertise == "beginner":
                     complexity_score -= 0.5
 
-        # 보고서 타입 결정
         if complexity_score >= 3:
             report_type = "comprehensive"
             recommended_length = "2000-3000단어, 6-8개 섹션, 5-8개 차트"
@@ -1929,74 +2110,29 @@ class ReportGeneratorAgent:
         if not query_lower:
             return "general"
 
-        # 팀별 키워드 정의
         team_keywords = {
             "purchasing": [
-                "가격",
-                "시세",
-                "공급업체",
-                "조달",
-                "구매",
-                "원가",
-                "계약",
-                "비용",
-                "supplier",
-                "procurement",
-                "sourcing",
-                "vendor",
+                "가격", "시세", "공급업체", "조달", "구매", "원가", "계약", "비용",
+                "supplier", "procurement", "sourcing", "vendor",
             ],
             "marketing": [
-                "마케팅",
-                "브랜드",
-                "광고",
-                "캠페인",
-                "소비자",
-                "고객",
-                "타겟",
-                "sns",
-                "전략",
-                "marketing",
-                "brand",
-                "campaign",
-                "consumer",
+                "마케팅", "브랜드", "광고", "캠페인", "소비자", "고객", "타겟", "sns", "전략",
+                "marketing", "brand", "campaign", "consumer",
             ],
             "development": [
-                "개발",
-                "제품",
-                "영양",
-                "성분",
-                "기능성",
-                "연구",
-                "r&d",
-                "신제품",
-                "기술",
-                "development",
-                "nutrition",
-                "ingredient",
-                "innovation",
+                "개발", "제품", "영양", "성분", "기능성", "연구", "r&d", "신제품", "기술",
+                "development", "nutrition", "ingredient", "innovation",
             ],
             "general_affairs": [
-                "급식",
-                "직원",
-                "사내",
-                "구내식당",
-                "메뉴",
-                "식단",
-                "운영",
-                "만족도",
-                "cafeteria",
-                "employee",
-                "facility",
-                "office",
+                "급식", "직원", "사내", "구내식당", "메뉴", "식단", "운영", "만족도",
+                "cafeteria", "employee", "facility", "office",
             ],
         }
 
-        # 각 팀별 점수 계산
         scores = {}
         for team, keywords in team_keywords.items():
             scores[team] = sum(1 for keyword in keywords if keyword in query_lower)
 
-        # 가장 높은 점수의 팀 반환
         max_score = max(scores.values()) if scores.values() else 0
         if max_score == 0:
             return "general"
@@ -2016,7 +2152,6 @@ class ReportGeneratorAgent:
         report_type = complexity_analysis["report_type"]
         user_expertise = complexity_analysis["user_expertise"]
 
-        # 사용자 정보 추출
         user_name = ""
         user_preferences = {}
         if user_context:
@@ -2028,7 +2163,6 @@ class ReportGeneratorAgent:
             if preferences:
                 user_preferences = preferences
 
-        # 메모리 정보 처리
         memory_info = ""
         if memory_context:
             memory_info = f"""
@@ -2039,7 +2173,6 @@ class ReportGeneratorAgent:
 이전에 관심을 보인 주제나 전문 분야가 있다면 해당 내용을 보고서에 반영)
 """
 
-        # 개인화 정보
         personalization_info = ""
         if user_name:
             personalization_info += f"사용자 이름: {user_name}님\n"
@@ -2050,7 +2183,6 @@ class ReportGeneratorAgent:
             pref_items = [f"{k}: {v}" for k, v in user_preferences.items()]
             personalization_info += f"사용자 선호도: {', '.join(pref_items)}\n"
 
-        # 기본 프롬프트 생성
         base_prompt = self._create_base_prompt(
             language,
             complexity_analysis,
@@ -2060,7 +2192,6 @@ class ReportGeneratorAgent:
             personalization_info,
         )
 
-        # 팀별 템플릿 기반 프롬프트 생성
         team_prompt = self._generate_template_prompt(team_type, report_type, language)
 
         return base_prompt + team_prompt + CHART_GENERATION_INSTRUCTIONS
@@ -2077,7 +2208,6 @@ class ReportGeneratorAgent:
         """메모리 정보를 포함한 기본 프롬프트 생성"""
         user_expertise = complexity_analysis["user_expertise"]
 
-        # 전문성 수준에 따른 안내
         expertise_guidance = {
             "beginner": "기본 개념부터 차근차근 설명하고, 전문 용어 사용 시 쉬운 설명을 병행해주세요.",
             "intermediate": "실무에 도움이 되는 구체적인 정보와 실용적인 인사이트를 제공해주세요.",
@@ -2105,7 +2235,7 @@ class ReportGeneratorAgent:
 - 모든 답변은 반드시 한국어로 작성
 - 마크다운 형식 사용
 - 전문적이면서도 읽기 쉬운 한국어 사용
-- 차트를 적극적으로 활용(차트에 대한 간단 설명 및 인사이트 제공 필수)
+- **즁요: 차트를 적극적으로 활용 : 차트에 대한 간단 설명, 인사이트, 출처, (가상, 실제 데이터 여부) 명시**
 - 사용자의 이름이나 이전 대화 내용을 자연스럽게 참조하여 개인화된 보고서 작성
 
 **개인화 지침:**
@@ -2159,18 +2289,14 @@ You are a professional analyst at a global food company. Please create a profess
         self, team_type: str, report_type: str, language: str
     ) -> str:
         """템플릿 기반 프롬프트 생성"""
-        # 해당 팀과 복잡도에 맞는 템플릿 가져오기
         template = REPORT_TEMPLATES.get(team_type, {}).get(report_type)
         if not template:
-            # 기본 템플릿 사용
             template = REPORT_TEMPLATES.get("general", {}).get(report_type)
             if not template:
                 template = REPORT_TEMPLATES["general"]["comprehensive"]
 
-        # 번역 텍스트 가져오기
         translations = TRANSLATIONS[language]
 
-        # 프롬프트 생성
         role_desc = translations.get(template["role_description"], "")
 
         prompt = f"""
@@ -2182,14 +2308,12 @@ You are a professional analyst at a global food company. Please create a profess
 
 """
 
-        # 섹션별 프롬프트 생성
         for i, section in enumerate(template["sections"], 1):
             section_title = translations.get(section["key"], section["key"])
             prompt += f"""
 ### {i}. {section_title} ({section["words"]}단어)
 """
 
-            # 세부 항목들 추가
             if "details" in section:
                 for detail in section["details"]:
                     detail_text = translations.get(detail, f"- **{detail}**")
@@ -2206,7 +2330,6 @@ You are a professional analyst at a global food company. Please create a profess
 """
 
         return prompt
-
 
 # Enhanced SimpleAnswererAgent with Claude-level conversational ability
 class SimpleAnswererAgent:

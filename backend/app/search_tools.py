@@ -13,6 +13,8 @@ from langchain_core.tools import tool
 # 로컬 mock_databases 파일에서 DB 인스턴스 생성 함수를 가져옵니다.
 from .mock_databases import create_mock_databases
 
+# Neo4j 연결을 위한 import 추가
+from .neo4j_query import run_cypher
 
 mock_graph_db, mock_vector_db, mock_rdb = create_mock_databases()
 
@@ -118,37 +120,267 @@ def mock_vector_search(query: str) -> str:
         summary += f"   - 내용 미리보기: {content_preview}...\n\n"
     return summary
 
-
 @tool
-def mock_graph_db_search(query: str) -> str:
+def graph_db_search(query: str) -> str:
     """
-    Neo4j 지식 그래프(Knowledge Graph)에서 개체(노드) 간의 복잡한 관계나 연결 구조를 탐색하고 분석합니다.
-    - 사용 시점:
-      1. 특정 인물, 기관, 문서 간의 직접적 또는 간접적 관계를 파악해야 할 때 (예: 'A 연구원이 참여한 모든 보고서는?', 'B 회사와 협력 관계인 모든 기관을 알려줘')
-      2. 연결 경로, 영향력, 숨겨진 패턴을 찾아야 할 때 (예: 'X 기술이 어떤 논문들을 통해 Y 산업에 영향을 미쳤는지 경로를 추적해줘')
-      3. 여러 개체와 조건이 얽힌 복잡한 질문에 답해야 할 때 (예: 'KREI 소속 저자가 작성하고 '기후 변화'를 다루는 논문과 관련된 모든 키워드는?')
-    - 데이터 종류: 인물, 기관, 문서(뉴스/논문/보고서), 키워드 등의 개체(노드)와 이들을 연결하는 관계(엣지)로 구성된 그래프 데이터.
-    - 주의: 단순 통계 조회(RDB), 최신 뉴스 검색(Web Search), 문서 본문 검색(Vector Search)에는 적합하지 않습니다.
+    Neo4j 지식 그래프에서 농산물/수산물과 지역 정보를 검색합니다.
+
+    검색 가능한 정보:
+    - 농산물: product(품목명), category(분류) - 569개
+    - 수산물: product(품목명), fishState(상태) - 369개
+    - 지역: city(시/군), region(도/시) - 213개
+    - 관계: isFrom(품목 → 지역)
     """
-    print(f"Graph DB 검색 실행: {query}")
-    search_result = mock_graph_db.search(query)
-    nodes = search_result.get("nodes", [])
-    relationships = search_result.get("relationships", [])
-    if not nodes and not relationships:
-        return f"'{query}'에 대한 관련 개체나 관계를 찾을 수 없습니다."
-    summary = (
-        f"Graph DB 검색 결과: {len(nodes)}개 노드, {len(relationships)}개 관계 발견\n\n"
-    )
-    summary += "### 주요 노드:\n"
-    for node in nodes[:5]:
-        props = node.get("properties", {})
-        summary += (
-            f"- {props.get('name', node.get('id'))} (레이블: {node.get('labels')})\n"
-        )
-    summary += "\n### 주요 관계:\n"
-    for rel in relationships[:5]:
-        start_node = rel.get("start_node")
-        end_node = rel.get("end_node")
-        rel_type = rel.get("type")
-        summary += f"- ({start_node}) -[{rel_type}]-> ({end_node})\n"
-    return summary
+    print(f"Neo4j Graph DB 검색 실행: {query}")
+
+    try:
+        # 1. 키워드 추출 및 정제
+        keywords = _extract_and_clean_keywords(query)
+        print(f"추출된 키워드: {keywords}")
+
+        all_results = []
+
+        # 2. 각 키워드별 최적화된 검색
+        for keyword in keywords[:3]:
+            # 2-1. 농산물 검색
+            agricultural_results = _search_agricultural_products(keyword)
+            all_results.extend(agricultural_results)
+
+            # 2-2. 수산물 검색
+            marine_results = _search_marine_products(keyword)
+            all_results.extend(marine_results)
+
+            # 2-3. 지역 검색
+            region_results = _search_regions(keyword)
+            all_results.extend(region_results)
+
+        # 3. 중복 제거 및 관계 정보 추가
+        unique_results = _deduplicate_results(all_results)
+
+        # 4. 관계 정보 검색 (상위 결과 기준)
+        relationships = []
+        if unique_results:
+            relationships = _search_relationships(unique_results[:3])
+
+        # 5. 결과 포맷팅
+        if not unique_results and not relationships:
+            return f"'{query}'에 대한 관련 정보를 Neo4j에서 찾을 수 없습니다."
+
+        summary = f"Neo4j Graph DB 검색 결과: {len(unique_results)}개 항목, {len(relationships)}개 관계 발견\n\n"
+
+        # 노드 정보
+        if unique_results:
+            summary += "### 검색된 항목:\n"
+            for item in unique_results[:8]:
+                summary += _format_search_result(item)
+
+        # 관계 정보
+        if relationships:
+            summary += "\n### 연관 관계:\n"
+            for rel in relationships[:5]:
+                summary += f"- {rel['start_item']} → {rel['end_location']} ({rel['relationship']})\n"
+
+        print(f"- Neo4j 검색 완료: {len(unique_results)}개 항목, {len(relationships)}개 관계")
+        return summary
+
+    except Exception as e:
+        print(f"- Neo4j 검색 오류: {e}")
+        return f"Neo4j 검색 중 오류가 발생했습니다: {str(e)}"
+
+
+def _extract_and_clean_keywords(query: str) -> list:
+    """쿼리에서 Neo4j 검색에 유용한 키워드 추출"""
+    # 불용어 제거
+    stop_words = [
+        '의', '을', '를', '이', '가', '에', '에서', '로', '으로', '와', '과',
+        '는', '은', '도', '만', '알려줘', '검색', '찾아', '정보', '데이터',
+        '어디', '언제', '어떻게', '무엇', '누구', '왜'
+    ]
+
+    # 단어 분리 및 정제
+    words = query.replace(',', ' ').replace('.', ' ').split()
+    keywords = []
+
+    for word in words:
+        word = word.strip()
+        if len(word) > 1 and word not in stop_words:
+            keywords.append(word)
+
+    return keywords
+
+
+def _search_agricultural_products(keyword: str) -> list:
+    """농산물 검색 최적화"""
+    try:
+        # 정확한 매칭 우선
+        exact_query = """
+        MATCH (n:농산물)
+        WHERE n.product = $keyword
+        RETURN 'agricultural' as type, n.product as product, n.category as category,
+               labels(n) as labels, properties(n) as properties
+        """
+        exact_results = run_cypher(exact_query, {"keyword": keyword})
+
+        if exact_results:
+            print(f"  농산물 정확 매칭: {len(exact_results)}개")
+            return exact_results
+
+        # 부분 매칭
+        partial_query = """
+        MATCH (n:농산물)
+        WHERE n.product CONTAINS $keyword OR n.category CONTAINS $keyword
+        RETURN 'agricultural' as type, n.product as product, n.category as category,
+               labels(n) as labels, properties(n) as properties
+        LIMIT 5
+        """
+        partial_results = run_cypher(partial_query, {"keyword": keyword})
+        print(f"  농산물 부분 매칭: {len(partial_results)}개")
+        return partial_results
+
+    except Exception as e:
+        print(f"  농산물 검색 오류: {e}")
+        return []
+
+
+def _search_marine_products(keyword: str) -> list:
+    """수산물 검색 최적화"""
+    try:
+        # 정확한 매칭 우선
+        exact_query = """
+        MATCH (n:수산물)
+        WHERE n.product = $keyword
+        RETURN 'marine' as type, n.product as product, n.fishState as fishState,
+               labels(n) as labels, properties(n) as properties
+        """
+        exact_results = run_cypher(exact_query, {"keyword": keyword})
+
+        if exact_results:
+            print(f"  수산물 정확 매칭: {len(exact_results)}개")
+            return exact_results
+
+        # 부분 매칭
+        partial_query = """
+        MATCH (n:수산물)
+        WHERE n.product CONTAINS $keyword OR n.fishState CONTAINS $keyword
+        RETURN 'marine' as type, n.product as product, n.fishState as fishState,
+               labels(n) as labels, properties(n) as properties
+        LIMIT 5
+        """
+        partial_results = run_cypher(partial_query, {"keyword": keyword})
+        print(f"  수산물 부분 매칭: {len(partial_results)}개")
+        return partial_results
+
+    except Exception as e:
+        print(f"  수산물 검색 오류: {e}")
+        return []
+
+
+def _search_regions(keyword: str) -> list:
+    """지역 검색 최적화"""
+    try:
+        # 정확한 매칭 우선
+        exact_query = """
+        MATCH (n:Origin)
+        WHERE n.city = $keyword OR n.region = $keyword
+        RETURN 'region' as type, n.city as city, n.region as region,
+               labels(n) as labels, properties(n) as properties
+        """
+        exact_results = run_cypher(exact_query, {"keyword": keyword})
+
+        if exact_results:
+            print(f"  지역 정확 매칭: {len(exact_results)}개")
+            return exact_results
+
+        # 부분 매칭
+        partial_query = """
+        MATCH (n:Origin)
+        WHERE n.city CONTAINS $keyword OR n.region CONTAINS $keyword
+        RETURN 'region' as type, n.city as city, n.region as region,
+               labels(n) as labels, properties(n) as properties
+        LIMIT 5
+        """
+        partial_results = run_cypher(partial_query, {"keyword": keyword})
+        print(f"  지역 부분 매칭: {len(partial_results)}개")
+        return partial_results
+
+    except Exception as e:
+        print(f"  지역 검색 오류: {e}")
+        return []
+
+
+def _search_relationships(items: list) -> list:
+    """관계 정보 검색"""
+    relationships = []
+
+    try:
+        for item in items:
+            if item.get('type') in ['agricultural', 'marine']:
+                product_name = item.get('product')
+                if product_name:
+                    # 해당 품목의 생산지 찾기
+                    rel_query = """
+                    MATCH (product {product: $product_name})-[r:isFrom]->(location:Origin)
+                    RETURN r, location.city as city, location.region as region
+                    LIMIT 3
+                    """
+                    rel_results = run_cypher(rel_query, {"product_name": product_name})
+
+                    for rel in rel_results:
+                        relationships.append({
+                            'start_item': product_name,
+                            'end_location': f"{rel.get('city', '')} ({rel.get('region', '')})",
+                            'relationship': 'isFrom'
+                        })
+
+        print(f"  관계 검색: {len(relationships)}개")
+        return relationships
+
+    except Exception as e:
+        print(f"  관계 검색 오류: {e}")
+        return []
+
+
+def _deduplicate_results(results: list) -> list:
+    """결과 중복 제거"""
+    seen = set()
+    unique_results = []
+
+    for result in results:
+        # 고유 키 생성
+        if result.get('type') == 'agricultural':
+            key = f"agri_{result.get('product', '')}"
+        elif result.get('type') == 'marine':
+            key = f"marine_{result.get('product', '')}"
+        elif result.get('type') == 'region':
+            key = f"region_{result.get('city', '')}_{result.get('region', '')}"
+        else:
+            key = str(result)
+
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(result)
+
+    return unique_results
+
+
+def _format_search_result(item: dict) -> str:
+    """검색 결과 포맷팅"""
+    item_type = item.get('type', 'unknown')
+
+    if item_type == 'agricultural':
+        product = item.get('product', '알 수 없음')
+        category = item.get('category', '미분류')
+        return f"- 🌾 농산물: {product} (분류: {category})\n"
+
+    elif item_type == 'marine':
+        product = item.get('product', '알 수 없음')
+        fish_state = item.get('fishState', '미분류')
+        return f"- 🐟 수산물: {product} (상태: {fish_state})\n"
+
+    elif item_type == 'region':
+        city = item.get('city', '알 수 없음')
+        region = item.get('region', '미분류')
+        return f"- 📍 지역: {city} ({region})\n"
+
+    else:
+        return f"- ❓ 기타: {str(item)}\n"

@@ -186,27 +186,83 @@ class RAGWorkflow:
             return "medium"
 
     async def planning_node(self, state: StreamingAgentState) -> StreamingAgentState:
-        """계획 수립 노드"""
+        """계획 수립 노드 - 메모리 검색 개선"""
         print("\n>>> PLANNING 단계 시작")
 
         # 관련 메모리 검색
         if self.hierarchical_memory:
             try:
                 user_id = getattr(state, "user_id", "default_user")
-                relevant_memories = self.hierarchical_memory.retrieve_relevant_memories(
-                    state.original_query, user_id, top_k=3
-                )
+                query = state.original_query.lower()
 
-                memory_context = self._format_memory_context(relevant_memories)
-                if memory_context:
-                    print(f"- 관련 메모리 컨텍스트 활용: {len(relevant_memories)}개")
-                    state.memory_context = memory_context
+                # 메타 질문들 (이전 대화 참조) 감지
+                meta_questions = [
+                    "방금", "아까", "이전", "전에", "뭘", "뭐", "물어", "질문",
+                    "말했", "했던", "내가", "just", "before", "previous", "what did"
+                ]
+
+                is_meta_question = any(keyword in query for keyword in meta_questions)
+
+                if is_meta_question:
+                    print("- 메타 질문 감지: 최근 대화 내역 검색")
+                    # 최근 대화 내역 직접 가져오기
+                    recent_memories = self.hierarchical_memory.get_recent_conversations(user_id, limit=3)
+                    memory_context = self._format_recent_memory_context(recent_memories)
                 else:
-                    print(f"- 관련 메모리 {len(relevant_memories)}개 검색됨")
+                    print("- 일반 질문: 유사도 기반 메모리 검색")
+                    # 기존 유사도 기반 검색
+                    relevant_memories = self.hierarchical_memory.retrieve_relevant_memories(
+                        state.original_query, user_id, top_k=3
+                    )
+                    memory_context = self._format_memory_context(relevant_memories)
+
+                # 메모리 컨텍스트 설정 (빈 문자열도 허용)
+                state.memory_context = memory_context
+
+                if memory_context and memory_context.strip():
+                    print(f"- 메모리 컨텍스트 활용: {len(memory_context)}자")
+                else:
+                    print("- 관련 메모리 없음")
+
             except Exception as e:
                 print(f"- 메모리 검색 실패: {e}")
+                state.memory_context = ""
 
         return await self.planning_agent.plan(state)
+
+    def _format_recent_memory_context(self, memories: list) -> str:
+        """최근 대화 내역을 컨텍스트로 포맷팅 - 수정된 버전"""
+        if not memories:
+            return ""
+
+        context_parts = ["최근 대화 내역:"]
+        for i, memory in enumerate(memories[:3], 1):
+            # ConversationMemory 객체인지 확인
+            if hasattr(memory, "query") and hasattr(memory, "response"):
+                # 응답이 너무 길면 요약
+                response_summary = memory.response[:100] + "..." if len(memory.response) > 100 else memory.response
+                context_parts.append(f"{i}. 질문: {memory.query}")
+                context_parts.append(f"   답변: {response_summary}")
+            else:
+                # 다른 타입의 메모리인 경우
+                context_parts.append(f"{i}. {str(memory)[:100]}...")
+
+        return "\n".join(context_parts)
+
+    def _format_memory_context(self, memories: list) -> str:
+        """메모리를 컨텍스트 문자열로 포맷팅 - 수정된 버전"""
+        if not memories:
+            return ""
+
+        context_parts = ["관련 이전 정보:"]
+        for memory in memories:
+            if hasattr(memory, "query") and hasattr(memory, "response"):
+                context_parts.append(f"- 이전 질문: {memory.query}")
+                context_parts.append(f"  답변 요약: {memory.response[:100]}...")
+            else:
+                context_parts.append(f"- {str(memory)[:100]}...")
+
+        return "\n".join(context_parts)
 
     async def simple_answer_streaming_node(
         self, state: StreamingAgentState
@@ -1032,7 +1088,7 @@ app = FastAPI(
 # CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

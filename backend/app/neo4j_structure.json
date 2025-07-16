@@ -1,0 +1,45 @@
+{
+  "total_nodes": 1151,
+  "total_relationships": 9872,
+  "labels": {
+    "Ingredient": {
+      "count": 938,
+      "properties": {
+        "product": 938,
+        "category": 569,
+        "fishState": 369
+      }
+    },
+    "Origin": {
+      "count": 213,
+      "properties": {
+        "region": 213,
+        "city": 213
+      }
+    },
+    "국내": {
+      "count": 213,
+      "properties": {
+        "region": 213,
+        "city": 213
+      }
+    },
+    "농산물": {
+      "count": 569,
+      "properties": {
+        "product": 569,
+        "category": 569
+      }
+    },
+    "수산물": {
+      "count": 369,
+      "properties": {
+        "product": 369,
+        "fishState": 369
+      }
+    }
+  },
+  "relationship_types": {},
+  "property_keys": {},
+  "common_patterns": []
+}

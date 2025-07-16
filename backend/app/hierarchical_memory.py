@@ -11,7 +11,7 @@ class MemoryEntry:
     id: str
     timestamp: datetime
     content: str
-    importance: float  
+    importance: float
     access_count: int = 0
     last_accessed: Optional[datetime] = None
 
@@ -119,6 +119,60 @@ class HierarchicalMemorySystem:
         if len(self.short_term_memory) > self.max_short_term:
             self._consolidate_memories()
 
+    def get_recent_conversations(self, user_id: str, limit: int = 5) -> list:
+        """최근 대화 내역 가져오기 - 수정된 버전"""
+        try:
+            # short_term_memory는 리스트이므로 user_id로 필터링
+            user_conversations = []
+
+            for memory in self.short_term_memory:
+                # ConversationMemory인지 확인하고 user_id가 일치하는지 체크
+                if (hasattr(memory, 'user_id') and
+                    hasattr(memory, 'query') and
+                    hasattr(memory, 'response') and
+                    memory.user_id == user_id):
+                    user_conversations.append(memory)
+
+            # 시간순으로 정렬 (최신순)
+            user_conversations.sort(key=lambda x: x.timestamp, reverse=True)
+
+            # 최근 limit개만 반환
+            recent_conversations = user_conversations[:limit]
+
+            print(f"- 사용자 {user_id}의 최근 대화 {len(recent_conversations)}개 찾음")
+            return recent_conversations
+
+        except Exception as e:
+            print(f"최근 대화 검색 실패: {e}")
+            return []
+
+    def get_all_user_conversations(self, user_id: str) -> list:
+        """특정 사용자의 모든 대화 내역 가져오기"""
+        try:
+            user_conversations = []
+
+            # 단기 메모리에서 검색
+            for memory in self.short_term_memory:
+                if (hasattr(memory, 'user_id') and memory.user_id == user_id and
+                    hasattr(memory, 'query') and hasattr(memory, 'response')):
+                    user_conversations.append(memory)
+
+            # 장기 메모리에서도 검색
+            for memory_type, memories in self.long_term_memory.items():
+                if memory_type == 'ConversationMemory':
+                    for memory in memories:
+                        if (hasattr(memory, 'user_id') and memory.user_id == user_id):
+                            user_conversations.append(memory)
+
+            # 시간순 정렬
+            user_conversations.sort(key=lambda x: x.timestamp, reverse=True)
+
+            return user_conversations
+
+        except Exception as e:
+            print(f"사용자 대화 검색 실패: {e}")
+            return []
+            
     async def add_conversation_memory_smart(self, user_id: str, query: str,
                                           response: str, context_used: List[str]):
         """지능적 대화 메모리 추가 - LLM 요약 포함"""

@@ -3,6 +3,7 @@ version: '3.8'
 services:
   backend:
     build: ./backend
+    network_mode: "host" # 추가
     restart: unless-stopped
     volumes:
       - ./backend/app:/app/app
@@ -11,17 +12,15 @@ services:
     env_file:
       - ./backend/.env
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-    ports:
-      - "8000:8000"
-    networks:
-      - rag-network
+    # ports: - "8000:8000"  # 삭제 (host 모드에서는 불필요)
+    # networks: - rag-network  # 삭제
 
   frontend:
     build: ./frontend
     restart: unless-stopped
     volumes:
       - ./frontend:/app
-      - /app/node_modules  # node_modules 캐싱
+      - /app/node_modules
     working_dir: /app
     command: npm run dev
     ports:
