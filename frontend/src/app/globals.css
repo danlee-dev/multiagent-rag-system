@@ -9,20 +9,20 @@
 :root {
   --primary-color: #10a37f;
   --primary-hover: #0d8968;
-  --background-color: #ffffff;
-  --sidebar-bg: #f7f7f8;
-  --sidebar-border: #d1d5db;
-  --text-primary: #2d333a;
-  --text-secondary: #6b7280;
-  --text-muted: #9ca3af;
-  --border-light: #e5e7eb;
-  --hover-bg: #f3f4f6;
-  --user-bg: #f7f7f8;
-  --message-border: #e5e7eb;
-  --input-border: #d1d5db;
+  --background-color: #1a1a1a;
+  --sidebar-bg: #171717;
+  --sidebar-border: #2d2d2d;
+  --text-primary: #e4e4e7;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --border-light: #2d2d2d;
+  --hover-bg: #262626;
+  --user-bg: #262626;
+  --message-border: #2d2d2d;
+  --input-border: #404040;
   --input-focus: #10a37f;
-  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.3);
 }
 
 html,
@@ -227,7 +227,7 @@ body {
 }
 
 .delete-conversation:hover {
-  background-color: rgba(239, 68, 68, 0.1);
+  background-color: rgba(239, 68, 68, 0.2);
   color: #ef4444;
 }
 
@@ -250,6 +250,12 @@ body {
   flex-direction: column;
   background-color: var(--background-color);
   min-width: 0;
+  transition: margin-right 0.3s ease-out;
+  margin-right: 0;
+}
+
+.chat-main-with-sources {
+  margin-right: 400px;
 }
 
 /*
@@ -316,6 +322,7 @@ body {
   justify-content: center;
   flex-shrink: 0;
   margin-top: 4px;
+  background-color: var(--hover-bg);
 }
 
 
@@ -329,16 +336,47 @@ body {
 
 .message-wrapper.user .message-content {
   background-color: var(--user-bg);
-  border: 1px solid var(--message-border);
+  border: 1px solid #404040;
   border-radius: 14px 14px 0px 14px;
   padding: 12px 16px;
   max-width: 70%;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  color: var(--text-primary);
 }
 
 .message-wrapper.assistant .message-content {
   padding-top: 4px;
+}
+
+/*
+     출처 관련 스타일
+      */
+
+.message-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.sources-simple-btn {
+  background: var(--hover-bg);
+  border: 1px solid var(--border-light);
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.sources-simple-btn:hover {
+  background: #404040;
+  color: var(--text-primary);
+  border-color: #525252;
 }
 
 /*
@@ -394,7 +432,7 @@ body {
 }
 
 .message-content code {
-  background-color: rgba(175, 184, 193, 0.2);
+  background-color: var(--hover-bg);
   padding: 2px 4px;
   border-radius: 3px;
   font-family: "SFMono-Regular", "Monaco", "Inconsolata", "Roboto Mono",
@@ -403,7 +441,7 @@ body {
 }
 
 .message-content pre {
-  background-color: #f6f8fa;
+  background-color: var(--hover-bg);
   border: 1px solid var(--border-light);
   border-radius: 6px;
   padding: 16px;
@@ -473,21 +511,9 @@ body {
 /* 중첩된 blockquote 스타일 */
 .message-content blockquote blockquote {
   border-left: 3px solid #6b7280;
-  background-color: rgba(107, 114, 128, 0.08);
+  background-color: rgba(107, 114, 128, 0.12);
   margin: 8px 0 8px 12px;
   padding: 8px 12px;
-}
-
-/* 다크모드에서 blockquote */
-@media (prefers-color-scheme: dark) {
-  .message-content blockquote {
-    background-color: rgba(25, 195, 125, 0.12);
-    border-left-color: var(--primary-color);
-  }
-
-  .message-content blockquote blockquote {
-    background-color: rgba(107, 114, 128, 0.12);
-  }
 }
 
 .message-content table {
@@ -519,6 +545,23 @@ body {
   border-radius: 10px;
   overflow: hidden;
   background-color: white;
+}
+
+/* 차트 내부 여백 제거 */
+.message-chart > div {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* recharts 컨테이너 여백 제거 */
+.message-chart .recharts-wrapper {
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.message-chart .recharts-surface {
+  margin: 0 !important;
+  padding: 0 !important;
 }
 
 .chart-loading {
@@ -698,7 +741,7 @@ body {
   display: flex;
   align-items: flex-end;
   gap: 12px;
-  background-color: white;
+  background-color: var(--hover-bg);
   border: 1px solid var(--input-border);
   border-radius: 12px;
   padding: 12px 16px;
@@ -746,7 +789,7 @@ body {
 }
 
 .send-button:hover:not(:disabled) {
-  background-color: var(--hover-bg);
+  background-color: #404040;
   color: var(--text-primary);
 }
 
@@ -762,6 +805,12 @@ body {
 /*
      반응형 디자인
       */
+
+@media (max-width: 1024px) {
+  .chat-main-with-sources {
+    margin-right: 0;
+  }
+}
 
 @media (max-width: 768px) {
   .sidebar-open {
@@ -918,59 +967,4 @@ button:focus-visible,
 .conversation-item:focus-visible {
   outline: 2px solid var(--primary-color);
   outline-offset: 2px;
-}
-
-/*
-     다크 모드 지원
-      */
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --primary-color: #19c37d;
-    --primary-hover: #16b571;
-    --background-color: #212121;
-    --sidebar-bg: #171717;
-    --sidebar-border: #404040;
-    --text-primary: #ececec;
-    --text-secondary: #b3b3b3;
-    --text-muted: #8e8ea0;
-    --border-light: #404040;
-    --hover-bg: #2f2f2f;
-    --user-bg: #2f2f2f;
-    --message-border: #404040;
-    --input-border: #404040;
-    --input-focus: #19c37d;
-  }
-
-  .input-container {
-    background-color: #2f2f2f;
-  }
-
-  .message-chart {
-    background-color: #2f2f2f;
-  }
-
-  .chart-loading {
-    background-color: #262626;
-    border-color: var(--border-light);
-  }
-
-  .skeleton-title,
-  .skeleton-body {
-    background: linear-gradient(90deg, #404040 25%, #4a4a4a 50%, #404040 75%);
-    background-size: 200% 100%;
-  }
-
-  .message-content pre {
-    background-color: #1a1a1a;
-    border-color: var(--border-light);
-  }
-
-  .message-content code {
-    background-color: rgba(255, 255, 255, 0.1);
-  }
-
-  .message-content th {
-    background-color: var(--hover-bg);
-  }
 }

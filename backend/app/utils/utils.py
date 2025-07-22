@@ -1,4 +1,4 @@
-from .models import (
+from ..core.models.models import (
     AgentType,
     MessageType,
     DatabaseType,

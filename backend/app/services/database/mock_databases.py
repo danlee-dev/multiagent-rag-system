@@ -1160,18 +1160,17 @@ class MockGraphDB:
         }
 
 
-# ========== 통합 생성 및 테스트 함수 ==========
-def create_mock_databases():
-    """모든 Enhanced Eco-Trend Database 인스턴스를 생성하고 반환"""
-    print(">> Enhanced Eco-Trend Mock Databases 초기화 시작")
+def create_mock_rdb():
+    """Mock RDB 인스턴스를 생성하고 반환합니다."""
+    print(">> Mock RDB 초기화")
+    return MockRDB()
 
-    graph_db = MockGraphDB()
-    vector_db = MockVectorDB()
-    rdb = MockRDB()
+def create_mock_vector_db():
+    """Mock Vector DB 인스턴스를 생성하고 반환합니다."""
+    print(">> Mock Vector DB 초기화")
+    return MockVectorDB()
 
-    print("======= Enhanced Eco-Trend Mock Databases 초기화 완료 =======")
-    print(f"Graph DB: {graph_db.total_nodes}개 노드 (친환경 트렌드 식재료 대폭 추가)")
-    print(f"Vector DB: {len(vector_db.documents)}개 문서 (친환경 연구자료 풍부)")
-    print(f"RDB: 6개 테이블 (가격, 영양, 시장, 소비자트렌드, 인증, 신제품개발)")
-
-    return graph_db, vector_db, rdb
+def create_mock_graph_db():
+    """Mock Graph DB 인스턴스를 생성하고 반환합니다."""
+    print(">> Mock Graph DB 초기화")
+    return MockGraphDB()

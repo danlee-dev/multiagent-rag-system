@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,11 +15,11 @@ from pydantic import BaseModel
 
 load_dotenv()
 
-from .env_checker import check_api_keys
+from .core.config.env_checker import check_api_keys
 check_api_keys()
 
-from .mock_databases import create_mock_databases
-from .models import (
+from .services.database.mock_databases import create_mock_vector_db
+from .core.models.models import (
     AgentType,
     DatabaseType,
     QueryPlan,
@@ -31,8 +31,13 @@ from .models import (
     ExecutionStrategy,
     ComplexityLevel,
     SimpleAgentMemory,
+    SourceInfo,
+    SourceCollectionData,
+    create_source_info,
+    enhance_search_result_with_source,
+    extract_sources_from_state,
 )
-from .agents import (
+from .core.agents.agents import (
     PlanningAgent,
     RetrieverAgent,  # 통합된 RetrieverAgent 사용
     CriticAgent1,
@@ -43,7 +48,7 @@ from .agents import (
 )
 from langgraph.graph import StateGraph, END
 
-from .hierarchical_memory import HierarchicalMemorySystem, ConversationMemory
+from .utils.memory.hierarchical_memory import HierarchicalMemorySystem, ConversationMemory
 
 # Request/Response 모델들
 class QueryRequest(BaseModel):
@@ -63,7 +68,7 @@ class StreamChunk(BaseModel):
     chart_data: dict = None
     conversation_id: str = ""
 
-# RAGWorkflow 전체 파이프라인 (수정됨)
+# RAGWorkflow 전체 파이프라인
 class RAGWorkflow:
     """RAG System LangGraph 워크플로우 - 통합 RetrieverAgent 사용"""
 
@@ -71,7 +76,7 @@ class RAGWorkflow:
         print("\n>> RAG 워크플로우 초기화 시작")
 
         # Mock Databases 초기화
-        self.graph_db, self.vector_db, self.rdb = create_mock_databases()
+        self.vector_db = create_mock_vector_db()
 
         # 계층적 메모리 시스템 초기화
         try:
@@ -90,11 +95,7 @@ class RAGWorkflow:
         self.critic2 = CriticAgent2()
         self.report_generator = ReportGeneratorAgent()
 
-        self.retriever = RetrieverAgent(
-            vector_db=self.vector_db,
-            rdb=self.rdb,
-            graph_db=self.graph_db
-        )
+        self.retriever = RetrieverAgent()
 
         # 워크플로우 그래프 생성
         self.workflow = self._create_workflow()
@@ -296,58 +297,6 @@ class RAGWorkflow:
         sys.stdout.flush()
         return state
 
-    async def basic_search_node(
-        self, state: StreamingAgentState
-    ) -> StreamingAgentState:
-        """기본 검색 노드 (MEDIUM 복잡도)"""
-        print("\n>>> BASIC_SEARCH 단계 시작")
-
-        try:
-            # 통합 RetrieverAgent가 BASIC_SEARCH 모드로 실행
-            state = await self.retriever.search(state)
-            state.search_complete = True
-
-            print(f"- 기본 검색 완료: {len(state.multi_source_results_stream)}개 결과")
-
-
-            try:
-                await self._save_knowledge_memory(state)
-                print("- MEDIUM 경로 지식 메모리 저장 완료")
-            except Exception as e:
-                print(f"- MEDIUM 경로 지식 메모리 저장 실패: {e}")
-
-        except Exception as e:
-            print(f"- 기본 검색 오류: {e}")
-            state.search_complete = False
-
-        print(">>> BASIC_SEARCH 단계 완료")
-        return state
-
-    async def unified_retrieval_node(
-        self, state: StreamingAgentState
-    ) -> StreamingAgentState:
-        """통합 검색 노드 (COMPLEX/SUPER_COMPLEX 복잡도)"""
-        print("\n>>> UNIFIED RETRIEVAL 단계 시작")
-        print(f"- 실행 모드: {getattr(state, 'execution_mode', 'unknown')}")
-
-        try:
-            # 통합 RetrieverAgent가 복잡도에 맞게 자동 처리
-            state = await self.retriever.search(state)
-            state.search_complete = True
-
-            # 검색된 정보를 지식 메모리에 저장
-            await self._save_knowledge_memory(state)
-
-            print(f"- 통합 검색 완료:")
-            print(f"  ∟ Graph 결과: {len(state.graph_results_stream)}개")
-            print(f"  ∟ Multi-source 결과: {len(state.multi_source_results_stream)}개")
-
-        except Exception as e:
-            print(f"- 통합 검색 오류: {e}")
-            state.search_complete = False
-
-        print(">>> UNIFIED RETRIEVAL 단계 완료")
-        return state
 
     async def critic1_node(self, state: StreamingAgentState) -> StreamingAgentState:
         """1차 검토 노드"""
@@ -427,40 +376,166 @@ class RAGWorkflow:
 
         return state
 
-    async def streaming_report_generation_node(
-        self, state: StreamingAgentState
-    ) -> StreamingAgentState:
-        """보고서 생성 노드"""
-        print("\n>>> STREAMING REPORT GENERATION 시작")
+    def _enhance_search_results_with_sources(self, results: List[SearchResult], source_type: str):
+        """검색 결과에 출처 정보 강화"""
+        print(f"\n>> _enhance_search_results_with_sources 시작 ({source_type})")
+
+        for result in results:
+            try:
+                # 소스별로 다른 출처 정보 생성
+                if source_type == "vector_db":
+                    source_info = create_source_info(
+                        title=result.metadata.get("title", f"Vector DB Document"),
+                        url=result.metadata.get("url"),
+                        document_type="database",
+                        organization="Internal Vector Database",
+                        reliability_score=0.9
+                    )
+                elif source_type == "graph_db":
+                    source_info = create_source_info(
+                        title=f"Graph DB: {result.metadata.get('name', 'Knowledge Graph')}",
+                        document_type="knowledge_graph",
+                        organization="Internal Knowledge Graph",
+                        reliability_score=0.95
+                    )
+                elif source_type == "rdb":
+                    source_info = create_source_info(
+                        title=f"Database Record: {result.metadata.get('table_name', 'RDB')}",
+                        document_type="database",
+                        organization="Internal Relational Database",
+                        reliability_score=0.9
+                    )
+                elif source_type == "web_search":
+                    # 웹 검색 결과는 더 상세한 출처 정보 필요
+                    source_info = create_source_info(
+                        title=result.metadata.get("title", "Web Search Result"),
+                        url=result.metadata.get("url", "https://web-search-result.com"),
+                        author=result.metadata.get("author"),
+                        organization=result.metadata.get("site_name", "Web Source"),
+                        published_date=result.metadata.get("published_date"),
+                        document_type="web",
+                        reliability_score=0.7
+                    )
+                elif source_type == "react_agent":
+                    source_info = create_source_info(
+                        title="AI Agent Analysis",
+                        document_type="ai_analysis",
+                        organization="ReAct Agent System",
+                        reliability_score=0.8
+                    )
+                else:
+                    # 기본 출처 정보
+                    source_info = create_source_info(
+                        title=f"{source_type.replace('_', ' ').title()} Result",
+                        document_type="unknown",
+                        reliability_score=0.6
+                    )
+
+                enhance_search_result_with_source(result, source_info)
+                print(f"- 출처 정보 추가: {result.source}")
+
+            except Exception as e:
+                print(f"- 출처 정보 추가 실패: {e}")
+                continue
+
+    async def unified_retrieval_node(self, state: StreamingAgentState) -> StreamingAgentState:
+        """통합 검색 노드 (출처 추적 포함)"""
+        print("\n>>> UNIFIED RETRIEVAL 단계 시작 (출처 추적 포함)")
+        print(f"- 실행 모드: {getattr(state, 'execution_mode', 'unknown')}")
+
+        try:
+            # 기존 검색 로직
+            state = await self.retriever.search(state)
+            state.search_complete = True
+
+            # 출처 정보 강화
+            if hasattr(state, 'graph_results_stream'):
+                self._enhance_search_results_with_sources(state.graph_results_stream, "graph_db")
+
+            if hasattr(state, 'multi_source_results_stream'):
+                # multi_source_results_stream의 각 결과별로 소스 타입에 맞게 출처 정보 추가
+                for result in state.multi_source_results_stream:
+                    if result.source == "vector_db":
+                        self._enhance_search_results_with_sources([result], "vector_db")
+                    elif result.source == "rdb":
+                        self._enhance_search_results_with_sources([result], "rdb")
+                    elif result.source == "web_search":
+                        self._enhance_search_results_with_sources([result], "web_search")
+                    elif result.source == "react_agent":
+                        self._enhance_search_results_with_sources([result], "react_agent")
+
+            # 출처 컬렉션 생성 및 저장
+            source_collection = extract_sources_from_state(state)
+            state.add_step_result("source_collection", source_collection.dict())
+
+            print(f"- 통합 검색 완료:")
+            print(f"  ∟ Graph 결과: {len(state.graph_results_stream)}개")
+            print(f"  ∟ Multi-source 결과: {len(state.multi_source_results_stream)}개")
+            print(f"  ∟ 총 출처: {source_collection.total_count}개")
+
+        except Exception as e:
+            print(f"- 통합 검색 오류: {e}")
+            state.search_complete = False
+
+        print(">>> UNIFIED RETRIEVAL 단계 완료")
+        return state
+
+    async def basic_search_node(self, state: StreamingAgentState) -> StreamingAgentState:
+        """기본 검색 노드 (출처 추적 포함)"""
+        print("\n>>> BASIC_SEARCH 단계 시작 (출처 추적 포함)")
+
+        try:
+            # 기존 검색 로직
+            state = await self.retriever.search(state)
+            state.search_complete = True
+
+            # 출처 정보 강화
+            if hasattr(state, 'multi_source_results_stream'):
+                self._enhance_search_results_with_sources(state.multi_source_results_stream, "basic_search")
+
+            # 출처 컬렉션 생성 및 저장
+            source_collection = extract_sources_from_state(state)
+            state.add_step_result("source_collection", source_collection.dict())
+
+            print(f"- 기본 검색 완료: {len(state.multi_source_results_stream)}개 결과")
+            print(f"- 총 출처: {source_collection.total_count}개")
+
+        except Exception as e:
+            print(f"- 기본 검색 오류: {e}")
+            state.search_complete = False
+
+        print(">>> BASIC_SEARCH 단계 완료")
+        return state
+
+    async def streaming_report_generation_node(self, state: StreamingAgentState) -> StreamingAgentState:
+        """보고서 생성 노드 (출처 정보 포함)"""
+        print("\n>>> STREAMING REPORT GENERATION 시작 (출처 포함)")
         execution_mode = getattr(state, "execution_mode", None)
         print(f"- 실행 모드: {execution_mode}")
+
+        # 출처 정보 추출
+        source_collection_data = state.step_results.get("source_collection", {})
+        print(f"- 사용 가능한 출처: {source_collection_data.get('total_count', 0)}개")
 
         if execution_mode and execution_mode == ExecutionStrategy.BASIC_SEARCH:
             # 간단한 답변 생성
             print("- 기본 답변 생성 모드")
             state.final_answer = state.integrated_context
         else:
-            # 복잡한 보고서 생성
-            print("- 고급 보고서 생성 모드")
+            # 복잡한 보고서 생성 (출처 정보 포함)
+            print("- 고급 보고서 생성 모드 (출처 정보 포함)")
             full_answer = ""
-            async for chunk in self.report_generator.generate_streaming(state):
+            async for chunk in self.report_generator.generate_streaming_with_sources(state, source_collection_data):
                 full_answer += chunk
             state.final_answer = full_answer
 
-        # 최종 답변을 메모리에 저장
-        try:
-            if state.query_plan and hasattr(state.query_plan, 'estimated_complexity'):
-                complexity_level = state.query_plan.estimated_complexity
-            else:
-                complexity_level = "medium"
-        except (AttributeError, TypeError):
-            complexity_level = "medium"
-
-        importance = 0.4 if "medium" in str(complexity_level).lower() else 0.8
-        await self._save_conversation_memory(state, state.final_answer, importance)
+        # 최종 출처 정보를 step_results에 저장 (프론트엔드에서 사용)
+        if source_collection_data:
+            state.add_step_result("final_sources", source_collection_data)
 
         print(">>> STREAMING REPORT GENERATION 완료")
         return state
+
 
     async def _simple_integration(
         self, state: StreamingAgentState
@@ -806,10 +881,12 @@ class RAGWorkflow:
         else:
             print("메모리 시스템이 없어서 로드할 수 없습니다.")
 
+
+
     async def stream_api(
         self, query: str, conversation_id: str = None, user_id: str = "default_user"
     ):
-        """API용 멀티 이벤트 스트림 실행 메서드"""
+        """API용 멀티 이벤트 스트림 실행 메서드 - 출처 정보 포함"""
         if not conversation_id:
             conversation_id = f"api-streaming-{uuid.uuid4()}"
 
@@ -823,7 +900,7 @@ class RAGWorkflow:
 
         async def event_generator():
             try:
-                print(f"\n>> 실시간 스트리밍 워크플로우 시작 (사용자: {user_id})")
+                print(f"\n>> 실시간 스트리밍 워크플로우 시작 (출처 추적 포함)")
                 yield f"data: {json.dumps({'type': 'status', 'content': 'AI가 분석을 시작합니다...'})}\n\n"
                 await asyncio.sleep(0)
 
@@ -850,6 +927,7 @@ class RAGWorkflow:
                 last_state = None
                 is_simple_path = False
                 is_medium_path = False
+                sources_sent = False  # 출처 전송 여부 추적
 
                 # 상태 메시지
                 status_messages = {
@@ -876,6 +954,20 @@ class RAGWorkflow:
                         await asyncio.sleep(0)
                         print_with_flush("- 상태 메시지 전송 완료")
 
+                    # 출처 정보 전송 (검색이 완료된 후)
+                    if not sources_sent and node_name in ["unified_retrieval", "basic_search", "context_integration"]:
+                        try:
+                            # step_results에서 출처 정보 추출
+                            source_collection_data = last_state.get("step_results", {}).get("source_collection")
+
+                            if source_collection_data and source_collection_data.get("total_count", 0) > 0:
+                                print_with_flush(f"- 출처 정보 전송: {source_collection_data.get('total_count')}개")
+                                yield f"data: {json.dumps({'type': 'sources', 'sources_data': source_collection_data})}\n\n"
+                                sources_sent = True
+                                await asyncio.sleep(0)
+                        except Exception as e:
+                            print_with_flush(f"- 출처 정보 전송 실패: {e}")
+
                     if node_name == "simple_answer":
                         if last_state.get("final_answer"):
                             is_simple_path = True
@@ -885,7 +977,7 @@ class RAGWorkflow:
                         continue
                     elif node_name == "context_integration" and is_medium_path:
                         if last_state.get("integrated_context"):
-                            break
+                            continue
                     elif node_name == "report_generation":
                         if last_state.get("final_answer"):
                             break
@@ -908,7 +1000,6 @@ class RAGWorkflow:
 
                 elif is_medium_path:
                     print("\n>> 중간 복잡도 경로 처리 (MEDIUM) - 실시간 스트리밍")
-
 
                     state_obj = StreamingAgentState(
                         original_query=last_state.get("original_query", query),
@@ -987,7 +1078,7 @@ class RAGWorkflow:
 
                     # 리포트 생성기가 있으면 사용, 없으면 기본 답변
                     if hasattr(self, "report_generator"):
-                        async for chunk in self.report_generator.generate_streaming(state_obj):
+                        async for chunk in self.report_generator.generate_streaming_with_sources(state_obj):
                             full_report_text += chunk
                             text_buffer += chunk
 
@@ -1053,6 +1144,19 @@ class RAGWorkflow:
                     # 완료 이벤트
                     yield f"data: {json.dumps({'type': 'complete', 'conversation_id': conversation_id, 'total_charts': chart_counter})}\n\n"
 
+                # 최종 출처 정보 재전송 (아직 전송되지 않았다면)
+                if not sources_sent and last_state:
+                    try:
+                        final_source_data = last_state.get("step_results", {}).get("final_sources")
+                        if not final_source_data:
+                            final_source_data = last_state.get("step_results", {}).get("source_collection")
+
+                        if final_source_data and final_source_data.get("total_count", 0) > 0:
+                            print_with_flush(f"- 최종 출처 정보 전송: {final_source_data.get('total_count')}개")
+                            yield f"data: {json.dumps({'type': 'sources', 'sources_data': final_source_data})}\n\n"
+                    except Exception as e:
+                        print_with_flush(f"- 최종 출처 정보 전송 실패: {e}")
+
                 # 메모리 통계 출력
                 if self.hierarchical_memory:
                     try:
@@ -1076,7 +1180,6 @@ class RAGWorkflow:
                 "X-Accel-Buffering": "no",
             },
         )
-
 
 # FastAPI 앱 설정
 app = FastAPI(

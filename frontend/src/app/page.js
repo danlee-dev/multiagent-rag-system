@@ -5,6 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { ChartComponent } from "../components/ChartComponent";
+import SourcesPanel from "../components/SourcesPanel";
 import "./globals.css";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -21,6 +22,10 @@ export default function Home() {
   // 사이드바 관련 상태
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [conversations, setConversations] = useState([]);
+
+  // 출처 패널 관련 상태 추가
+  const [sourcesData, setSourcesData] = useState(null);
+  const [sourcesPanelVisible, setSourcesPanelVisible] = useState(false);
 
   // 스크롤 관리
   const messagesEndRef = useRef(null);
@@ -60,6 +65,8 @@ export default function Home() {
     setCurrentStreamingCharts([]);
     processedChartIds.current.clear();
     setQuery("");
+    setSourcesData(null);
+    setSourcesPanelVisible(false);
   };
 
   // 기존 대화 로드
@@ -70,6 +77,13 @@ export default function Home() {
     setCurrentStreamingCharts([]);
     processedChartIds.current.clear();
     setQuery("");
+    setSourcesData(null);
+    setSourcesPanelVisible(false);
+  };
+
+  // 출처 패널 토글
+  const toggleSourcesPanel = () => {
+    setSourcesPanelVisible(!sourcesPanelVisible);
   };
 
   // 차트 고유 ID 생성 함수
@@ -111,6 +125,7 @@ export default function Home() {
     setCurrentStreamingCharts([]);
     processedChartIds.current.clear();
     setStatusMessage("생각하는 중...");
+    setSourcesData(null); // 새 요청 시 출처 데이터 초기화
 
     // 빈 어시스턴트 메시지 추가 (스트리밍용)
     const assistantMessage = {
@@ -162,6 +177,7 @@ export default function Home() {
           if (eventText.startsWith("data: ")) {
             try {
               const data = JSON.parse(eventText.slice(6));
+              console.log(">> 받은 스트리밍 데이터:", data.type, data);
 
               if (data.conversation_id && !conversationId) {
                 setConversationId(data.conversation_id);
@@ -206,6 +222,29 @@ export default function Home() {
                   }
                   break;
 
+                case "sources": // 출처 정보 수신 처리 추가
+                  console.log("\n>> 출처 정보 수신:", data.sources_data);
+                  console.log(">> 출처 타입:", typeof data.sources_data);
+                  console.log(">> 출처 구조:", JSON.stringify(data.sources_data, null, 2));
+
+                  if (data.sources_data) {
+                    setSourcesData(data.sources_data);
+                    // 출처가 있으면 자동으로 패널 열기
+                    if (data.sources_data.total_count > 0) {
+                      setSourcesPanelVisible(true);
+                    }
+
+                    // 현재 어시스턴트 메시지에 출처 데이터 추가
+                    setCurrentConversation((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessage.id
+                          ? { ...msg, sources: data.sources_data }
+                          : msg
+                      )
+                    );
+                  }
+                  break;
+
                 case "complete":
                   // 스트리밍 완료 - 최종 메시지 업데이트
                   setCurrentConversation((prev) => {
@@ -216,6 +255,7 @@ export default function Home() {
                             content: finalContent,
                             charts: finalCharts,
                             isStreaming: false,
+                            sources: msg.sources || null,
                           }
                         : msg
                     );
@@ -319,7 +359,14 @@ export default function Home() {
           key={`md-${index}`}
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[rehypeRaw]}
-          components={{ img: () => null }} // disable markdown <img> tag
+          components={{
+            table: ({ node, ...props }) => (
+              <div className="table-container">
+                <table {...props} />
+              </div>
+            ),
+            img: () => null,
+          }}
         >
           {part}
         </ReactMarkdown>
@@ -432,7 +479,7 @@ export default function Home() {
       </div>
 
       {/* 메인 채팅 영역 */}
-      <div className="chat-main">
+      <div className={`chat-main ${sourcesPanelVisible ? "chat-main-with-sources" : ""}`}>
         {/* 메시지 영역 */}
         <div className="messages-container">
           {currentConversation.length === 0 ? (
@@ -469,6 +516,32 @@ export default function Home() {
                   )}
                   <div className="message-content">
                     {renderMessageContent(message)}
+
+                    {/* 출처 보기 버튼 - 간단하고 깔끔하게 */}
+                    {message.type === "assistant" && !message.isStreaming && (
+                      <div className="message-actions">
+                        {/* 디버깅용 */}
+                        {/* <div style={{fontSize: '12px', color: '#666', marginBottom: '8px'}}>
+                          Debug: sources={message.sources ? JSON.stringify(message.sources.total_count) : 'null'}
+                        </div> */}
+
+                        {message.sources && message.sources.total_count > 0 && (
+                          <button
+                            className="sources-simple-btn"
+                            onClick={() => {
+                              setSourcesData(message.sources);
+                              toggleSourcesPanel();
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                              <polyline points="14,2 14,8 20,8" />
+                            </svg>
+                            {message.sources.total_count}개 출처
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
@@ -520,6 +593,13 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {/* 출처 패널 */}
+      <SourcesPanel
+        sources={sourcesData}
+        isVisible={sourcesPanelVisible}
+        onToggle={toggleSourcesPanel}
+      />
     </div>
   );
 }

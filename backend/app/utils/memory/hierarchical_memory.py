@@ -100,7 +100,7 @@ class HierarchicalMemorySystem:
 
     def add_conversation_memory(self, user_id: str, query: str, response: str,
                               context_used: List[str], importance: float = 0.5):
-        """대화 메모리 추가 - 기본 방식 (LLM 없이)"""
+        """대화 메모리 추가 - 기본 방식"""
         memory = ConversationMemory(
             id=str(uuid.uuid4()),
             timestamp=datetime.now(),
@@ -172,7 +172,7 @@ class HierarchicalMemorySystem:
         except Exception as e:
             print(f"사용자 대화 검색 실패: {e}")
             return []
-            
+
     async def add_conversation_memory_smart(self, user_id: str, query: str,
                                           response: str, context_used: List[str]):
         """지능적 대화 메모리 추가 - LLM 요약 포함"""

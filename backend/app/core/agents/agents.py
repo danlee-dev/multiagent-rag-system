@@ -19,8 +19,18 @@ from langchain.prompts import PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
+import json
+from typing import Dict, List, AsyncGenerator
+from langchain_openai import ChatOpenAI
+
+# 로컬 imports
+from ...core.config.report_config import TeamType, ReportType, Language
+from ...services.templates.report_templates import ReportTemplateManager
+from ...services.builders.prompt_builder import PromptBuilder
+from ...utils.analyzers.query_analyzer import QueryAnalyzer
+
 # 로컬 모듈
-from .models import (
+from ..models.models import (
     AgentMessage,
     AgentType,
     ComplexityLevel,
@@ -32,13 +42,13 @@ from .models import (
     SearchResult,
     StreamingAgentState,
 )
-from .search_tools import (
+from ...services.search.search_tools import (
     debug_web_search,
     graph_db_search,
-    mock_rdb_search,
+    rdb_search,
     mock_vector_search,
 )
-from .utils import create_agent_message
+from ...utils.utils import create_agent_message
 
 class DataExtractor:
     """검색 결과에서 실제 수치 데이터를 추출하는 클래스"""
@@ -147,7 +157,7 @@ class PlanningAgent:
         raw_complexity = complexity_analysis.get("complexity_level", "MEDIUM")
         raw_strategy = complexity_analysis.get("execution_strategy", "basic_search")
 
-        # 매핑된 값들 (소문자)
+        # 매핑된 값들
         mapped_complexity = complexity_mapping.get(raw_complexity, "medium")
         mapped_strategy = strategy_mapping.get(raw_strategy, "basic_search")
 
@@ -413,7 +423,7 @@ class RetrieverAgent:
         self.available_tools = [
             debug_web_search,
             mock_vector_search,
-            mock_rdb_search,
+            rdb_search,
             graph_db_search,
         ]
 
@@ -443,7 +453,7 @@ class RetrieverAgent:
         complexity_level = state.get_complexity_level()
         execution_strategy = self._determine_execution_strategy(state, complexity_level)
 
-        original_query = state.query_plan.sub_queries[0]
+        original_query = state.original_query
 
         print(f"- 복잡도: {complexity_level}")
         print(f"- 실행 전략: {execution_strategy}")
@@ -482,12 +492,16 @@ class RetrieverAgent:
         if self.vector_db:
             search_tasks.append(self._async_vector_search(query))
 
+
+
         # 2. Graph DB 검색
         if self.graph_db:
             search_tasks.append(self._async_graph_search(query))
 
         # 3. 간단한 웹 검색
         search_tasks.append(self._async_web_search(query))
+
+
 
         try:
             # 모든 검색을 병렬로 실행
@@ -536,60 +550,40 @@ class RetrieverAgent:
     async def _execute_full_parallel_search(
         self, state: StreamingAgentState, query: str
     ) -> StreamingAgentState:
-        """풀 병렬 검색 (COMPLEX 복잡도)"""
-        print("\n>> 풀 병렬 검색 + ReAct 실행")
+        """
+        ReAct 에이전트 단독 실행 (COMPLEX 복잡도)
+        - 복잡한 질문은 ReAct 에이전트에게 모든 검색 및 추론 과정을 위임
+        """
 
-        # 1단계: 모든 DB 병렬 검색
-        db_search_tasks = [
-            self._async_vector_search(query),
-            self._async_graph_search(query),
-            self._async_rdb_search(query),
-            self._async_web_search(query)
-        ]
+        print("\n>> ReAct 에이전트 단독 실행")
 
-        # 2단계: ReAct 에이전트 (병렬 실행)
         react_task = self._async_react_search(query)
 
         try:
             start_time = time.time()
 
-            # DB 검색들과 ReAct를 병렬로 실행
-            all_tasks = db_search_tasks + [react_task]
-            results = await asyncio.gather(*all_tasks, return_exceptions=True)
+            react_result = await react_task
 
             execution_time = time.time() - start_time
-            print(f"- 풀 병렬 검색 완료: {execution_time:.2f}초")
+            print(f"- ReAct 에이전트 실행 완료: {execution_time:.2f}초")
 
-            # DB 검색 결과 처리
             total_results = 0
-            for i, result_group in enumerate(results[:-1]):  # ReAct 제외
-                if isinstance(result_group, Exception):
-                    print(f"- DB 검색 {i} 오류: {result_group}")
-                    continue
-
-                if isinstance(result_group, list):
-                    for result in result_group:
-                        state.add_multi_source_result(result)
-                        total_results += 1
-
             # ReAct 결과 처리
-            react_result = results[-1]
             if not isinstance(react_result, Exception) and react_result:
                 state.add_multi_source_result(react_result)
                 total_results += 1
 
-            state.add_step_result("full_parallel_search", {
+            state.add_step_result("full_react_search", {
                 "execution_time": execution_time,
                 "total_results": total_results,
-                "db_searches": len(db_search_tasks),
                 "react_included": True
             })
 
-            print(f"- 총 {total_results}개 결과 추가")
+            print(f"- 총 {total_results}개 결과 추가 (ReAct)")
 
         except Exception as e:
-            print(f"- 풀 병렬 검색 실패: {e}")
-            fallback_result = self._create_fallback_result(query, "full_parallel_error")
+            print(f"- ReAct 에이전트 실행 실패: {e}")
+            fallback_result = self._create_fallback_result(query, "react_agent_error")
             state.add_multi_source_result(fallback_result)
 
         return state
@@ -662,7 +656,7 @@ class RetrieverAgent:
         try:
             print(f"  └ Vector DB 검색: {query[:30]}...")
 
-            # 실제로는 비동기이지만 mock은 동기라서 스레드 풀 사용
+            # 스레드 풀 사용
             loop = asyncio.get_event_loop()
             vector_results = await loop.run_in_executor(
                 self.thread_pool,
@@ -728,30 +722,123 @@ class RetrieverAgent:
         try:
             print(f"  └ RDB 검색: {query[:30]}...")
 
+            # 🔧 1. RDB용 쿼리 전처리 (기존 로직 유지)
+            processed_query = self._preprocess_rdb_query(query)
+            print(f"    → 전처리된 쿼리: {processed_query}")
+
             loop = asyncio.get_event_loop()
-            rdb_results = await loop.run_in_executor(
+            rdb_results_content = await loop.run_in_executor(
                 self.thread_pool,
-                lambda: mock_rdb_search.invoke({"query": query})
+                lambda: rdb_search.invoke({"query": processed_query})
             )
 
-            results = []
-            if isinstance(rdb_results, dict) and "results" in rdb_results:
-                for i, doc in enumerate(rdb_results["results"][:2]):
-                    result = SearchResult(
+            # 반환값이 문자열인지 확인하여 처리하는 로직으로 변경
+            if isinstance(rdb_results_content, str) and rdb_results_content:
+                # 전체 문자열을 content로 하는 단일 SearchResult 객체 생성
+                result = SearchResult(
+                    source="rdb",
+                    content=rdb_results_content,
+                    relevance_score=0.85, # DB에서 직접 온 정보이므로 신뢰도 높게 설정
+                    metadata={"search_type": "rdb"},
+                    search_query=processed_query,
+                )
+                print(f"    ✓ RDB: 1개 결과 객체 생성 완료")
+                return [result] # 생성된 객체를 리스트에 담아 반환
+
+            # 딕셔너리 형태의 예외적인 경우도 처리
+            elif isinstance(rdb_results_content, dict) and "results" in rdb_results_content:
+                # 이 로직은 거의 실행되지 않겠지만, 호환성을 위해 유지
+                results = []
+                for i, doc in enumerate(rdb_results_content["results"][:2]):
+                    results.append(SearchResult(
                         source="rdb",
                         content=doc.get("content", ""),
                         relevance_score=0.8,
                         metadata={"search_type": "rdb", "rank": i + 1},
-                        search_query=query,
-                    )
-                    results.append(result)
+                        search_query=processed_query,
+                    ))
+                print(f"    ✓ RDB (Dict): {len(results)}개 결과")
+                return results
 
-            print(f"    ✓ RDB: {len(results)}개 결과")
-            return results
+            else:
+                print(f"    ✗ RDB: 유효한 결과를 받지 못함 (Type: {type(rdb_results_content)})")
+                return []
 
         except Exception as e:
             print(f"    ✗ RDB 오류: {e}")
             return []
+
+    def _preprocess_rdb_query(self, query: str) -> str:
+        """RDB 검색을 위한 쿼리 전처리"""
+
+        # 적절한 길이라면 그대로 사용
+        if len(query) <= 50:
+            return query
+
+        # 계획서나 분석 문서 감지
+        plan_indicators = [
+            '실행 계획', '분석 접근법', '결과물 구성', '전략', '마케팅',
+            '보고서', '섹션', '시각적 자료', 'SWOT', '접근법', 'MZ세대'
+        ]
+
+        if any(indicator in query for indicator in plan_indicators):
+            print(f"      → 계획서 문서 감지, 키워드 추출 중...")
+
+            # 농산물 키워드 우선 추출
+            import re
+            food_keywords = re.findall(
+                r'(감자|사과|배|양파|당근|배추|무|고구마|옥수수|쌀|보리|밀|콩|팥|딸기|포도|복숭아|자두|체리|수박|참외|호박|오이|토마토|상추|시금치|깻잎|마늘|생강|파|대파|쪽파|부추|고추|피망|파프리카|감귤|귤|오렌지|바나나|키위|망고)',
+                query
+            )
+
+            # 검색 의도 키워드 추출
+            intent_keywords = re.findall(
+                r'(가격|시세|영양|칼로리|비타민|단백질|생산량|수급|소비|트렌드|시장|분석)',
+                query
+            )
+
+            # 지역 키워드 추출
+            region_keywords = re.findall(
+                r'(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)',
+                query
+            )
+
+            # 시간 키워드 추출
+            time_keywords = re.findall(
+                r'(최근|오늘|어제|이번주|지난주|이번달|지난달|올해|작년|현재|2024|2025)',
+                query
+            )
+
+            # 키워드 조합하여 간단한 쿼리 생성
+            if food_keywords:
+                result_query = food_keywords[0]
+
+                if intent_keywords:
+                    result_query += f" {intent_keywords[0]}"
+
+                if time_keywords:
+                    result_query = f"{time_keywords[0]} {result_query}"
+
+                if region_keywords:
+                    result_query += f" {region_keywords[0]}"
+
+                return result_query
+
+            # 농산물이 없으면 일반적인 검색 의도
+            elif intent_keywords:
+                return f"농산물 {intent_keywords[0]}"
+
+            else:
+                return "농산물 시장 정보"
+
+        # 3. 일반적인 긴 쿼리는 첫 번째 문장만
+        sentences = query.split('.')
+        if sentences and len(sentences[0]) < 100:
+            return sentences[0].strip()
+
+        # 4. 너무 길면 처음 50자만
+        return query[:50] + "..."
+
 
     async def _async_web_search(self, query: str) -> List[SearchResult]:
         """비동기 웹 검색"""
@@ -815,7 +902,7 @@ class RetrieverAgent:
             print(f"    ✗ ReAct 오류: {e}")
             return None
 
-    # ========== 유틸리티 메서드들 ==========
+
 
     def _determine_execution_strategy(self, state: StreamingAgentState, complexity_level: str) -> ExecutionStrategy:
         """실행 전략 결정"""
@@ -1014,7 +1101,7 @@ class RetrieverAgent:
             # 기본 ReAct 프롬프트 가져오기
             base_prompt = hub.pull("hwchase17/react")
 
-            # 매우 명확한 시스템 지시사항
+            # 시스템 지시사항
             system_instruction = f"""
     You are an expert research assistant for agricultural and food industry analysis.
     Current Date: {self.current_date_str}
@@ -1034,7 +1121,7 @@ class RetrieverAgent:
     Action: mock_vector_search
     Action Input: 농산물 가격 동향 분석
 
-    Action: mock_rdb_search
+    Action: rdb_search
     Action Input: 사과 영양성분 데이터
 
     Action: graph_db_search
@@ -1043,7 +1130,7 @@ class RetrieverAgent:
     AVAILABLE TOOLS:
     1. debug_web_search - For latest web information, current events, breaking news
     2. mock_vector_search - For document content analysis, research papers, news articles
-    3. mock_rdb_search - For structured data, statistics, numerical information
+    3. rdb_search - For structured data, statistics, numerical information
     4. graph_db_search - For entity relationships, knowledge graph analysis
 
     RESEARCH STRATEGY:
@@ -1117,16 +1204,16 @@ class CriticAgent1:
 
         state.critic1_result = CriticResult(**evaluation_result)
 
-        # 여기의 조건문을 수정합니다.
+
         if evaluation_result.get("status") == "sufficient":
             state.info_sufficient = True
             print(
                 "- 정보가 충분하여 다음 단계로 진행합니다."
-            )  # 수정 후에는 이 메시지가 올바른 상황에만 출력됩니다.
+            )
         else:
             state.info_sufficient = False
             print("- 정보가 부족하여 추가 검색을 요청합니다.")
-            # 'status'가 'insufficient'일 때만 suggestion을 출력하도록 보장됩니다.
+
             if evaluation_result.get("status") == "insufficient":
                 print(f"- 개선 제안: {evaluation_result.get('suggestion', 'N/A')}")
 
@@ -1214,7 +1301,7 @@ class CriticAgent1:
             }
 
 
-# ContextIntegratorAgent: 검색 결과 통합
+# ContextIntegratorAgent
 class ContextIntegratorAgent:
     def __init__(self):
         # 최종 보고서 초안 작성이므로 더 성능 좋은 모델 사용을 고려해볼 수 있음
@@ -1238,42 +1325,135 @@ class ContextIntegratorAgent:
 
         print(f"- 총 {len(all_results)}개 검색 결과를 바탕으로 초안 작성 시작")
 
+        # PostgreSQL 결과를 먼저 파싱하여 구조화된 데이터 추출
+        structured_data = self._parse_postgresql_results(all_results)
+        print(f"- PostgreSQL 구조화 데이터: {len(structured_data.get('nutrition_data', []))}건 영양소, {len(structured_data.get('price_data', []))}건 가격")
+
         # _create_draft 함수를 호출하여 초안을 생성
-        draft = await self._create_draft(state.original_query, all_results)
+        draft = await self._create_draft(state.original_query, all_results, structured_data)
 
         # 생성된 초안을 integrated_context에 저장
-        # 이 초안은 다음 단계인 Critic2가 최종 검수
         state.integrated_context = draft
 
         print(f"- 답변 초안 생성 완료 (길이: {len(draft)}자)")
         print("\n>> CONTEXT_INTEGRATOR 완료")
         return state
 
-    async def _create_draft(self, original_query: str, all_results: list) -> str:
-        """수집된 정보를 바탕으로 자연스러운 문장의 초안을 작성"""
+    def _parse_postgresql_results(self, all_results: list) -> dict:
+        """PostgreSQL 검색 결과에서 구조화된 데이터 추출"""
+        structured_data = {
+            'nutrition_data': [],
+            'price_data': [],
+            'other_data': []
+        }
 
-        # 프롬프트에 전달하기 위해 검색 결과를 간결하게 요약
-        context_summary = ""
-        for result in all_results[:15]:  # 너무 많지 않게 상위 15개 결과만 사용
-            context_summary += f"- 출처({result.source}): {result.content}\n"
+        for result in all_results:
+            content = result.content
+
+            try:
+                # PostgreSQL 결과인지 확인
+                if 'PostgreSQL 검색 결과' in content:
+                    # 정확한 JSON 블록만 추출
+                    json_match = re.search(r'### 상세 데이터 \(JSON\)\s*(\{.*?\n\})', content, re.DOTALL)
+                    if json_match:
+                        json_content = json_match.group(1).strip()
+                        data = json.loads(json_content)
+
+                        # 영양소 데이터 추출
+                        if 'nutrition_data' in data and data['nutrition_data']:
+                            for item in data['nutrition_data']:
+                                structured_item = {
+                                    '식품명': item.get('식품명', 'N/A'),
+                                    '식품군': item.get('식품군', 'N/A'),
+                                    '출처': item.get('출처', 'N/A'),
+                                    '칼로리': item.get('칼로리', 0),
+                                    '단백질': item.get('단백질', 0),
+                                    '지방': item.get('지방', 0),
+                                    '탄수화물': item.get('탄수화물', 0),
+                                    '식이섬유': item.get('식이섬유', 0),
+                                    '칼슘': item.get('칼슘', 0),
+                                    '철': item.get('철', 0),
+                                    '나트륨': item.get('나트륨', 0),
+                                    '칼륨': item.get('칼륨', 0),
+                                    '마그네슘': item.get('마그네슘', 0),
+                                    '비타민b1': item.get('비타민b1', 0),
+                                    '비타민b2': item.get('비타민b2', 0),
+                                    '비타민b6': item.get('비타민b6', 0),
+                                    '비타민c': item.get('비타민c', 0),
+                                    '비타민e': item.get('비타민e', 0),
+                                    '엽산': item.get('엽산', 0)
+                                }
+                                structured_data['nutrition_data'].append(structured_item)
+
+                        # 가격 데이터 추출
+                        if 'price_data' in data and data['price_data']:
+                            for item in data['price_data']:
+                                structured_item = {
+                                    '품목명': item.get('product_cls_name', 'N/A'),
+                                    '카테고리': item.get('category_name', 'N/A'),
+                                    '가격': item.get('value', 0),
+                                    '단위': item.get('unit', 'kg'),
+                                    '날짜': item.get('regday', 'N/A')
+                                }
+                                structured_data['price_data'].append(structured_item)
+
+            # 디버깅을 위한 로그
+            except (json.JSONDecodeError, AttributeError) as e:
+                print(f"- PostgreSQL 결과 파싱 오류: {e}")
+                # 파싱 실패 시 원본 내용을 other_data에 추가
+                structured_data['other_data'].append({
+                    'source': result.source,
+                    'content': content[:500] + "..." if len(content) > 500 else content
+                })
+
+        return structured_data
+
+
+    async def _create_draft(self, original_query: str, all_results: list, structured_data: dict) -> str:
+        """수집된 정보를 바탕으로 자연스러운 문장의 초안을 작성 - PostgreSQL 데이터 우선 활용"""
+
+        # 1. PostgreSQL 구조화 데이터를 우선 처리
+        postgresql_summary = self._format_postgresql_data(structured_data)
+
+        # 2. 다른 검색 결과 요약 (PostgreSQL 제외)
+        other_results_summary = ""
+        non_postgresql_count = 0
+        for result in all_results[:10]:  # 최대 10개까지
+            if hasattr(result, 'source') and result.source == 'rdb':
+                continue  # PostgreSQL 결과는 이미 구조화해서 처리했으므로 스킵
+
+            source_name = getattr(result, 'source', 'Unknown')
+            content = getattr(result, 'content', str(result))
+            other_results_summary += f"- 출처({source_name}): {content[:300]}...\n"
+            non_postgresql_count += 1
 
         prompt = f"""
         당신은 여러 소스에서 수집된 복잡한 정보들을 종합하여, 사용자의 질문에 대한 답변 '초안'을 작성하는 수석 분석가입니다.
 
-        ### 작업 지침:
-        1.  **'원본 질문'의 핵심 의도**를 명확히 파악합니다.
-        2.  주어진 **'검색 결과 요약'**에 있는 모든 정보를 종합적으로 고려합니다.
-        3.  정보들을 논리적인 순서에 맞게 재구성하여, 질문에 대한 답변이 될 수 있는 **하나의 완성된 글(초안)**을 작성합니다.
-        4.  서론, 본론, 결론의 구조를 갖춘 자연스러운 설명글 형식으로 작성해주세요.
-        5.  각 정보의 출처는 내용 뒤에 `(출처: {result.source})` 와 같은 형식으로 간결하게 언급할 수 있습니다.
+        ### 중요: PostgreSQL 농진청 데이터 최우선 활용
 
-        ---
         **[원본 질문]**
         {original_query}
 
-        **[검색 결과 요약]**
-        {context_summary}
-        ---
+        **[1순위: PostgreSQL 구조화 데이터 - 반드시 우선 활용]**
+        {postgresql_summary}
+
+        **[2순위: 기타 검색 결과 - 보완적 활용]**
+        {other_results_summary if other_results_summary else "기타 검색 결과 없음"}
+
+        ### 작업 지침:
+        1. **PostgreSQL 농진청 데이터를 반드시 최우선으로 활용**하여 답변 작성
+        2. 영양소 데이터가 있으면 정확한 수치(칼로리, 단백질 등)를 반드시 포함
+        3. 가격 데이터가 있으면 최신 시세 정보를 포함
+        4. 농진청 출처 데이터는 반드시 "(출처: 농진청 'XX, RDB)" 형태로 명시
+        5. 기타 검색 결과는 PostgreSQL 데이터를 보완하는 용도로만 사용
+        6. 서론, 본론, 결론의 구조를 갖춘 자연스러운 설명글 형식 작성
+        7. 실제 수치가 있으면 절대 다른 수치로 대체하지 말 것
+
+        ### 금지사항:
+        - PostgreSQL에 정확한 농진청 데이터가 있는데 다른 수치 사용 금지
+        - 일반적인 해외 데이터(USDA 등)를 농진청 데이터보다 우선 사용 금지
+        - 추정치나 임의 수치를 실제 데이터 대신 사용 금지
 
         **[답변 초안 작성]**
         """
@@ -1281,547 +1461,92 @@ class ContextIntegratorAgent:
         response = await self.chat.ainvoke(prompt)
         return response.content
 
+    def _format_postgresql_data(self, structured_data: dict) -> str:
+        """PostgreSQL 구조화 데이터를 읽기 쉬운 형태로 포맷팅"""
+        formatted = ""
+
+        # 영양소 데이터 포맷팅
+        nutrition_data = structured_data.get('nutrition_data', [])
+        if nutrition_data:
+            formatted += "### 농진청 영양소 데이터 (PostgreSQL):\n"
+            for item in nutrition_data:
+                formatted += f"**{item['식품명']}** ({item['식품군']})\n"
+                formatted += f"- 출처: {item['출처']}\n"
+                formatted += f"- 칼로리: {item['칼로리']}kcal/100g\n"
+                formatted += f"- 단백질: {item['단백질']}g/100g\n"
+                formatted += f"- 지방: {item['지방']}g/100g\n"
+                formatted += f"- 탄수화물: {item['탄수화물']}g/100g\n"
+                formatted += f"- 식이섬유: {item['식이섬유']}g/100g\n"
+
+                # 미네랄 정보가 있으면 추가
+                if item['칼슘'] or item['철'] or item['마그네슘']:
+                    formatted += f"- 칼슘: {item['칼슘']}mg, 철: {item['철']}mg, 마그네슘: {item['마그네슘']}mg\n"
+
+                # 비타민 정보가 있으면 추가
+                if item['비타민b1'] or item['비타민b2'] or item['비타민e']:
+                    formatted += f"- 비타민B1: {item['비타민b1']}mg, 비타민B2: {item['비타민b2']}mg, 비타민E: {item['비타민e']}mg\n"
+
+                formatted += "\n"
+
+        # 가격 데이터 포맷팅
+        price_data = structured_data.get('price_data', [])
+        if price_data:
+            formatted += "### 농수산물 가격 데이터 (PostgreSQL):\n"
+            for item in price_data:
+                formatted += f"**{item['품목명']}** ({item['카테고리']})\n"
+                formatted += f"- 가격: {item['가격']}원/{item['단위']}\n"
+                formatted += f"- 날짜: {item['날짜']}\n\n"
+
+        # 기타 데이터
+        other_data = structured_data.get('other_data', [])
+        if other_data:
+            formatted += "### 기타 RDB 데이터:\n"
+            for item in other_data:
+                formatted += f"- {item['content']}\n"
+
+        if not formatted:
+            formatted = "PostgreSQL 구조화 데이터 없음\n"
+
+        return formatted
 
 
-# 차트 생성 지침
-CHART_GENERATION_INSTRUCTIONS = """
-## 차트 데이터 생성 지침
 
-**중요: 모든 차트에는 데이터 출처를 명시해야 합니다.**
+# 리팩토링 관련 임포트(참고용)
+from ...core.config.report_config import TeamType, ReportType, Language
+from ...services.templates.report_templates import ReportTemplateManager
+from ...services.builders.prompt_builder import PromptBuilder
+from ...utils.analyzers.query_analyzer import QueryAnalyzer
 
-보고서에 차트가 필요한 부분에서는 아래 형식을 정확히 따라 완전한 JSON 데이터를 생성해야 합니다.
-
-### 실제 데이터 기반 차트 형식:
-{{CHART_START}}
-{"title": "지역별 물류 경로 효율성 (실제 데이터)", "type": "line", "data": {"labels": ["서울", "부산", "대전", "광주"], "datasets": [{"label": "배송 시간 (시간)", "data": [4, 3, 5, 4]}]}, "source": "실제 추출 데이터", "data_type": "real"}
-{{CHART_END}}
-
-### 추정 데이터 기반 차트 형식:
-{{CHART_START}}
-{"title": "타겟 세그먼트별 관심사 분포 (추정 데이터)", "type": "pie", "data": {"labels": ["환경친화성", "가성비", "브랜드 신뢰도"], "datasets": [{"label": "관심도 (%)", "data": [35, 25, 20]}]}, "source": "시장조사 기반 추정", "data_type": "estimated"}
-{{CHART_END}}
-
-### 데이터 출처 표기 규칙:
-1. **실제 데이터**: 검색 결과에서 추출된 수치 → 제목에 "(실제 데이터)" 표시, "data_type": "real"
-2. **추정 데이터**: 일반적인 시장 지식 기반 → 제목에 "(추정 데이터)" 표시, "data_type": "estimated"
-3. **source 필드**: 데이터의 구체적 출처 명시
-4. **차트 하단 설명**: 각 차트마다 데이터 신뢰도와 출처 간단 설명 추가
-
-### 필수 사항:
-- 모든 차트 제목에 데이터 유형 명시 (실제/추정)
-- source와 data_type 필드 반드시 포함
-- 차트별로 데이터 신뢰도 설명 제공
-"""
-
-# 보고서 템플릿 정의
-REPORT_TEMPLATES = {
-    "marketing": {
-        "comprehensive": {
-            "role_description": "bain_principal_marketing",
-            "sections": [
-                {
-                    "key": "marketing_insights_summary",
-                    "words": "450-500",
-                    "details": [
-                        "core_trends_5",
-                        "immediate_opportunities_3",
-                        "competitive_advantage",
-                        "growth_potential",
-                    ],
-                },
-                {
-                    "key": "consumer_behavior_analysis",
-                    "words": "500",
-                    "details": [
-                        "target_segment_profiles",
-                        "customer_journey_mapping",
-                        "brand_perception_analysis",
-                        "lifestyle_changes",
-                    ],
-                },
-                {
-                    "key": "competitive_market_opportunities",
-                    "words": "450",
-                    "details": [
-                        "competitor_benchmarking",
-                        "new_player_analysis",
-                        "whitespace_discovery",
-                        "category_expansion",
-                    ],
-                },
-                {
-                    "key": "omnichannel_strategy",
-                    "words": "400",
-                    "details": [
-                        "channel_optimization",
-                        "new_channel_development",
-                        "integrated_brand_experience",
-                        "marketing_automation",
-                    ],
-                },
-                {
-                    "key": "campaign_strategy",
-                    "words": "450",
-                    "details": [
-                        "short_term_campaigns",
-                        "medium_term_campaigns",
-                        "long_term_campaigns",
-                        "integrated_roadmap",
-                    ],
-                },
-                {
-                    "key": "performance_framework",
-                    "words": "300",
-                    "details": [
-                        "kpi_dashboard",
-                        "ab_testing",
-                        "roi_tracking",
-                        "feedback_loop",
-                    ],
-                },
-            ],
-            "total_words": "2000-3000",
-            "charts": "6-8",
-        },
-        "detailed": {
-            "role_description": "strategic_marketing_analyst",
-            "sections": [
-                {
-                    "key": "market_consumer_analysis",
-                    "words": "400",
-                    "details": [
-                        "market_size_growth",
-                        "consumer_segmentation",
-                        "journey_analysis",
-                        "trend_analysis",
-                    ],
-                },
-                {
-                    "key": "competitive_positioning",
-                    "words": "400",
-                    "details": [
-                        "competitor_analysis",
-                        "brand_positioning",
-                        "differentiation_strategy",
-                        "whitespace_opportunities",
-                    ],
-                },
-                {
-                    "key": "integrated_marketing",
-                    "words": "400",
-                    "details": [
-                        "channel_strategy",
-                        "campaign_strategy",
-                        "message_strategy",
-                        "budget_optimization",
-                    ],
-                },
-                {
-                    "key": "digital_innovation",
-                    "words": "300",
-                    "details": [
-                        "digital_transformation",
-                        "data_utilization",
-                        "new_technology",
-                        "automation",
-                    ],
-                },
-                {
-                    "key": "execution_performance",
-                    "words": "300",
-                    "details": [
-                        "execution_roadmap",
-                        "kpi_measurement",
-                        "risk_management",
-                        "continuous_optimization",
-                    ],
-                },
-            ],
-            "total_words": "1500-2000",
-            "charts": "4-5",
-        },
-        "standard": {
-            "role_description": "marketing_strategist",
-            "sections": [
-                {
-                    "key": "market_consumer_insights",
-                    "words": "350",
-                    "details": [
-                        "market_size_analysis",
-                        "target_segments",
-                        "competitive_environment",
-                        "growth_drivers",
-                    ],
-                },
-                {
-                    "key": "brand_positioning_strategy",
-                    "words": "350",
-                    "details": [
-                        "brand_positioning",
-                        "differentiation_strategy",
-                        "message_strategy",
-                        "brand_assets",
-                    ],
-                },
-                {
-                    "key": "marketing_mix",
-                    "words": "300",
-                    "details": [
-                        "channel_strategy",
-                        "campaign_planning",
-                        "budget_allocation",
-                        "execution_timeline",
-                    ],
-                },
-                {
-                    "key": "performance_execution",
-                    "words": "250",
-                    "details": [
-                        "kpi_setting",
-                        "roi_prediction",
-                        "risk_management",
-                        "next_steps",
-                    ],
-                },
-            ],
-            "total_words": "1000-1500",
-            "charts": "3",
-        },
-        "brief": {
-            "role_description": "marketing_consultant",
-            "sections": [
-                {
-                    "key": "market_situation_opportunities",
-                    "words": "250",
-                    "details": [
-                        "key_trends",
-                        "target_analysis",
-                        "competitive_situation",
-                    ],
-                },
-                {
-                    "key": "recommended_strategy",
-                    "words": "200",
-                    "details": ["core_strategy", "priority_tasks", "expected_results"],
-                },
-                {
-                    "key": "execution_plan",
-                    "words": "150",
-                    "details": [
-                        "action_plan",
-                        "required_resources",
-                        "performance_measurement",
-                    ],
-                },
-            ],
-            "total_words": "500-800",
-            "charts": "1-2",
-        },
-    },
-    "purchasing": {
-        "comprehensive": {
-            "role_description": "mckinsey_procurement_partner",
-            "sections": [
-                {
-                    "key": "executive_strategic_recommendations",
-                    "words": "500",
-                    "details": [
-                        "value_opportunities",
-                        "strategic_sourcing_insights",
-                        "risk_mitigation",
-                        "financial_impact",
-                    ],
-                },
-                {
-                    "key": "market_intelligence_pricing",
-                    "words": "600",
-                    "details": [
-                        "commodity_price_analysis",
-                        "global_supply_demand",
-                        "geopolitical_regulatory",
-                        "ai_prediction_models",
-                    ],
-                },
-                {
-                    "key": "supplier_ecosystem_evaluation",
-                    "words": "500",
-                    "details": [
-                        "supplier_scorecards",
-                        "supply_base_optimization",
-                        "financial_health_assessment",
-                        "emerging_suppliers",
-                    ],
-                },
-                {
-                    "key": "procurement_excellence_digital",
-                    "words": "450",
-                    "details": [
-                        "category_strategy_enhancement",
-                        "contract_optimization",
-                        "digital_procurement_platform",
-                        "organizational_capability",
-                    ],
-                },
-                {
-                    "key": "advanced_risk_management",
-                    "words": "400",
-                    "details": [
-                        "risk_quantification",
-                        "scenario_based_response",
-                        "alternative_sourcing",
-                        "hedging_strategies",
-                    ],
-                },
-                {
-                    "key": "performance_continuous_improvement",
-                    "words": "300",
-                    "details": [
-                        "kpi_dashboard",
-                        "benchmarking_framework",
-                        "innovation_metrics",
-                        "sustainability_matrix",
-                    ],
-                },
-            ],
-            "total_words": "2000-3000",
-            "charts": "7-8",
-        },
-        "detailed": {
-            "role_description": "procurement_strategist",
-            "sections": [
-                {
-                    "key": "procurement_strategy_optimization",
-                    "words": "400",
-                    "details": [
-                        "procurement_strategy",
-                        "supplier_management",
-                        "risk_analysis",
-                        "cost_optimization",
-                    ],
-                }
-            ],
-            "total_words": "1500-2000",
-            "charts": "4-5",
-        },
-        "standard": {
-            "role_description": "procurement_analyst",
-            "sections": [
-                {
-                    "key": "procurement_analysis",
-                    "words": "350",
-                    "details": [
-                        "market_analysis",
-                        "supplier_evaluation",
-                        "cost_strategy",
-                    ],
-                }
-            ],
-            "total_words": "1000-1500",
-            "charts": "3",
-        },
-        "brief": {
-            "role_description": "procurement_consultant",
-            "sections": [
-                {
-                    "key": "procurement_insights",
-                    "words": "250",
-                    "details": ["key_findings", "recommendations", "action_items"],
-                }
-            ],
-            "total_words": "500-800",
-            "charts": "1-2",
-        },
-    },
-    "development": {
-        "comprehensive": {
-            "role_description": "innovation_strategist",
-            "sections": [
-                {
-                    "key": "product_innovation_strategy",
-                    "words": "500",
-                    "details": [
-                        "innovation_strategy",
-                        "technology_roadmap",
-                        "commercialization",
-                    ],
-                }
-            ],
-            "total_words": "2000-3000",
-            "charts": "6-8",
-        }
-    },
-    "general_affairs": {
-        "comprehensive": {
-            "role_description": "operations_excellence_expert",
-            "sections": [
-                {
-                    "key": "operational_optimization",
-                    "words": "500",
-                    "details": [
-                        "operations_optimization",
-                        "employee_satisfaction",
-                        "cost_efficiency",
-                    ],
-                }
-            ],
-            "total_words": "2000-3000",
-            "charts": "6-8",
-        }
-    },
-    "general": {
-        "comprehensive": {
-            "role_description": "business_analyst",
-            "sections": [
-                {
-                    "key": "strategic_business_analysis",
-                    "words": "500",
-                    "details": [
-                        "market_analysis",
-                        "opportunity_assessment",
-                        "strategic_recommendations",
-                    ],
-                }
-            ],
-            "total_words": "2000-3000",
-            "charts": "6-8",
-        }
-    },
-}
-
-# 언어별 번역
-TRANSLATIONS = {
-    "korean": {
-        # 역할 설명
-        "bain_principal_marketing": "당신은 베인앤컴퍼니의 프린시플로서 100개 이상의 브랜드를 성공으로 이끈 마케팅 전략가입니다.",
-        "strategic_marketing_analyst": "당신은 전략적 마케팅 분석을 전문으로 하는 시니어 애널리스트입니다.",
-        "marketing_strategist": "당신은 마케팅 전략 수립을 전문으로 하는 컨설턴트입니다.",
-        "marketing_consultant": "당신은 마케팅 인사이트를 제공하는 전문 컨설턴트입니다.",
-        "mckinsey_procurement_partner": "당신은 맥킨지앤컴퍼니의 시니어 파트너로서 Fortune 500 기업의 조달 혁신을 전문으로 합니다.",
-        "procurement_strategist": "당신은 구매 전략과 공급망 최적화를 전문으로 하는 컨설턴트입니다.",
-        "procurement_analyst": "당신은 구매 분석과 공급업체 관리를 전문으로 하는 애널리스트입니다.",
-        "procurement_consultant": "당신은 구매 최적화를 위한 인사이트를 제공하는 컨설턴트입니다.",
-        "innovation_strategist": "당신은 제품 혁신과 기술 전략을 전문으로 하는 전략가입니다.",
-        "operations_excellence_expert": "당신은 운영 우수성과 직원 경험 최적화를 전문으로 하는 컨설턴트입니다.",
-        "business_analyst": "당신은 전략적 비즈니스 분석을 전문으로 하는 컨설턴트입니다.",
-        # 섹션 제목
-        "marketing_insights_summary": "마케팅 인사이트 종합 요약",
-        "consumer_behavior_analysis": "심층 소비자 행동 분석",
-        "competitive_market_opportunities": "경쟁 환경 및 시장 기회",
-        "omnichannel_strategy": "옴니채널 실행 전략",
-        "campaign_strategy": "구체적 캠페인 전략",
-        "performance_framework": "성과 측정 프레임워크",
-        "market_consumer_analysis": "시장 기회 및 소비자 분석",
-        "competitive_positioning": "경쟁 환경 및 포지셔닝",
-        "integrated_marketing": "통합 마케팅 전략",
-        "digital_innovation": "디지털 마케팅 혁신",
-        "execution_performance": "실행 계획 및 성과 관리",
-        "market_consumer_insights": "시장 기회 및 소비자 인사이트",
-        "brand_positioning_strategy": "브랜드 전략 및 포지셔닝",
-        "marketing_mix": "마케팅 믹스 전략",
-        "performance_execution": "성과 측정 및 실행 방안",
-        "market_situation_opportunities": "시장 현황 및 기회",
-        "recommended_strategy": "추천 전략",
-        "execution_plan": "실행 방안",
-        # 구매 관련
-        "executive_strategic_recommendations": "경영진 요약 및 전략적 제안",
-        "market_intelligence_pricing": "시장 인텔리전스 및 가격 동향",
-        "supplier_ecosystem_evaluation": "공급업체 생태계 종합 평가",
-        "procurement_excellence_digital": "조달 우수성 및 디지털 전환",
-        "advanced_risk_management": "고급 리스크 관리",
-        "performance_continuous_improvement": "성과 측정 및 지속적 개선",
-        "procurement_strategy_optimization": "구매 전략 및 공급망 최적화",
-        "procurement_analysis": "구매 전략 분석",
-        "procurement_insights": "구매 인사이트 요약",
-        # 기타
-        "product_innovation_strategy": "제품 혁신 및 기술 전략",
-        "operational_optimization": "운영 우수성 및 직원 경험 최적화",
-        "strategic_business_analysis": "전략적 비즈니스 분석 및 인사이트",
-        # 세부 항목들
-        "core_trends_5": "핵심 트렌드 5가지: 각 트렌드별 정량적 임팩트 분석",
-        "immediate_opportunities_3": "즉시 활용 기회 3가지: ROI 예측치와 구체적 실행 방안",
-        "competitive_advantage": "경쟁사 대비 우위: 차별화 전략과 포지셔닝 갭 분석",
-        "growth_potential": "성장 잠재력: ROAS, CAC, LTV 기반 정량적 예측",
-    },
-    "english": {
-        # 역할 설명
-        "bain_principal_marketing": "You are a Principal at Bain & Company who has led over 100 brands to success as a marketing strategist.",
-        "strategic_marketing_analyst": "You are a senior analyst specializing in strategic marketing analysis.",
-        "marketing_strategist": "You are a consultant specializing in marketing strategy development.",
-        "marketing_consultant": "You are a professional consultant providing marketing insights.",
-        "mckinsey_procurement_partner": "You are a Senior Partner at McKinsey & Company specializing in procurement innovation for Fortune 500 companies.",
-        "procurement_strategist": "You are a consultant specializing in procurement strategy and supply chain optimization.",
-        "procurement_analyst": "You are an analyst specializing in procurement analysis and supplier management.",
-        "procurement_consultant": "You are a consultant providing insights for procurement optimization.",
-        "innovation_strategist": "You are a strategist specializing in product innovation and technology strategy.",
-        "operations_excellence_expert": "You are a consultant specializing in operational excellence and employee experience optimization.",
-        "business_analyst": "You are a consultant specializing in strategic business analysis.",
-        # 섹션 제목
-        "marketing_insights_summary": "Marketing Insights Summary",
-        "consumer_behavior_analysis": "Consumer Behavior Analysis",
-        "competitive_market_opportunities": "Competitive Environment and Market Opportunities",
-        "omnichannel_strategy": "Omnichannel Execution Strategy",
-        "campaign_strategy": "Specific Campaign Strategy",
-        "performance_framework": "Performance Measurement Framework",
-        "market_consumer_analysis": "Market Opportunities and Consumer Analysis",
-        "competitive_positioning": "Competitive Environment and Positioning",
-        "integrated_marketing": "Integrated Marketing Strategy",
-        "digital_innovation": "Digital Marketing Innovation",
-        "execution_performance": "Execution Plan and Performance Management",
-        "market_consumer_insights": "Market Opportunities and Consumer Insights",
-        "brand_positioning_strategy": "Brand Strategy and Positioning",
-        "marketing_mix": "Marketing Mix Strategy",
-        "performance_execution": "Performance Measurement and Execution Plan",
-        "market_situation_opportunities": "Market Situation and Opportunities",
-        "recommended_strategy": "Recommended Strategy",
-        "execution_plan": "Execution Plan",
-        # 구매 관련
-        "executive_strategic_recommendations": "Executive Summary and Strategic Recommendations",
-        "market_intelligence_pricing": "Market Intelligence and Pricing Trends",
-        "supplier_ecosystem_evaluation": "Supplier Ecosystem Comprehensive Evaluation",
-        "procurement_excellence_digital": "Procurement Excellence and Digital Transformation",
-        "advanced_risk_management": "Advanced Risk Management",
-        "performance_continuous_improvement": "Performance Measurement and Continuous Improvement",
-        "procurement_strategy_optimization": "Procurement Strategy and Supply Chain Optimization",
-        "procurement_analysis": "Procurement Strategy Analysis",
-        "procurement_insights": "Procurement Insights Summary",
-        # 기타
-        "product_innovation_strategy": "Product Innovation and Technology Strategy",
-        "operational_optimization": "Operational Excellence and Employee Experience Optimization",
-        "strategic_business_analysis": "Strategic Business Analysis and Insights",
-        # 세부 항목들
-        "core_trends_5": "5 Core Trends: Quantitative impact analysis for each trend",
-        "immediate_opportunities_3": "3 Immediate Opportunities: ROI predictions and specific execution plans",
-        "competitive_advantage": "Competitive Advantage: Differentiation strategy and positioning gap analysis",
-        "growth_potential": "Growth Potential: Quantitative predictions based on ROAS, CAC, LTV",
-    },
-}
 
 class ReportGeneratorAgent:
+    """보고서 생성 에이전트"""
+
     def __init__(self):
-        self.streaming_chat = ChatOpenAI(
-            model="gpt-4o-mini", temperature=0.9, streaming=True
-        )
+        self.streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.9, streaming=True)
         self.non_streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         self.agent_type = "REPORT_GENERATOR"
-        self.use_plan_first = False
+
+        self.template_manager = ReportTemplateManager()
+        self.prompt_builder = PromptBuilder(self.template_manager)
         self.data_extractor = DataExtractor()
 
-    async def generate_streaming(
-        self, state: StreamingAgentState
+    async def generate_streaming_with_sources(
+        self,
+        state: StreamingAgentState,
+        source_collection_data: Dict = None
     ) -> AsyncGenerator[str, None]:
-        """실제 데이터 기반 스트리밍으로 답변을 생성"""
-        print("\n>> ENHANCED STREAMING REPORT_GENERATOR 시작")
+        """스트리밍 보고서 생성 - 메인 로직"""
+
+        print("\n>> REFACTORED REPORT_GENERATOR 시작")
+
+        # 기본 정보 추출
         integrated_context = state.integrated_context
         original_query = state.original_query
-
         memory_context = getattr(state, "memory_context", "")
         user_context = getattr(state, "user_context", None)
 
-        print(
-            f"- 메모리 컨텍스트 사용: {len(memory_context)}자"
-            if memory_context
-            else "- 메모리 컨텍스트 없음"
-        )
+        print(f"- 쿼리: {original_query[:50]}...")
+        print(f"- 컨텍스트: {len(integrated_context)}자")
 
         if not integrated_context:
             error_msg = "분석할 충분한 정보가 수집되지 않았습니다."
@@ -1829,538 +1554,221 @@ class ReportGeneratorAgent:
             yield error_msg
             return
 
-        # 검색 결과에서 실제 데이터 추출
+        # 1. 쿼리 분석
+        team_type = QueryAnalyzer.detect_team_type(original_query)
+        language = QueryAnalyzer.detect_language(original_query)
+        complexity_analysis = QueryAnalyzer.analyze_complexity(original_query, user_context)
+        report_type = complexity_analysis["report_type"]
+
+        print(f"- 분석 결과: {team_type.value} / {report_type.value} / {language.value}")
+
+        # 2. 실제 데이터 추출
         all_results = getattr(state, 'graph_results_stream', []) + getattr(state, 'multi_source_results_stream', [])
         extracted_data = await self.data_extractor.extract_numerical_data(all_results, original_query)
 
-        print(f"- 추출된 실제 데이터: {len(extracted_data.get('extracted_numbers', []))}개 수치")
+        print(f"- 추출된 수치: {len(extracted_data.get('extracted_numbers', []))}개")
 
-        # 실제 데이터 기반 차트 생성
+        # 3. 차트 생성
         real_charts = await self._create_data_driven_charts(extracted_data, original_query)
-        print(f"- 생성된 실제 데이터 차트: {len(real_charts)}개")
+        print(f"- 생성된 차트: {len(real_charts)}개")
 
-        complexity_analysis = self._analyze_query_complexity(
-            original_query, user_context
+        # 4. 프롬프트 생성
+        prompt = self.prompt_builder.build_prompt(
+            query=original_query,
+            context=integrated_context,
+            team_type=team_type,
+            report_type=report_type,
+            language=language,
+            extracted_data=extracted_data,
+            real_charts=real_charts,
+            source_data=source_collection_data
         )
-        print(f"- 질문 복잡도: {complexity_analysis['report_type']}")
 
-        # 실제 데이터를 포함한 프롬프트 생성
-        prompt = self._create_enhanced_prompt(
-            original_query, integrated_context, memory_context, user_context, extracted_data, real_charts
-        )
+        # 5. 스트리밍 생성
         full_response = ""
-
         try:
+            print("- 스트리밍 시작...")
             async for chunk in self.streaming_chat.astream(prompt):
                 if chunk.content:
                     full_response += chunk.content
                     yield chunk.content
         except Exception as e:
-            error_msg = f"답변 생성 중 오류가 발생했습니다: {str(e)}"
+            error_msg = f"답변 생성 중 오류: {str(e)}"
             yield error_msg
             full_response = error_msg
 
         state.final_answer = full_response
-        print(f"\n- 실제 데이터 기반 스트리밍 완료")
+        print(f"- 스트리밍 완료 (총 {len(full_response)}자)")
 
     async def _create_data_driven_charts(self, extracted_data: Dict, query: str) -> List[Dict]:
-        """추출된 실제 데이터를 기반으로 차트 생성"""
+        """실제 데이터 기반 차트 생성 - 데이터 검증 로직 강화"""
         charts = []
 
-        # 1. 퍼센트 데이터가 있으면 파이 차트
+        print(f"\n>> 차트 생성 시작")
+        print(f"- 추출된 데이터: {extracted_data}")
+
+        if not extracted_data:
+            print("- 추출된 데이터 없음, 빈 차트 리스트 반환")
+            return charts
+
+        # 1. 퍼센트 데이터 -> 파이 차트
         percentages = extracted_data.get('percentages', [])
         if len(percentages) >= 2:
-            labels = [p['context'][:20] + "..." if len(p['context']) > 20 else p['context'] for p in percentages[:5]]
-            values = [p['value'] for p in percentages[:5]]
+            print(f"- 퍼센트 데이터 발견: {len(percentages)}개")
+            # 데이터 검증
+            valid_percentages = [
+                p for p in percentages
+                if isinstance(p.get('value'), (int, float)) and 0 <= p.get('value') <= 100
+            ]
 
-            charts.append({
-                "title": f"{query} 관련 비율 분석 (실제 데이터)",
-                "type": "pie",
-                "data": {
-                    "labels": labels,
-                    "datasets": [{"label": "비율 (%)", "data": values}]
-                },
-                "source": "실제 추출 데이터",
-                "data_type": "real"
-            })
+            if len(valid_percentages) >= 2:
+                labels = []
+                values = []
 
-        # 2. 카테고리 데이터가 있으면 바 차트
-        categories = extracted_data.get('categories', {})
-        if len(categories) >= 2:
-            labels = list(categories.keys())[:6]
-            values = [categories[label].get('value', 0) for label in labels]
+                for p in valid_percentages[:5]:
+                    context = p.get('context', '항목')
+                    if len(context) > 20:
+                        context = context[:20] + "..."
+                    labels.append(context)
+                    values.append(float(p['value']))
 
-            charts.append({
-                "title": f"{query} 카테고리별 분석 (실제 데이터)",
-                "type": "bar",
-                "data": {
-                    "labels": labels,
-                    "datasets": [{"label": "수치", "data": values}]
-                },
-                "source": "실제 추출 데이터",
-                "data_type": "real"
-            })
+                chart = {
+                    "title": f"{query[:30]}... 비율 분석 (실제 데이터)",
+                    "type": "pie",
+                    "data": {
+                        "labels": labels,
+                        "datasets": [{"label": "비율 (%)", "data": values}]
+                    },
+                    "source": "실제 추출 데이터",
+                    "data_type": "real"
+                }
+                charts.append(chart)
+                print(f"- 파이 차트 생성 완료: {chart['title']}")
 
-        # 3. 트렌드 데이터가 있으면 라인 차트
-        trends = extracted_data.get('trends', [])
-        if len(trends) >= 2:
-            labels = [t['period'] for t in trends[:6]]
-            values = []
-            for t in trends[:6]:
-                change_str = str(t.get('change', '0'))
-                numbers = re.findall(r'-?\d+\.?\d*', change_str)
-                values.append(float(numbers[0]) if numbers else 0)
-
-            charts.append({
-                "title": f"{query} 시간별 변화 추이 (실제 데이터)",
-                "type": "line",
-                "data": {
-                    "labels": labels,
-                    "datasets": [{"label": "변화율", "data": values}]
-                },
-                "source": "실제 추출 데이터",
-                "data_type": "real"
-            })
-
-        # 4. 일반 수치 데이터가 있으면 바 차트
+        # 2. 일반 수치 데이터 -> 바 차트
         numbers = extracted_data.get('extracted_numbers', [])
         if len(numbers) >= 2:
-            labels = [n['context'][:15] + "..." if len(n['context']) > 15 else n['context'] for n in numbers[:5]]
-            values = [n['value'] for n in numbers[:5]]
-            units = [n.get('unit', '') for n in numbers[:5]]
+            print(f"- 수치 데이터 발견: {len(numbers)}개")
+            # 데이터 검증
+            valid_numbers = [
+                n for n in numbers
+                if isinstance(n.get('value'), (int, float))
+            ]
 
-            charts.append({
-                "title": f"{query} 주요 수치 분석 (실제 데이터)",
-                "type": "bar",
-                "data": {
-                    "labels": labels,
-                    "datasets": [{"label": f"수치 ({units[0] if units[0] else '단위'})", "data": values}]
-                },
-                "source": "실제 추출 데이터",
-                "data_type": "real"
-            })
+            if len(valid_numbers) >= 2:
+                labels = []
+                values = []
+                units = []
 
+                for n in valid_numbers[:5]:
+                    context = n.get('context', '항목')
+                    if len(context) > 15:
+                        context = context[:15] + "..."
+                    labels.append(context)
+                    values.append(float(n['value']))
+                    units.append(n.get('unit', ''))
+
+                # 단위 통일 (첫 번째 단위 사용)
+                primary_unit = units[0] if units[0] else '단위'
+
+                chart = {
+                    "title": f"{query[:30]}... 주요 수치 (실제 데이터)",
+                    "type": "bar",
+                    "data": {
+                        "labels": labels,
+                        "datasets": [{"label": f"수치 ({primary_unit})", "data": values}]
+                    },
+                    "source": "실제 추출 데이터",
+                    "data_type": "real"
+                }
+                charts.append(chart)
+                print(f"- 바 차트 생성 완료: {chart['title']}")
+
+        # 3. 트렌드 데이터 -> 라인 차트
+        trends = extracted_data.get('trends', [])
+        if len(trends) >= 2:
+            print(f"- 트렌드 데이터 발견: {len(trends)}개")
+
+            labels = []
+            values = []
+
+            for t in trends[:6]:
+                period = t.get('period', '기간')
+                labels.append(period)
+
+                # 변화율 추출
+                change_str = str(t.get('change', '0'))
+                import re
+                numbers = re.findall(r'-?\d+\.?\d*', change_str)
+                change_value = float(numbers[0]) if numbers else 0
+                values.append(change_value)
+
+            if len(values) >= 2:
+                chart = {
+                    "title": f"{query[:30]}... 시간별 변화 추이 (실제 데이터)",
+                    "type": "line",
+                    "data": {
+                        "labels": labels,
+                        "datasets": [{"label": "변화율 (%)", "data": values}]
+                    },
+                    "source": "실제 추출 데이터",
+                    "data_type": "real"
+                }
+                charts.append(chart)
+                print(f"- 라인 차트 생성 완료: {chart['title']}")
+
+        print(f"- 총 {len(charts)}개 차트 생성 완료")
         return charts
 
-    def _create_enhanced_prompt(
-        self, query: str, context: str, memory_context: str = "", user_context=None,
-        extracted_data: Dict = None, real_charts: List[Dict] = None
-    ) -> str:
-        """실제 데이터를 포함한 향상된 프롬프트 생성"""
+    def _validate_chart_data(self, chart: Dict) -> bool:
+        """차트 데이터 유효성 검증"""
+        try:
+            # 필수 필드 확인
+            required_fields = ['title', 'type', 'data', 'source', 'data_type']
+            for field in required_fields:
+                if field not in chart:
+                    print(f"- 차트 검증 실패: {field} 필드 없음")
+                    return False
+
+            # 데이터 구조 확인
+            data = chart['data']
+            if 'labels' not in data or 'datasets' not in data:
+                print(f"- 차트 검증 실패: 데이터 구조 오류")
+                return False
+
+            # 데이터 길이 확인
+            labels = data['labels']
+            datasets = data['datasets']
+
+            if not labels or not datasets:
+                print(f"- 차트 검증 실패: 빈 데이터")
+                return False
+
+            # 첫 번째 데이터셋의 데이터 길이와 라벨 길이 일치 확인
+            if len(datasets) > 0 and 'data' in datasets[0]:
+                if len(labels) != len(datasets[0]['data']):
+                    print(f"- 차트 검증 실패: 라벨과 데이터 길이 불일치")
+                    return False
+
+            # JSON 직렬화 가능 확인
+            json.dumps(chart, ensure_ascii=False)
+
+            print(f"- 차트 검증 성공: {chart['title']}")
+            return True
+
+        except Exception as e:
+            print(f"- 차트 검증 실패: {str(e)}")
+            return False
 
-        # 기존 프롬프트 생성
-        base_prompt = self._create_prompt(query, context, memory_context, user_context)
-
-        # 실제 데이터 정보 추가
-        data_info = ""
-        if extracted_data:
-            data_info += "\n**검색 결과에서 추출된 실제 데이터:**\n"
-
-            if extracted_data.get('extracted_numbers'):
-                data_info += "주요 수치:\n"
-                for num in extracted_data['extracted_numbers'][:3]:
-                    data_info += f"- {num.get('value')} {num.get('unit', '')}: {num.get('context', '')}\n"
-
-            if extracted_data.get('percentages'):
-                data_info += "비율 데이터:\n"
-                for pct in extracted_data['percentages'][:3]:
-                    data_info += f"- {pct.get('value')}%: {pct.get('context', '')}\n"
-
-        # 실제 데이터 차트 정보 추가
-        chart_info = ""
-        if real_charts:
-            chart_info += "\n**사용 가능한 실제 데이터 기반 차트:**\n"
-            for i, chart in enumerate(real_charts, 1):
-                chart_json = json.dumps(chart, ensure_ascii=False)
-                chart_info += f"""
-{i}. {chart['title']}
-   {{CHART_START}}
-   {chart_json}
-   {{CHART_END}}
-   (출처: {chart['source']})
-"""
-
-        enhanced_instructions = f"""
-
-{data_info}
-
-{chart_info}
-
-**데이터 출처 표기 지침 (필수):**
-1. **실제 데이터 우선 사용**: 검색 결과에서 추출된 수치가 있으면 반드시 "(실제 데이터)"로 표시
-2. **추정 데이터 명시**: 일반 지식으로 생성한 차트는 "(추정 데이터)"로 표시
-3. **출처 신뢰도**: 각 차트에 데이터 신뢰도와 한계점 언급
-4. **차트 설명**: 모든 차트 아래에 데이터 출처와 해석 주의사항 제공
-
-**차트 사용 우선순위:**
-1. 실제 추출 데이터 차트 (최우선)
-2. 검색 결과 기반 추정 차트
-3. 일반 시장 지식 기반 차트 (최후)
-
-**실제 데이터 활용 지침:**
-1. **우선순위**: 위에 제공된 실제 데이터 기반 차트를 먼저 사용하세요 중요
-2. **데이터 출처 명시**: 각 차트에 "(실제 데이터)" 또는 "(추정 데이터)" 표시 중요
-3. **인사이트 제공**: 실제 데이터에서 발견되는 패턴이나 트렌드 해석
-4. **추가 차트**: 실제 데이터 차트가 부족한 경우에만 추정 데이터로 보완
-
-**차트 사용 규칙:**
-- 실제 데이터 차트가 있으면 반드시 사용하고 해석 제공
-- 차트별로 데이터 신뢰도 언급 (실제/추정)
-- 각 차트에 대한 구체적인 비즈니스 인사이트 제공
-"""
-
-        return base_prompt + enhanced_instructions
-
-    def _analyze_query_complexity(self, query: str, user_context=None) -> dict:
-        """질문의 복잡도와 요구되는 보고서 길이 분석 - 사용자 컨텍스트 포함"""
-        if not query or not isinstance(query, str):
-            return {
-                "complexity_score": 0,
-                "report_type": "standard",
-                "recommended_length": "1000-1500단어, 4-5개 섹션, 3-4개 차트",
-                "user_expertise": "intermediate",
-            }
-
-        query_lower = query.lower().strip()
-        complexity_score = 0
-
-        complex_keywords = [
-            "보고서", "report", "전략", "strategy", "분석", "analysis",
-            "계획", "plan", "로드맵", "roadmap", "컨설팅", "consulting",
-            "상세", "detailed", "자세", "comprehensive", "심층", "deep",
-            "종합", "전체", "완전", "포괄적",
-        ]
-
-        simple_keywords = [
-            "간단히", "briefly", "짧게", "요약", "summary", "개요", "overview",
-            "뭐야", "what is", "알려줘", "tell me", "빠르게", "quick",
-        ]
-
-        for keyword in complex_keywords:
-            if keyword in query_lower:
-                complexity_score += 1.5
-
-        for keyword in simple_keywords:
-            if keyword in query_lower:
-                complexity_score -= 1.5
-
-        if len(query) > 100:
-            complexity_score += 1.5
-        elif len(query) > 50:
-            complexity_score += 0.5
-
-        user_expertise = "intermediate"
-        if user_context:
-            expertise_level = getattr(user_context, "expertise_level", None)
-            if expertise_level:
-                user_expertise = (
-                    expertise_level.value
-                    if hasattr(expertise_level, "value")
-                    else str(expertise_level)
-                )
-
-                if user_expertise == "expert":
-                    complexity_score += 1.0
-                elif user_expertise == "beginner":
-                    complexity_score -= 0.5
-
-        if complexity_score >= 3:
-            report_type = "comprehensive"
-            recommended_length = "2000-3000단어, 6-8개 섹션, 5-8개 차트"
-        elif complexity_score >= 1.5:
-            report_type = "detailed"
-            recommended_length = "1500-2000단어, 5-6개 섹션, 4-5개 차트"
-        elif complexity_score <= -1.5:
-            report_type = "brief"
-            recommended_length = "500-800단어, 3개 섹션, 1-2개 차트"
-        else:
-            report_type = "standard"
-            recommended_length = "1000-1500단어, 4-5개 섹션, 3-4개 차트"
-
-        return {
-            "complexity_score": complexity_score,
-            "report_type": report_type,
-            "recommended_length": recommended_length,
-            "user_expertise": user_expertise,
-        }
-
-    def _detect_language(self, query: str) -> str:
-        """질문 언어 감지"""
-        if not query or not isinstance(query, str):
-            return "korean"
-
-        query = query.strip()
-        if not query:
-            return "korean"
-
-        korean_chars = sum(1 for char in query if "\uac00" <= char <= "\ud7af")
-        total_chars = len([char for char in query if char.isalpha()])
-
-        if total_chars > 0 and korean_chars / total_chars > 0.5:
-            return "korean"
-        else:
-            return "english"
-
-    def _detect_team_type(self, query: str) -> str:
-        """질문 내용을 분석하여 어떤 팀용 보고서인지 판단"""
-        if not query or not isinstance(query, str):
-            return "general"
-
-        query_lower = query.lower().strip()
-        if not query_lower:
-            return "general"
-
-        team_keywords = {
-            "purchasing": [
-                "가격", "시세", "공급업체", "조달", "구매", "원가", "계약", "비용",
-                "supplier", "procurement", "sourcing", "vendor",
-            ],
-            "marketing": [
-                "마케팅", "브랜드", "광고", "캠페인", "소비자", "고객", "타겟", "sns", "전략",
-                "marketing", "brand", "campaign", "consumer",
-            ],
-            "development": [
-                "개발", "제품", "영양", "성분", "기능성", "연구", "r&d", "신제품", "기술",
-                "development", "nutrition", "ingredient", "innovation",
-            ],
-            "general_affairs": [
-                "급식", "직원", "사내", "구내식당", "메뉴", "식단", "운영", "만족도",
-                "cafeteria", "employee", "facility", "office",
-            ],
-        }
-
-        scores = {}
-        for team, keywords in team_keywords.items():
-            scores[team] = sum(1 for keyword in keywords if keyword in query_lower)
-
-        max_score = max(scores.values()) if scores.values() else 0
-        if max_score == 0:
-            return "general"
-
-        return max(scores, key=scores.get)
-
-    def _create_prompt(
-        self, query: str, context: str, memory_context: str = "", user_context=None
-    ) -> str:
-        """메모리 컨텍스트를 포함한 프롬프트 생성"""
-        if not query or not context:
-            return "입력 데이터가 부족합니다."
-
-        team_type = self._detect_team_type(query)
-        language = self._detect_language(query)
-        complexity_analysis = self._analyze_query_complexity(query, user_context)
-        report_type = complexity_analysis["report_type"]
-        user_expertise = complexity_analysis["user_expertise"]
-
-        user_name = ""
-        user_preferences = {}
-        if user_context:
-            mentioned_info = getattr(user_context, "mentioned_info", {})
-            if mentioned_info and isinstance(mentioned_info, dict):
-                user_name = mentioned_info.get("name", "")
-
-            preferences = getattr(user_context, "preferences", {})
-            if preferences:
-                user_preferences = preferences
-
-        memory_info = ""
-        if memory_context:
-            memory_info = f"""
-**이전 대화 맥락 및 사용자 정보:**
-{memory_context}
-
-중요: 위 정보는 이전 대화에서 나눈 내용입니다. 이 대화를 참고를 참고해서 답변해주세요.(예: 사용자가 이름을 알려줬다면 보고서에서 그 이름으로 언급하고,
-이전에 관심을 보인 주제나 전문 분야가 있다면 해당 내용을 보고서에 반영)
-"""
-
-        personalization_info = ""
-        if user_name:
-            personalization_info += f"사용자 이름: {user_name}님\n"
-
-        personalization_info += f"전문성 수준: {user_expertise}\n"
-
-        if user_preferences:
-            pref_items = [f"{k}: {v}" for k, v in user_preferences.items()]
-            personalization_info += f"사용자 선호도: {', '.join(pref_items)}\n"
-
-        base_prompt = self._create_base_prompt(
-            language,
-            complexity_analysis,
-            query,
-            context,
-            memory_info,
-            personalization_info,
-        )
-
-        team_prompt = self._generate_template_prompt(team_type, report_type, language)
-
-        return base_prompt + team_prompt + CHART_GENERATION_INSTRUCTIONS
-
-    def _create_base_prompt(
-        self,
-        language: str,
-        complexity_analysis: dict,
-        query: str,
-        context: str,
-        memory_info: str,
-        personalization_info: str,
-    ) -> str:
-        """메모리 정보를 포함한 기본 프롬프트 생성"""
-        user_expertise = complexity_analysis["user_expertise"]
-
-        expertise_guidance = {
-            "beginner": "기본 개념부터 차근차근 설명하고, 전문 용어 사용 시 쉬운 설명을 병행해주세요.",
-            "intermediate": "실무에 도움이 되는 구체적인 정보와 실용적인 인사이트를 제공해주세요.",
-            "expert": "심화된 분석과 전문적인 관점에서의 고급 인사이트를 제공해주세요.",
-        }
-
-        expertise_guide = expertise_guidance.get(
-            user_expertise, expertise_guidance["intermediate"]
-        )
-
-        if language == "korean":
-            return f"""
-당신은 글로벌 식품회사의 전문 분석가입니다. 주어진 정보를 바탕으로 사용자의 질문에 대한 전문적이고 개인화된 보고서를 한국어로 작성해주세요.
-
-{memory_info}
-
-**개인화 정보:**
-{personalization_info}
-
-**보고서 작성 요구사항:**
-- 보고서 복잡도: {complexity_analysis['report_type'].upper()}
-- 목표 길이: {complexity_analysis['recommended_length']}
-- 사용자 전문성 수준: {user_expertise}
-- 전문성 가이드: {expertise_guide}
-- 모든 답변은 반드시 한국어로 작성
-- 마크다운 형식 사용
-- 전문적이면서도 읽기 쉬운 한국어 사용
-- **즁요: 차트를 적극적으로 활용 : 차트에 대한 간단 설명, 인사이트, 출처, (가상, 실제 데이터 여부) 명시**
-- 사용자의 이름이나 이전 대화 내용을 자연스럽게 참조하여 개인화된 보고서 작성
-
-**개인화 지침:**
-- 사용자 이름이 있다면 적절한 위치에서 자연스럽게 언급
-- 이전 대화에서 관심을 보인 주제가 있다면 해당 내용을 보고서에 연결
-- 사용자의 전문성 수준에 맞는 용어와 설명 깊이 조절
-- 개인적인 상황이나 선호도가 파악된다면 그에 맞는 권장사항 제시
-
-**[주어진 핵심 정보]**
-{context}
-
-**[사용자의 질문]**
-"{query}"
-
-"""
-        else:
-            return f"""
-You are a professional analyst at a global food company. Please create a professional and personalized report based on the given information in English.
-
-{memory_info}
-
-**Personalization Information:**
-{personalization_info}
-
-**Report Requirements:**
-- Report Complexity: {complexity_analysis['report_type'].upper()}
-- Target Length: {complexity_analysis['recommended_length']}
-- User Expertise Level: {user_expertise}
-- Expertise Guide: {expertise_guide}
-- All responses must be written in English
-- Use markdown formatting
-- Use professional yet accessible English
-- Actively utilize charts and visualizations
-- Create personalized content by referencing user's name and previous conversations
-
-**Personalization Guidelines:**
-- Naturally mention user's name if available
-- Connect previous conversation topics to current report
-- Adjust terminology and explanation depth to user's expertise level
-- Provide recommendations based on user's identified preferences or situations
-
-**[Given Core Information]**
-{context}
-
-**[User's Question]**
-"{query}"
-
-"""
-
-    def _generate_template_prompt(
-        self, team_type: str, report_type: str, language: str
-    ) -> str:
-        """템플릿 기반 프롬프트 생성"""
-        template = REPORT_TEMPLATES.get(team_type, {}).get(report_type)
-        if not template:
-            template = REPORT_TEMPLATES.get("general", {}).get(report_type)
-            if not template:
-                template = REPORT_TEMPLATES["general"]["comprehensive"]
-
-        translations = TRANSLATIONS[language]
-
-        role_desc = translations.get(template["role_description"], "")
-
-        prompt = f"""
-**[{translations.get('strategic_business_analysis', 'Strategic Analysis Report')}]**
-
-{role_desc}
-
-## {translations.get('strategic_business_analysis', 'Strategic Framework')} ({template['total_words']})
-
-"""
-
-        for i, section in enumerate(template["sections"], 1):
-            section_title = translations.get(section["key"], section["key"])
-            prompt += f"""
-### {i}. {section_title} ({section["words"]}단어)
-"""
-
-            if "details" in section:
-                for detail in section["details"]:
-                    detail_text = translations.get(detail, f"- **{detail}**")
-                    if detail_text.startswith("- **"):
-                        prompt += f"{detail_text}\n"
-                    else:
-                        prompt += f"- **{detail_text}**\n"
-
-            prompt += "\n"
-
-        prompt += f"""
-## 필수 차트 ({template['charts']}개)
-각 섹션에 전략적으로 배치하세요.
-"""
-
-        return prompt
-
-# Enhanced SimpleAnswererAgent with Claude-level conversational ability
 class SimpleAnswererAgent:
     """단순 질문 전용 Agent - 메모리 컨텍스트 지원"""
 
     def __init__(self, vector_db=None):
         self.vector_db = vector_db
-        # 스트리밍용과 일반 호출용 모델을 분리하여 안정성 확보
         self.streaming_chat = ChatOpenAI(
-            model="gpt-3.5-turbo", temperature=0.9, streaming=True
+            model="gpt-4o-mini", temperature=0.9, streaming=True
         )
-        self.non_streaming_chat = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.3)
         self.agent_type = "SIMPLE_ANSWERER"
-
-    async def answer(self, state: StreamingAgentState) -> StreamingAgentState:
-        """기존 방식 (스트리밍 없음) - 메모리 컨텍스트 포함"""
-        print("\n>> SIMPLE_ANSWERER 시작")
-
-        if await self._needs_vector_search(state.original_query):
-            simple_results = await self._simple_search(state.original_query)
-        else:
-            simple_results = []
-
-        # 메모리 컨텍스트 추출
-        memory_context = getattr(state, "memory_context", "")
-
-        state.final_answer = await self._generate_full_answer(
-            state.original_query, simple_results, memory_context
-        )
-        print(f"- 답변 생성 완료 (길이: {len(state.final_answer)}자)")
-        return state
 
     async def answer_streaming(
         self, state: StreamingAgentState
@@ -2460,6 +1868,7 @@ class SimpleAnswererAgent:
    - 긴 답변의 경우 적절한 단락 구분 사용
    - 표가 필요한 경우: | 컬럼1 | 컬럼2 | 형태로 작성
    - 수식은 꼭 Latex문법으로 표현(React에서 렌더링 가능하도록)
+   - 차트 생성 후에는 해당 차트에 대한 설명과 주요 내용을 마크다운 ('>')를 사용하여 작성해주세요.(예시: > 이 차트는 각 캠페인의 예상 ROI를 보여줍니다. 추정 데이터 기반으로 경상북도가 집중해야 할 캠페인 전략을 시사합니다.)
 
 **답변 (마크다운 형식으로):**
 """
