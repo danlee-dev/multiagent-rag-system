@@ -85,7 +85,7 @@ class PostgreSQLRAG:
             db_config = {
                 'host': os.getenv('DB_HOST', 'localhost'),
                 'port': os.getenv('DB_PORT', '5432'),
-                'database': os.getenv('DB_NAME', 'your_database'),
+                'database': os.getenv('DB_NAME', ''),
                 'user': os.getenv('DB_USER', 'your_user'),
                 'password': os.getenv('DB_PASSWORD', 'your_password')
             }
@@ -216,10 +216,9 @@ class PostgreSQLRAG:
                          '감귤', '귤', '오렌지', '바나나', '키위', '망고', '배', '자두', '체리']
 
             for possible_item in food_items:
-                if possible_item in query_text:
+                if possible_item in query_text and possible_item not in items:
                     items.append(possible_item)
                     print(f"    → 폴백으로 '{possible_item}' 품목 추가")
-                    break
 
         if not items:
             print(">> 검색할 품목이 없어서 영양소 검색 건너뜀")
@@ -227,67 +226,158 @@ class PostgreSQLRAG:
 
         base_query = """
         SELECT
-            식품명,
-            식품군,
-            출처,
-            "에너지 (kcal/100g)" as 칼로리,
-            "수분 (g/100g)" as 수분,
-            "단백질 (g/100g)" as 단백질,
-            "지방 (g/100g)" as 지방,
-            "탄수화물 (g/100g)" as 탄수화물,
-            "총 식이섬유 (g/100g)" as 식이섬유,
-            "당류 (g/100g)" as 당류,
-            "칼슘 (mg/100g)" as 칼슘,
-            "인 (mg/100g)" as 인,
-            "철 (mg/100g)" as 철,
-            "나트륨 (mg/100g)" as 나트륨,
-            "칼륨 (mg/100g)" as 칼륨,
-            "마그네슘 (mg/100g)" as 마그네슘,
-            "아연 (mg/100g)" as 아연,
-            "비타민 A (μg/100g)" as 비타민A,
-            "베타카로틴 (μg/100g)" as 베타카로틴,
-            "티아민 (mg/100g)" as 비타민B1,
-            "리보플라빈 (mg/100g)" as 비타민B2,
-            "비타민 B6 (mg/100g)" as 비타민B6,
-            "비타민 C (mg/100g)" as 비타민C,
-            "비타민 E (mg/100g)" as 비타민E,
-            "엽산_ 엽산당량 (μg/100g)" as 엽산,
-            "총 포화 지방산 (g/100g)" as 포화지방산,
-            "총 단일 불포화지방산 (g/100g)" as 단일불포화지방산,
-            "총 다가 불포화지방산 (g/100g)" as 다가불포화지방산,
-            "콜레스테롤 (mg/100g)" as 콜레스테롤
+            "식품명" as "food_name",
+            "식품군" as "food_group",
+            "출처" as "source",
+            "에너지 (kcal/100g)" as "energy_kcal",
+            "수분 (g/100g)" as "moisture_g",
+            "단백질 (g/100g)" as "protein_g",
+            "지방 (g/100g)" as "fat_g",
+            "회분 (g/100g)" as "ash_g",
+            "탄수화물 (g/100g)" as "carbohydrate_g",
+            "당류 (g/100g)" as "sugars_g",
+            "자당 (g/100g)" as "sucrose_g",
+            "포도당 (g/100g)" as "glucose_g",
+            "과당 (g/100g)" as "fructose_g",
+            "유당 (g/100g)" as "lactose_g",
+            "맥아당 (g/100g)" as "maltose_g",
+            "갈락토오스 (g/100g)" as "galactose_g",
+            "총 식이섬유 (g/100g)" as "total_dietary_fiber_g",
+            "수용성 식이섬유 (g/100g)" as "soluble_dietary_fiber_g",
+            "불용성 식이섬유 (g/100g)" as "insoluble_dietary_fiber_g",
+            "칼슘 (mg/100g)" as "calcium_mg",
+            "철 (mg/100g)" as "iron_mg",
+            "마그네슘 (mg/100g)" as "magnesium_mg",
+            "인 (mg/100g)" as "phosphorus_mg",
+            "칼륨 (mg/100g)" as "potassium_mg",
+            "나트륨 (mg/100g)" as "sodium_mg",
+            "아연 (mg/100g)" as "zinc_mg",
+            "구리 (mg/100g)" as "copper_mg",
+            "망간 (mg/100g)" as "manganese_mg",
+            "셀레늄 (μg/100g)" as "selenium_ug",
+            "몰리브덴 (μg/100g)" as "molybdenum_ug",
+            "요오드 (μg/100g)" as "iodine_ug",
+            "비타민 A (μg/100g)" as "vitamin_a_ug_rae",
+            "레티놀 (μg/100g)" as "retinol_ug",
+            "베타카로틴 (μg/100g)" as "beta_carotene_ug",
+            "티아민 (mg/100g)" as "thiamin_mg",
+            "리보플라빈 (mg/100g)" as "riboflavin_mg",
+            "니아신 (mg/100g)" as "niacin_mg",
+            "니아신당량(NE) (mg/100g)" as "niacin_eq_mg_ne",
+            "니코틴산 (mg/100g)" as "nicotinic_acid_mg",
+            "니코틴아미드 (mg/100g)" as "nicotinamide_mg",
+            "판토텐산 (mg/100g)" as "pantothenic_acid_mg",
+            "비타민 B6 (mg/100g)" as "vitamin_b6_mg",
+            "피리독신 (mg/100g)" as "pyridoxine_mg",
+            "비오틴 (μg/100g)" as "biotin_ug",
+            "엽산_ 엽산당량 (μg/100g)" as "folate_ug_dfe",
+            "엽산_ 식품 엽산 (μg/100g)" as "folate_food_ug",
+            "엽산_ 합성 엽산 (μg/100g)" as "folate_synthetic_ug",
+            "비타민 B12 (μg/100g)" as "vitamin_b12_ug",
+            "비타민 C (mg/100g)" as "vitamin_c_mg",
+            "비타민 D (μg/100g)" as "vitamin_d_ug",
+            "비타민 D2 (μg/100g)" as "vitamin_d2_ug",
+            "비타민 D3 (μg/100g)" as "vitamin_d3_ug",
+            "비타민 E (mg/100g)" as "vitamin_e_mg_ate",
+            "알파 토코페롤 (mg/100g)" as "alpha_tocopherol_mg",
+            "베타 토코페롤 (mg/100g)" as "beta_tocopherol_mg",
+            "감마 토코페롤 (mg/100g)" as "gamma_tocopherol_mg",
+            "델타 토코페롤 (mg/100g)" as "delta_tocopherol_mg",
+            "알파 토코트리에놀 (mg/100g)" as "alpha_tocotrienol_mg",
+            "베타 토코트리에놀 (mg/100g)" as "beta_tocotrienol_mg",
+            "감마 토코트리에놀 (mg/100g)" as "gamma_tocotrienol_mg",
+            "델타 토코트리에놀 (mg/100g)" as "delta_tocotrienol_mg",
+            "비타민 K (μg/100g)" as "vitamin_k_ug",
+            "비타민 K1 (μg/100g)" as "vitamin_k1_ug",
+            "비타민 K2 (μg/100g)" as "vitamin_k2_ug",
+            "총 아미노산 (mg/100g)" as "total_amino_acids_mg",
+            "총 필수 아미노산 (mg/100g)" as "total_essential_amino_acids_mg",
+            "이소류신 (mg/100g)" as "isoleucine_mg",
+            "류신 (mg/100g)" as "leucine_mg",
+            "라이신 (mg/100g)" as "lysine_mg",
+            "메티오닌 (mg/100g)" as "methionine_mg",
+            "페닐알라닌 (mg/100g)" as "phenylalanine_mg",
+            "트레오닌 (mg/100g)" as "threonine_mg",
+            "트립토판 (mg/100g)" as "tryptophan_mg",
+            "발린 (mg/100g)" as "valine_mg",
+            "히스티딘 (mg/100g)" as "histidine_mg",
+            "아르기닌 (mg/100g)" as "arginine_mg",
+            "티로신 (mg/100g)" as "tyrosine_mg",
+            "시스테인 (mg/100g)" as "cysteine_mg",
+            "알라닌 (mg/100g)" as "alanine_mg",
+            "아스파르트산 (mg/100g)" as "aspartic_acid_mg",
+            "글루탐산 (mg/100g)" as "glutamic_acid_mg",
+            "글라이신 (mg/100g)" as "glycine_mg",
+            "프롤린 (mg/100g)" as "proline_mg",
+            "세린 (mg/100g)" as "serine_mg",
+            "타우린 (mg/100g)" as "taurine_mg",
+            "콜레스테롤 (mg/100g)" as "cholesterol_mg",
+            "총 지방산 (g/100g)" as "total_fatty_acids_g",
+            "총 필수 지방산 (g/100g)" as "total_essential_fatty_acids_g",
+            "총 포화 지방산 (g/100g)" as "total_saturated_fatty_acids_g",
+            "부티르산 (4:0) (mg/100g)" as "butyric_acid_4_0_mg",
+            "카프로산 (6:0) (mg/100g)" as "caproic_acid_6_0_mg",
+            "카프릴산 (8:0) (mg/100g)" as "caprylic_acid_8_0_mg",
+            "카프르산 (10:0) (mg/100g)" as "capric_acid_10_0_mg",
+            "라우르산 (12:0) (mg/100g)" as "lauric_acid_12_0_mg",
+            "트라이데칸산 (13:0) (mg/100g)" as "tridecanoic_acid_13_0_mg",
+            "미리스트산 (14:0) (mg/100g)" as "myristic_acid_14_0_mg",
+            "펜타데칸산 (15:0) (mg/100g)" as "pentadecanoic_acid_15_0_mg",
+            "팔미트산 (16:0) (mg/100g)" as "palmitic_acid_16_0_mg",
+            "헵타데칸산 (17:0) (mg/100g)" as "heptadecanoic_acid_17_0_mg",
+            "스테아르산 (18:0) (mg/100g)" as "stearic_acid_18_0_mg",
+            "아라키드산 (20:0) (mg/100g)" as "arachidic_acid_20_0_mg",
+            "헨에이코산산 (21:0) (mg/100g)" as "heneicosanoic_acid_21_0_mg",
+            "베헨산 (22:0) (mg/100g)" as "behenic_acid_22_0_mg",
+            "트리코산산 (23:0) (mg/100g)" as "tricosanoic_acid_23_0_mg",
+            "리그노세르산 (24:0) (mg/100g)" as "lignoceric_acid_24_0_mg",
+            "총 불포화 지방산 (g/100g)" as "total_unsaturated_fatty_acids_g",
+            "총 단일 불포화지방산 (g/100g)" as "total_monounsaturated_fatty_acids_g",
+            "미리스톨레산 (14:1) (mg/100g)" as "myristoleic_acid_14_1_mg",
+            "팔미톨레산 (16:1) (mg/100g)" as "palmitoleic_acid_16_1_mg",
+            "헵타데센산 (17:1) (mg/100g)" as "heptadecenoic_acid_17_1_mg",
+            "올레산 (18:1(n-9)) (mg/100g)" as "oleic_acid_18_1_n9_mg",
+            "박센산 (18:1(n-7)) (mg/100g)" as "vaccenic_acid_18_1_n7_mg",
+            "가돌레산 (20:1) (mg/100g)" as "gadoleic_acid_20_1_mg",
+            "에루크산 (22:1) (mg/100g)" as "erucic_acid_22_1_mg",
+            "네르본산 (24:1) (mg/100g)" as "nervonic_acid_24_1_mg",
+            "총 다가 불포화지방산 (g/100g)" as "total_polyunsaturated_fatty_acids_g",
+            "리놀레산 (18:2(n-6)) (mg/100g)" as "linoleic_acid_18_2_n6_mg",
+            "알파 리놀렌산 (18:3 (n-3)) (mg/100g)" as "alpha_linolenic_acid_18_3_n3_mg",
+            "감마 리놀렌산 (18:3 (n-6)) (mg/100g)" as "gamma_linolenic_acid_18_3_n6_mg",
+            "에이코사 디에노산 (20:2(n-6)) (mg/100g)" as "eicosadienoic_acid_20_2_n6_mg",
+            "디호모 리놀렌산 (20:3(n-3)) (mg/100g)" as "dihomo_linolenic_acid_20_3_n3_mg",
+            "에이코사 트리에노산 (20:3(n-6)) (mg/100g)" as "eicosatrienoic_acid_20_3_n6_mg",
+            "아라키돈산 (20:4(n-6)) (mg/100g)" as "arachidonic_acid_20_4_n6_mg",
+            "에이코사 펜타에노산 (20:5(n-3)) (mg/100g)" as "eicosapentaenoic_acid_20_5_n3_mg",
+            "도코사 디에노산(22:2) (mg/100g)" as "docosadienoic_acid_22_2_mg",
+            "도코사 펜타에노산 (22:5(n-3)) (mg/100g)" as "docosapentaenoic_acid_22_5_n3_mg",
+            "도코사 헥사에노산 (22:6(n-3)) (mg/100g)" as "docosahexaenoic_acid_22_6_n3_mg",
+            "오메가3 지방산 (g/100g)" as "omega_3_fatty_acids_g",
+            "오메가6 지방산 (g/100g)" as "omega_6_fatty_acids_g",
+            "총 트랜스 지방산 (g/100g)" as "total_trans_fatty_acids_g",
+            "트랜스 올레산(18:1(n-9)t) (mg/100g)" as "trans_oleic_acid_18_1_n9t_mg",
+            "트랜스 리놀레산(18:2t) (mg/100g)" as "trans_linoleic_acid_18_2t_mg",
+            "트랜스 리놀렌산(18:3t) (mg/100g)" as "trans_linolenic_acid_18_3t_mg",
+            "식염상당량 (g/100g)" as "salt_equivalent_g",
+            "폐기율 (%)" as "waste_rate_percent"
         FROM nutrition_facts
-        WHERE 1=1
+        WHERE "식품명" ILIKE ANY(%s)
         """
 
-        where_conditions = []
-        query_params = []
-
-        if items:
-            item_conditions = []
-            for item in items:
-                item_conditions.append("식품명 ILIKE %s")
-                query_params.append(f"%{item}%")
-
-            where_conditions.append(f"({' OR '.join(item_conditions)})")
-
-        if where_conditions:
-            base_query += " AND " + " AND ".join(where_conditions)
+        like_patterns = [f"%{item}%" for item in items]
+        query_params = (like_patterns,)
 
         base_query += " LIMIT 50"
 
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    print(f">> 영양소 검색 쿼리: {base_query}")
-                    print(f">> 파라미터: {query_params}")
-
+                    print(f">> 영양소 검색 쿼리: {cursor.mogrify(base_query, query_params).decode('utf-8')}")
                     cursor.execute(base_query, query_params)
                     results = cursor.fetchall()
-
                     print(f">> 영양소 검색 결과: {len(results)}건")
                     return [dict(row) for row in results]
-
         except Exception as e:
             print(f">> 영양소 데이터 검색 오류: {e}")
             return []
@@ -296,11 +386,15 @@ class PostgreSQLRAG:
         """스마트 가격 데이터 검색"""
         base_query = """
         SELECT
-            product_cls_name,
-            category_name,
+            id,
             regday,
             product_cls_code,
+            product_cls_name,
             category_code,
+            category_name,
+            productno,
+            lastest_day,
+            "productName",
             item_name,
             unit,
             day1,
@@ -311,8 +405,8 @@ class PostgreSQLRAG:
             dpr3,
             day4,
             dpr4,
-            value,
-            id
+            direction,
+            value
         FROM kamis_product_price_latest
         WHERE 1=1
         """
@@ -323,7 +417,7 @@ class PostgreSQLRAG:
         if params.get('items'):
             item_conditions = []
             for item in params['items']:
-                item_conditions.append("product_cls_name ILIKE %s")
+                item_conditions.append("item_name ILIKE %s")
                 query_params.append(f"%{item}%")
 
             if item_conditions:
@@ -541,17 +635,139 @@ def postgres_rdb_search(query: str) -> str:
         summary = f"PostgreSQL 검색 결과 (총 {search_results['total_results']}건):\n\n"
 
         if search_results['price_data']:
-            summary += f"### 가격 데이터 ({len(search_results['price_data'])}건)\n"
+            summary += f"### 📈 가격 데이터 ({len(search_results['price_data'])}건)\n"
             for item in search_results['price_data'][:5]:
-                summary += f"- {item.get('product_cls_name', 'N/A')} ({item.get('category_name', 'N/A')}): {item.get('value', 'N/A')}원/{item.get('unit', 'kg')} [{item.get('regday', 'N/A')}]\n"
-            if len(search_results['price_data']) > 5:
-                summary += f"... 외 {len(search_results['price_data'])-5}건\n"
-            summary += "\n"
+                # --- 1. 단기(전일 대비) 가격 정보 생성 (0: 하락, 1: 상승, 2: 변동없음)---
+                direction_map = {0: '▼', 1: '▲', 2: '-'}
+                direction_symbol = direction_map.get(item.get('direction'), '')
+
+                price_now = item.get('dpr1')
+                price_yesterday = item.get('dpr2')
+
+                # 날짜 객체를 'YYYY-MM-DD' 형식의 문자열로 변환 (값이 없을 경우 대비)
+                lastest_day_obj = item.get('lastest_day')
+                display_date = lastest_day_obj.strftime('%Y-%m-%d') if lastest_day_obj else 'N/A'
+
+                # 어제 대비 가격 변동 정보
+                daily_trend_info = ""
+                if price_now is not None and price_yesterday is not None and price_yesterday > 0:
+                    price_diff = price_now - price_yesterday
+                    if price_diff != 0:
+                        daily_trend_info = f" (어제보다 {abs(price_diff):,}원 {direction_symbol})"
+
+                # --- 2. 장기(월/년 단위) 가격 정보 생성 ---
+                historical_info_parts = []
+                price_month_ago = item.get('dpr3')
+                price_year_ago = item.get('dpr4')
+
+                # 1개월 전 대비
+                if price_now is not None and price_month_ago is not None and price_month_ago > 0:
+                    month_change_pct = ((price_now - price_month_ago) / price_month_ago) * 100
+                    month_symbol = '▲' if month_change_pct > 0 else '▼'
+                    historical_info_parts.append(f"1개월 전: {month_change_pct:+.1f}% {month_symbol}")
+
+                # 1년 전 대비
+                if price_now is not None and price_year_ago is not None and price_year_ago > 0:
+                    year_change_pct = ((price_now - price_year_ago) / price_year_ago) * 100
+                    year_symbol = '▲' if year_change_pct > 0 else '▼'
+                    historical_info_parts.append(f"1년 전: {year_change_pct:+.1f}% {year_symbol}")
+
+                # --- 3. 최종 요약 라인 조합 ---
+                # 메인 정보 (현재 가격, 전일 대비)
+                summary += (
+                    f"- **{item.get('item_name', 'N/A')}** ({item.get('category_name', 'N/A')}): "
+                    f"**{price_now:,}원**/{item.get('unit', 'N/A')} "
+                    f"[{display_date} 기준]{daily_trend_info}\n"
+                )
+
+                # 추가 정보 (장기 추세)
+                if historical_info_parts:
+                    summary += f"    - `추세: {' | '.join(historical_info_parts)}`\n"
+
+        if len(search_results['price_data']) > 5:
+            summary += f"... 외 {len(search_results['price_data']) - 5}건\n"
+        summary += "\n"
 
         if search_results['nutrition_data']:
-            summary += f"### 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
+            summary += f"### 🥗 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
+        
+            # 1. (개선) 동의어를 그룹으로 묶어 중복을 제거한 매핑 테이블
+            NUTRIENT_MAP = {
+                # DB 컬럼명: {표시 이름, 동의어 리스트, 단위}
+                'energy_kcal': {'display': '에너지(칼로리)', 'keywords': ['에너지', '칼로리'], 'unit': 'kcal'},
+                'moisture_g': {'display': '수분', 'keywords': ['수분'], 'unit': 'g'},
+                'protein_g': {'display': '단백질', 'keywords': ['단백질'], 'unit': 'g'},
+                'fat_g': {'display': '지방', 'keywords': ['지방'], 'unit': 'g'},
+                'carbohydrate_g': {'display': '탄수화물', 'keywords': ['탄수화물'], 'unit': 'g'},
+                'sugars_g': {'display': '당류', 'keywords': ['당류'], 'unit': 'g'},
+                'glucose_g': {'display': '포도당', 'keywords': ['포도당'], 'unit': 'g'},
+                'fructose_g': {'display': '과당', 'keywords': ['과당'], 'unit': 'g'},
+                'total_dietary_fiber_g': {'display': '식이섬유', 'keywords': ['식이섬유', '총식이섬유'], 'unit': 'g'},
+                'calcium_mg': {'display': '칼슘', 'keywords': ['칼슘'], 'unit': 'mg'},
+                'iron_mg': {'display': '철(철분)', 'keywords': ['철', '철분'], 'unit': 'mg'},
+                'magnesium_mg': {'display': '마그네슘', 'keywords': ['마그네슘'], 'unit': 'mg'},
+                'potassium_mg': {'display': '칼륨', 'keywords': ['칼륨'], 'unit': 'mg'},
+                'sodium_mg': {'display': '나트륨', 'keywords': ['나트륨'], 'unit': 'mg'},
+                'vitamin_a_ug_rae': {'display': '비타민 A', 'keywords': ['비타민A', '비타민 A'], 'unit': 'μg'},
+                'vitamin_b6_mg': {'display': '비타민 B6', 'keywords': ['비타민B6', '비타민 B6'], 'unit': 'mg'},
+                'vitamin_b12_ug': {'display': '비타민 B12', 'keywords': ['비타민B12', '비타민 B12'], 'unit': 'μg'},
+                'vitamin_c_mg': {'display': '비타민 C', 'keywords': ['비타민C', '비타민 C'], 'unit': 'mg'},
+                'vitamin_d_ug': {'display': '비타민 D', 'keywords': ['비타민D', '비타민 D'], 'unit': 'μg'},
+                'vitamin_d2_ug': {'display': '비타민 D2', 'keywords': ['비타민D2', '비타민 D2'], 'unit': 'μg'},
+                'vitamin_d3_ug': {'display': '비타민 D3', 'keywords': ['비타민D3', '비타민 D3'], 'unit': 'μg'},
+                'vitamin_e_mg_ate': {'display': '비타민 E', 'keywords': ['비타민E', '비타민 E'], 'unit': 'mg'},
+                'vitamin_k_ug': {'display': '비타민 K', 'keywords': ['비타민K', '비타민 K'], 'unit': 'μg'},
+                'vitamin_k1_ug': {'display': '비타민 K1', 'keywords': ['비타민K1', '비타민 K1'], 'unit': 'μg'},
+                'vitamin_k2_ug': {'display': '비타민 K2', 'keywords': ['비타민K2', '비타민 K2'], 'unit': 'μg'},
+            }
+
+            params = search_results.get('extracted_params', {})
+            specific_info = [info.replace(" ", "") for info in params.get('specific_info', [])]
+
             for item in search_results['nutrition_data']:
-                summary += f"- {item.get('식품명', 'N/A')} ({item.get('식품군', 'N/A')}): 출처 - {item.get('출처', 'N/A')}\n"
+                summary += f"- **{item.get('food_name', 'N/A')}** ({item.get('food_group', 'N/A')}):\n"
+            
+                highlighted_summaries = []
+                processed_nutrients = set() # 이미 처리된 영양성분 기록 (중복 출력 방지)
+            
+                # 2. (개선) 새로운 MAP 구조에 맞춰 사용자 요청 정보 확인
+                if specific_info:
+                    for db_key, nutrient_details in NUTRIENT_MAP.items():
+                        # 이미 요약에 추가된 성분이면 건너뛰기
+                        if db_key in processed_nutrients:
+                            continue
+                    
+                        # 사용자가 요청한 키워드가 현재 영양성분의 동의어 목록에 있는지 확인
+                        for keyword in nutrient_details['keywords']:
+                            if keyword.replace(" ", "") in specific_info:
+                                value = item.get(db_key)
+                                if value is not None:
+                                    display_name = nutrient_details['display']
+                                    unit = nutrient_details['unit']
+                                    highlighted_summaries.append(f"**{display_name}**: {value}{unit}/100g")
+                                    processed_nutrients.add(db_key) # 처리된 것으로 기록
+                                    break # 해당 영양성분 처리가 끝났으므로 다음 MAP 항목으로 이동
+
+                # 3. 강조할 정보가 있으면 그것만 보여주고, 없으면 기본 정보를 보여줌
+                if highlighted_summaries:
+                    summary += "    - " + " | ".join(highlighted_summaries) + "\n"
+                else:
+                    # 기본으로 보여줄 주요 영양 정보 (에너지, 단백질, 지방, 탄수화물, 당류)
+                    energy = item.get('energy_kcal', 'N/A')
+                    protein = item.get('protein_g', 'N/A')
+                    fat = item.get('fat_g', 'N/A')
+                    carb = item.get('carbohydrate_g', 'N/A')
+                    sugar = item.get('sugars_g', 'N/A')
+                
+                    summary += (
+                        f"    - **주요성분**: "
+                        f"칼로리 {energy}kcal/100g | "
+                        f"단백질 {protein}g/100g | "
+                        f"지방 {fat}g/100g | "
+                        f"탄수화물 {carb}g/100g | "
+                        f"당류 {sugar}g/100g\n"
+                    )
+                
             summary += "\n"
 
         if search_results['trade_data']:

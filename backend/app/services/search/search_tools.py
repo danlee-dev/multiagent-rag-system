@@ -1,11 +1,10 @@
-# search_tools.py
-
 import os
 import requests
 from langchain_core.tools import tool
 import json
+import asyncio
 
-# 각 RAG 툴의 메인 함수를 import 합니다.
+# 각 RAG 툴의 메인 함수를 import
 from ..database.postgres_rag_tool import postgres_rdb_search
 from ..database.neo4j_rag_tool import neo4j_graph_search
 
@@ -114,7 +113,18 @@ def mock_vector_search(query: str) -> str:
 def graph_db_search(query: str) -> str:
     """
     Neo4j 지식 그래프에서 농산물, 수산물, 지역 등의 개체와 그들 간의 관계를 검색합니다.
-    - 사용 시점: 'A의 생산지는 어디야?', 'B와 관련된 품목은 뭐야?'와 같이 개체 간의 연결 관계나 소속 정보가 필요할 때 사용합니다.
+    - 사용 시점: 'A의 생산지는 어디야?'와 같이 개체 간의 연결 관계나 소속 정보(원산지 정보)가 필요할 때 사용합니다.
     """
     print(f"Neo4j Graph DB 검색 실행: {query}")
-    return neo4j_graph_search(query)
+    try:
+        return asyncio.run(neo4j_graph_search(query))
+    except Exception as e:
+        if "cannot run loop while another loop is running" in str(e):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(neo4j_graph_search(query))
+            loop.close()
+            return result
+        else:
+            print(f"Graph DB 검색 중 오류 발생: {e}")
+            return f"Graph DB 검색 중 오류: {e}"

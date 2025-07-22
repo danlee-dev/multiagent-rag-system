@@ -332,7 +332,7 @@ class PlanningAgent:
     async def _create_complex_execution_plan(
         self, query: str, analysis: Dict, feedback: Optional[str] = None
     ) -> str:
-        """COMPLEX 레벨 실행 계획 - 기존 ToT 방식 활용"""
+        """COMPLEX 레벨 실행 계획"""
 
         feedback_section = ""
         if feedback:
@@ -492,15 +492,16 @@ class RetrieverAgent:
         if self.vector_db:
             search_tasks.append(self._async_vector_search(query))
 
+        # 2. RDB 검색
+        if self.rdb:
+            search_tasks.append(self._async_rdb_search(query))
 
-
-        # 2. Graph DB 검색
+        # 3. Graph DB 검색
         if self.graph_db:
             search_tasks.append(self._async_graph_search(query))
 
-        # 3. 간단한 웹 검색
+        # 4. 간단한 웹 검색
         search_tasks.append(self._async_web_search(query))
-
 
 
         try:
@@ -595,11 +596,11 @@ class RetrieverAgent:
         print("\n>> 다단계 병렬 검색 실행")
 
         try:
-            # 1단계: 초기 정보 수집 (병렬)
+            # 1단계: 초기 정보 수집
             print("- 1단계: 초기 정보 수집")
             await self._execute_full_parallel_search(state, query)
 
-            # 2단계: 키워드 확장 및 심화 검색 (병렬)
+            # 2단계: 키워드 확장 및 심화 검색
             print("- 2단계: 키워드 확장 검색")
             expanded_keywords = await self._generate_expanded_keywords(query)
 
@@ -688,27 +689,18 @@ class RetrieverAgent:
             print(f"  └ Graph DB 검색: {query[:30]}...")
 
             # 키워드 최적화
-            keywords = await self._optimize_keywords(query)
-
-            loop = asyncio.get_event_loop()
+            graph_result_str = await graph_db_search.invoke({"query": query})
 
             results = []
-            for keyword in keywords[:2]:  # 상위 2개만
-                graph_result = await loop.run_in_executor(
-                    self.thread_pool,
-                    lambda k=keyword: graph_db_search.invoke({"query": k})
+            if isinstance(graph_result_str, str) and "Neo4j" in graph_result_str:
+                result = SearchResult(
+                    source="graph_db",
+                    content=graph_result_str,
+                    relevance_score=0.85, # 그래프 DB는 신뢰도가 높음
+                    metadata={"search_type": "graph"},
+                    search_query=query,
                 )
-
-                if isinstance(graph_result, dict) and "nodes" in graph_result:
-                    for node in graph_result["nodes"][:2]:  # 각 키워드당 2개씩
-                        result = SearchResult(
-                            source="graph_db",
-                            content=f"{node['properties'].get('name', 'Unknown')}: {str(node['properties'])}",
-                            relevance_score=0.8,
-                            metadata=node,
-                            search_query=keyword,
-                        )
-                        results.append(result)
+                results.append(result)
 
             print(f"    ✓ Graph DB: {len(results)}개 결과")
             return results
@@ -722,7 +714,7 @@ class RetrieverAgent:
         try:
             print(f"  └ RDB 검색: {query[:30]}...")
 
-            # 🔧 1. RDB용 쿼리 전처리 (기존 로직 유지)
+
             processed_query = self._preprocess_rdb_query(query)
             print(f"    → 전처리된 쿼리: {processed_query}")
 
@@ -1125,7 +1117,7 @@ class RetrieverAgent:
     Action Input: 사과 영양성분 데이터
 
     Action: graph_db_search
-    Action Input: 농업 연구기관 관계 분석
+    Action Input: 사과 원산지 정보 분석
 
     AVAILABLE TOOLS:
     1. debug_web_search - For latest web information, current events, breaking news
@@ -1161,7 +1153,7 @@ class RetrieverAgent:
                 handle_parsing_errors=True,  # 파싱 에러 자동 처리
                 max_iterations=6,  # 반복 횟수 증가
                 max_execution_time=200,  # 실행 시간 충분히 확보
-                early_stopping_method="generate",
+                early_stopping_method="stalled",
                 return_intermediate_steps=True,
             )
 
