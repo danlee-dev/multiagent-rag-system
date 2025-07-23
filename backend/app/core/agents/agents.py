@@ -47,6 +47,7 @@ from ...services.search.search_tools import (
     graph_db_search,
     rdb_search,
     mock_vector_search,
+    scrape_and_extract_content,
 )
 from ...utils.utils import create_agent_message
 
@@ -422,6 +423,7 @@ class RetrieverAgent:
         # 사용 가능한 도구들
         self.available_tools = [
             debug_web_search,
+            scrape_and_extract_content,
             mock_vector_search,
             rdb_search,
             graph_db_search,
@@ -501,7 +503,7 @@ class RetrieverAgent:
             search_tasks.append(self._async_graph_search(query))
 
         # 4. 간단한 웹 검색
-        search_tasks.append(self._async_web_search(query))
+        search_tasks.append(self._async_web_search_enhanced(query))
 
 
         try:
@@ -688,8 +690,11 @@ class RetrieverAgent:
         try:
             print(f"  └ Graph DB 검색: {query[:30]}...")
 
-            # 키워드 최적화
-            graph_result_str = await graph_db_search.invoke({"query": query})
+            loop = asyncio.get_event_loop()
+            graph_result_str = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: graph_db_search.invoke({"query": query})
+            )
 
             results = []
             if isinstance(graph_result_str, str) and "Neo4j" in graph_result_str:
@@ -832,63 +837,104 @@ class RetrieverAgent:
         return query[:50] + "..."
 
 
-    async def _async_web_search(self, query: str) -> List[SearchResult]:
-        """비동기 웹 검색"""
-        try:
-            print(f"  └ Web 검색: {query[:30]}...")
+    async def _async_web_search_enhanced(self, query: str) -> List[SearchResult]:
+        """비동기 웹 검색 (정찰 -> 선별 -> 분석)"""
+        print(f"  └ Enhanced Web 검색 시작: {query[:30]}...")
 
-            loop = asyncio.get_event_loop()
-            web_results = await loop.run_in_executor(
+        # 1. 정찰(Scout): debug_web_search로 URL과 요약 수집
+        # (주의: debug_web_search가 List[Dict]를 반환하도록 수정되어 있어야 함)
+        loop = asyncio.get_event_loop()
+        try:
+            scout_results = await loop.run_in_executor(
                 self.thread_pool,
                 lambda: debug_web_search.invoke({"query": query})
             )
-
-            results = []
-            if isinstance(web_results, str) and len(web_results) > 50:
-                result = SearchResult(
-                    source="web_search",
-                    content=web_results,
-                    relevance_score=0.75,
-                    metadata={"search_type": "web"},
-                    search_query=query,
-                )
-                results.append(result)
-
-            print(f"    ✓ Web: {len(results)}개 결과")
-            return results
-
+            if not scout_results or isinstance(scout_results[0], dict) and "error" in scout_results[0]:
+                print("    ✗ 웹 검색(정찰) 실패 또는 결과 없음")
+                return []
+            print(f"    ✓ 정찰 완료: {len(scout_results)}개 URL 후보 발견")
         except Exception as e:
-            print(f"    ✗ Web 검색 오류: {e}")
+            print(f"    ✗ 웹 검색(정찰) 중 예외 발생: {e}")
             return []
 
+        # 2. 선별(Select): LLM을 이용해 스크래핑할 최적의 URL 선택
+        best_urls = await self._select_best_urls_for_scraping(query, scout_results)
+        if not best_urls:
+            print("    ✗ 스크래핑할 유효한 URL을 선택하지 못함")
+            # 스크래핑 실패 시, 정찰 결과 요약이라도 반환
+            summary_content = "\n".join([f"제목: {r.get('title', '')}\n요약: {r.get('snippet', '')}" for r in scout_results])
+            return [SearchResult(source="web_search_summary", content=summary_content, relevance_score=0.6)]
+
+
+        # 3. 분석(Analyze): 선택된 URL들을 병렬로 스크래핑
+        print(f"    → {len(best_urls)}개 URL에 대한 병렬 스크래핑 시작...")
+        scraping_tasks = [self._async_scrape_url(url, query) for url in best_urls]
+        final_results = await asyncio.gather(*scraping_tasks)
+
+        # None이 아닌 유효한 결과만 필터링
+        valid_results = [res for res in final_results if res is not None]
+
+        print(f"    ✓ Enhanced Web 검색 완료: {len(valid_results)}개 상세 정보 획득")
+        return valid_results
+
+
     async def _async_react_search(self, query: str) -> Optional[SearchResult]:
-        """비동기 ReAct 검색"""
+        """비동기 ReAct 검색 - 모든 내용 다 합치기"""
         try:
             print(f"  └ ReAct 검색: {query[:30]}...")
 
             if not self.react_agent_executor:
+                print(f"    ✗ ReAct 에이전트가 초기화되지 않음")
                 return None
 
             enhanced_prompt = self._create_enhanced_query_prompt(query)
 
             result = await asyncio.wait_for(
                 self.react_agent_executor.ainvoke({"input": enhanced_prompt}),
-                timeout=120
+                timeout=180
             )
 
             output = result.get("output", "")
-            if len(output) > 50:
+            intermediate_steps = result.get("intermediate_steps", [])
+
+            print(f"    → ReAct output: {len(output)}자")
+            print(f"    → intermediate_steps: {len(intermediate_steps)}개")
+
+
+            all_content = ""
+
+            for i, step in enumerate(intermediate_steps):
+                if isinstance(step, tuple) and len(step) >= 2:
+                    action, observation = step[0], step[1]
+
+                    if isinstance(observation, str) and len(observation) > 10:
+                        all_content += f"=== Step {i+1} ===\n{observation}\n\n"
+                        print(f"      - Step {i+1}: {len(observation)}자 추가")
+
+            if output:
+                all_content += f"=== Final Output ===\n{output}\n"
+                print(f"      - Final Output: {len(output)}자 추가")
+
+            print(f"    → 전체 합친 내용: {len(all_content)}자")
+
+            if len(all_content) > 50:
                 search_result = SearchResult(
                     source="react_agent",
-                    content=output,
+                    content=all_content,
                     relevance_score=0.9,
-                    metadata={"search_type": "react"},
+                    metadata={
+                        "search_type": "react",
+                        "steps_count": len(intermediate_steps),
+                        "total_length": len(all_content),
+                        "output_length": len(output)
+                    },
                     search_query=query,
                 )
-                print(f"    ✓ ReAct: 분석 완료")
+                print(f"    ✓ ReAct 완료: 전체 {len(all_content)}자")
                 return search_result
-
-            return None
+            else:
+                print(f"    ✗ 내용이 너무 짧음: {len(all_content)}자")
+                return None
 
         except Exception as e:
             print(f"    ✗ ReAct 오류: {e}")
@@ -1088,53 +1134,67 @@ class RetrieverAgent:
     """
 
     def _create_react_agent(self):
-        """ReAct 에이전트 생성"""
+        """ReAct 에이전트 생성 - 기존 코드 기반으로 최소한만 수정"""
         try:
             # 기본 ReAct 프롬프트 가져오기
             base_prompt = hub.pull("hwchase17/react")
 
-            # 시스템 지시사항
             system_instruction = f"""
-    You are an expert research assistant for agricultural and food industry analysis.
+    You are a Senior Analyst at a prestigious agricultural-food economic research institute. Your mission is to provide objective, data-driven, and well-structured analysis based on verifiable information.
     Current Date: {self.current_date_str}
 
-    CRITICAL: TOOL USAGE FORMAT
-    When using tools, you MUST follow this EXACT format:
+    CORE DIRECTIVES:
+    1. Prioritize Facts: Always prioritize verifiable data from reliable sources over speculation or opinion.
+    2. State Limitations: If you cannot find a satisfactory answer after a thorough search, clearly state that the information is unavailable. Do not invent information.
+    3. Follow Protocol: The research protocol below is mandatory.
+
+    AVAILABLE TOOLS:
+    1. rdb_search: For specific, structured data (prices, nutrition). Highest priority for quantitative data.
+    2. graph_db_search: For relationship data (e.g., origins, suppliers).
+    3. debug_web_search: (Scout Tool) Finds candidate URLs. The output is incomplete and for triage purposes only.
+    4. scrape_and_extract_content: (Analyst Tool) Extracts the full, detailed information from a URL. This is the only source of valid web data.
+    5. mock_vector_search: For finding information within internal research papers.
+
+    MANDATORY RESEARCH PROTOCOL:
+
+    1. Initial Analysis & Internal Search:
+    - Analyze the user's query to understand the core objective.
+    - First, attempt to find the answer in internal databases using rdb_search or graph_db_search.
+
+    2. Web Research Protocol (STRICT 3-Step Process):
+    - Step 2.1 (Scout): If internal data is insufficient, use debug_web_search to get candidate URLs.
+    - Step 2.2 (Assess & Select): From the scout results, assess the reliability of the sources. Prioritize official government sites, research institutions (like KREI), and established news media. Select the single most reliable and relevant URL to analyze first.
+    - Step 2.3 (Analyze & Verify): Use scrape_and_extract_content on the selected URL. If the scrape fails or the content is not useful, you MUST return to the scout results and try the second-best URL. You may attempt scraping a maximum of two URLs.
+
+    3. Synthesis & Final Answer:
+    - After gathering data from 1-2 tools, you MUST provide your Final Answer.
+    - Do NOT keep searching endlessly.
+    - Use: Final Answer: [comprehensive answer with the information you found]
+    - Even partial information is better than no answer.
+
+    FINAL ANSWER DIRECTIVES:
+    - When you have gathered enough information, you MUST provide your Final Answer.
+    - Use this EXACT format: Final Answer: [your comprehensive answer]
+    - Do NOT continue trying to use tools after you have enough information.
+    - Structure your final answer with clear headings and citations.
+    - If you have ANY relevant information, provide a Final Answer rather than continuing to search.
+
+    TOOL USAGE FORMAT:
+    When a tool needs multiple inputs, provide them as a JSON dictionary.
 
     Action: tool_name
-    Action Input: your_query_here
-
-    NEVER use function call syntax like tool_name("query") - this will cause errors.
+    Action Input: search_query_or_json_string
 
     CORRECT EXAMPLES:
     Action: debug_web_search
-    Action Input: MZ세대 소비 패턴 2025
+    Action Input: 2025년 사과 마케팅 전략
 
-    Action: mock_vector_search
-    Action Input: 농산물 가격 동향 분석
+    Action: scrape_and_extract_content
+    Action Input: JSON string with url and query fields
 
-    Action: rdb_search
-    Action Input: 사과 영양성분 데이터
-
-    Action: graph_db_search
-    Action Input: 사과 원산지 정보 분석
-
-    AVAILABLE TOOLS:
-    1. debug_web_search - For latest web information, current events, breaking news
-    2. mock_vector_search - For document content analysis, research papers, news articles
-    3. rdb_search - For structured data, statistics, numerical information
-    4. graph_db_search - For entity relationships, knowledge graph analysis
-
-    RESEARCH STRATEGY:
-    1. Start with the most relevant tool for the query type
-    2. Use multiple tools if comprehensive analysis is needed
-    3. Always analyze results before providing final answer
-    4. Synthesize information from all sources
-
-    Remember: Use the EXACT Action/Action Input format shown above.
+    Remember: Follow the exact Thought/Action/Action Input/Observation format.
     """
 
-            # 프롬프트 템플릿 생성
             react_prompt = PromptTemplate(
                 template=system_instruction + "\n\n" + base_prompt.template,
                 input_variables=base_prompt.input_variables
@@ -1145,15 +1205,15 @@ class RetrieverAgent:
                 self.llm, self.available_tools, react_prompt
             )
 
-            # 에이전트 실행기 - 더 관대한 설정
+
             return AgentExecutor(
                 agent=react_agent_runnable,
                 tools=self.available_tools,
                 verbose=True,
-                handle_parsing_errors=True,  # 파싱 에러 자동 처리
-                max_iterations=6,  # 반복 횟수 증가
-                max_execution_time=200,  # 실행 시간 충분히 확보
-                early_stopping_method="stalled",
+                handle_parsing_errors="You must provide a Final Answer now. Stop trying to use tools and give your final response using: Final Answer: [your answer]",
+                max_iterations=4,
+                max_execution_time=120,
+                early_stopping_method="generate",  # generate로 변경
                 return_intermediate_steps=True,
             )
 
@@ -1161,6 +1221,64 @@ class RetrieverAgent:
             print(f"ReAct 에이전트 초기화 실패: {e}")
             return None
 
+    async def _select_best_urls_for_scraping(self, query: str, search_results: List[Dict]) -> List[str]:
+        """LLM을 사용하여 스크래핑할 최적의 URL을 선택합니다."""
+        if not search_results:
+            return []
+
+        # LLM에게 보여줄 컨텍스트 생성
+        context = "아래는 웹 검색 결과 요약입니다.\n\n"
+        for i, result in enumerate(search_results):
+            context += f"{i+1}. URL: {result.get('link', 'N/A')}\n"
+            context += f"   제목: {result.get('title', 'N/A')}\n"
+            context += f"   요약: {result.get('snippet', 'N/A')}\n\n"
+
+        prompt = f"""당신은 최고의 리서처입니다. 사용자의 질문에 가장 정확한 답변을 제공할 가능성이 높은 웹페이지를 선택해야 합니다.
+        아래 검색 결과 목록을 보고, 상세 분석을 위해 방문할 가장 중요한 URL을 1~2개만 선택해주세요.
+
+        사용자 질문: "{query}"
+
+        {context}
+
+        가장 유용해 보이는 URL을 쉼표(,)로 구분하여 정확히 반환해주세요. 다른 설명은 절대 추가하지 마세요.
+        예시: https://example.com/news/1,https://another-site.com/article/2
+        """
+
+        try:
+            response = await self.llm.ainvoke(prompt)
+            urls = [url.strip() for url in response.content.split(',') if url.strip().startswith('http')]
+            print(f"    → LLM이 스크래핑할 URL 선택: {urls[:2]}")
+            return urls[:2] # 최대 2개만 반환
+        except Exception as e:
+            print(f"    ✗ URL 선택 중 오류: {e}")
+            return []
+
+
+    async def _async_scrape_url(self, url: str, query: str) -> Optional[SearchResult]:
+        """단일 URL을 비동기적으로 스크래핑하고 SearchResult로 변환합니다."""
+        # 이전에 정의한 scrape_and_extract_content 도구를 사용합니다.
+        # 이 도구는 search_tools.py에 정의되어 있어야 합니다.
+        try:
+            from .search_tools import scrape_and_extract_content # 실제 경로에 맞게 수정
+
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: scrape_and_extract_content.invoke({"url": url, "query": query})
+            )
+
+            if content and "오류" not in content:
+                return SearchResult(
+                    source="web_scrape",
+                    content=content,
+                    relevance_score=0.88,
+                    metadata={"search_type": "scrape", "source_url": url},
+                    search_query=query
+                )
+            return None
+        except Exception as e:
+            print(f"    ✗ URL({url}) 스크래핑 실패: {e}")
+            return None
 
     def _create_fallback_result(self, query: str, error_type: str) -> SearchResult:
         """폴백 결과 생성"""
@@ -1218,45 +1336,94 @@ class CriticAgent1:
         return state
 
     def _summarize_results(self, results, source_name):
-        """검색 결과 요약 헬퍼 함수"""
+        """검색 결과 요약 헬퍼 함수 - 더 많은 내용 포함"""
         if not results:
+            print(f"    - {source_name}: 검색 결과 없음")
             return f"{source_name}: 검색 결과 없음\n"
 
+        print(f"    - {source_name}: {len(results)}개 결과 발견")
+
         summary = f"{source_name} ({len(results)}개 결과):\n"
-        for r in results[:3]:
-            content_preview = r.content[:100].strip().replace("\n", " ")
-            summary += f"  - {content_preview}...\n"
+        for i, r in enumerate(results[:3]):  # 상위 3개만
+            content = r.content if hasattr(r, 'content') else str(r)
+
+            # 훨씬 더 많은 내용 포함 (100자 → 1000자)
+            content_preview = content[:10000].strip().replace("\n", " ")
+
+            print(f"      [{i+1}] 길이: {len(content)}자, 미리보기: {content_preview[:100]}...")
+            summary += f"  - [{i+1}] 길이: {len(content)}자\n"
+            summary += f"    내용: {content_preview}...\n"
+
         return summary
 
     async def _evaluate_sufficiency(self, original_query, graph_results, multi_results):
+        """정보 충분성 평가 - 더 관대한 기준으로 수정"""
+
+        # 디버깅: 실제 결과 내용 확인
+        print(f"  - 평가 대상:")
+        print(f"    - Graph 결과: {len(graph_results)}개")
+        print(f"    - Multi 결과: {len(multi_results)}개")
+
+        # 모든 결과 합쳐서 총 길이 계산
+        total_content = ""
+        for result in graph_results + multi_results:
+            content = result.content if hasattr(result, 'content') else str(result)
+            total_content += content + "\n"
+
+        total_length = len(total_content.strip())
+        print(f"    - 총 내용 길이: {total_length}자")
+
+        print(f"    - 실제 내용 확인:")
+        for i, result in enumerate(graph_results + multi_results):
+            content = result.content if hasattr(result, 'content') else str(result)
+            source = result.source if hasattr(result, 'source') else 'unknown'
+            print(f"      [{i+1}] {source}: {len(content)}자")
+            print(f"          샘플: {content[:100]}...")
+
+            # Final Answer 체크
+            if "Final Answer:" in content:
+                print(f"          → Final Answer 포함됨")
+            if "### Report" in content or "#### " in content:
+                print(f"          → 구조화된 보고서 포함됨")
+
+
+        # 기존 상세 평가 로직
         results_summary = self._summarize_results(
             graph_results, "Graph DB"
-        ) + self._summarize_results(multi_results, "Multi-Source (ReAct Agent)")
+        ) + self._summarize_results(multi_results, "Multi-Source")
+
+        # 실제 내용도 포함해서 프롬프트 작성
+        content_sample = total_content[:500] if total_content else "내용 없음"
 
         prompt = f"""
-        당신은 수집된 정보가 사용자의 질문에 답변하기에 "대체로 충분한 수준인지"를 실용적으로 평가하는 수석 분석가입니다. 완벽하지 않더라도, 핵심적인 답변 생성이 가능한지를 판단하는 것이 중요합니다.
+        다음 검색 결과를 바탕으로 정보 충분성을 평가해주세요.
 
-        ### [매우 중요한 판단 기준]
-        - 정보가 약 80% 이상 포함되어 있고, 질문의 핵심 논지를 파악할 수 있다면 **'sufficient'로 판단**하세요.
-        - 일부 정보가 누락되었더라도, 답변의 전체적인 흐름을 만드는 데 지장이 없다면 **'sufficient'로 판단**하세요.
-        - 정보가 전혀 없거나, 질문의 주제와 완전히 동떨어진 내용일 경우에만 **'insufficient'로 판단**하세요.
-        ---
-
-        <원본 질문>
+        ### 원본 질문
         "{original_query}"
 
-        <수집된 정보 요약>
+        ### 수집된 정보 요약
         {results_summary}
-        ---
 
-        **[평가 결과]** (아래 형식을 반드시 준수하여 답변하세요.)
+        ### 실제 내용 샘플 (처음 500자)
+        {content_sample}
+
+        ### 매우 관대한 평가 기준:
+        - 질문과 관련된 ANY 정보가 있으면 → sufficient
+        - 50자 이상의 관련 내용이 있으면 → sufficient
+        - 완전히 빈 결과거나 완전 무관한 내용만 있을 때만 → insufficient
+
+        **[평가 결과]**
         STATUS: sufficient 또는 insufficient
-        REASONING: [판단 근거를 위 기준에 맞춰 간결하게 작성]
-        SUGGESTION: [STATUS가 'insufficient'일 경우에만, 다음 검색에 도움이 될 구체적인 제안을 작성. 'sufficient'일 경우 '없음'으로 작성.]
-        CONFIDENCE: [당신의 'STATUS' 판단에 대한 신뢰도를 0.0 에서 1.0 사이의 점수로 표현. 점수가 0.85 이상이면 매우 확신하는 상태임.]
+        REASONING: [매우 관대한 기준으로 판단한 근거]
+        SUGGESTION: [insufficient일 경우에만]
+        CONFIDENCE: [0.0 ~ 1.0]
         """
+
         response = await self.chat.ainvoke(prompt)
-        return self._parse_evaluation(response.content)
+        result = self._parse_evaluation(response.content)
+
+        print(f"  - Critic1 최종 판단: {result.get('status', 'unknown')}")
+        return result
 
     def _parse_evaluation(self, response_content):
         try:

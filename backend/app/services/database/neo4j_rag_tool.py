@@ -57,13 +57,15 @@ class Neo4jSearchService:
                 "products": ["item1", "item2"],
                 "regions": ["region1", "region2"],
                 "categories": ["category1", "category2"],
-                "fish_states": ["state1", "state2"]
+                "fish_states": ["state1", "state2"],
+                "associations": ["association1", "association2"]
             }}
 
             - products: Names of agricultural, marine, or livestock products (e.g., apple, mackerel, pork).
             - regions: Geographic locations (e.g., Seoul, Jeju, Gyeonggi-do).
-            - categories: Classification of products (e.g., fruits, leafy vegetables).
+            - categories: Classification of products (e.g., fruits, leafy vegetables). Only include if category is explicitly mentioned in query or query asks for similar products.
             - fish_states: States of marine products (e.g., live, fresh, frozen, dried).
+            - associations: Associations or cooperatives (e.g., Jeju Fisheries Cooperative). Only include if explicitly mentioned in the query.
 
             Respond only with the JSON object.
             """
@@ -137,9 +139,8 @@ class Neo4jSearchService:
             cypher_query = """
             CALL db.index.fulltext.queryNodes('prod_idx', $keyword) YIELD node, score
             WHERE score > 0.1
-            WITH node, score + 2.0 AS boosted_score, 'fulltext' as search_type
+            WITH node, score + 4.0 AS boosted_score, 'fulltext' as search_type
             RETURN node, boosted_score AS final_score, search_type
-            LIMIT 5
 
             UNION
 
@@ -147,8 +148,9 @@ class Neo4jSearchService:
             WHERE n.product STARTS WITH $keyword
             WITH n as node, 3.0 as score, 'exact' as search_type
             RETURN node, score AS final_score, search_type
-            LIMIT 3
             """
+
+            print(cypher_query)
 
             results = await self._run_cypher_async(cypher_query, {"keyword": keyword})
             print(f"  품목 최적화 검색 ({keyword}): {len(results)}개")
@@ -193,6 +195,8 @@ class Neo4jSearchService:
             RETURN node, score as final_score, search_type
             """
 
+            print(cypher_query)
+
             results = await self._run_cypher_async(cypher_query, {"keyword": keyword})
             print(f"  지역 최적화 검색 ({keyword}): {len(results)}개")
 
@@ -219,7 +223,6 @@ class Neo4jSearchService:
             WHERE n.category = $category OR n.category CONTAINS $category
             RETURN n as node, 1.5 as score
             ORDER BY n.product
-            LIMIT 5
             """
 
             print(cypher_query)
@@ -250,7 +253,6 @@ class Neo4jSearchService:
             WHERE n.fishState = $fish_state OR n.fishState CONTAINS $fish_state
             RETURN n as node, 1.5 as score
             ORDER BY n.product
-            LIMIT 5
             """
 
             print(cypher_query)
@@ -282,7 +284,6 @@ class Neo4jSearchService:
             RETURN DISTINCT i as node, 1.0 as score,
                    r.association as found_association
             ORDER BY i.product
-            LIMIT 5
             """
 
             print(cypher_query)
@@ -362,7 +363,6 @@ class Neo4jSearchService:
                    r.sold as sold,
                    labels(i)[0] as ingredient_type
             ORDER BY i.product, r.farm DESC
-            LIMIT 20
             """
 
             print(cypher_query)
@@ -452,7 +452,6 @@ class Neo4jSearchService:
             for i, rel in enumerate(relationships[:], 1):
                 rel_info = f"{i:2d}. {rel['start']} → {rel['end']}"
 
-                # 관계 속성 정보 추가
                 details = []
                 if 'farm' in rel and rel['farm'] is not None:
                     details.append(f"농장수: {rel['farm']}개")
@@ -476,13 +475,36 @@ class Neo4jSearchService:
             self.driver.close()
             print("- Neo4j 드라이버 연결 종료")
 
+
+def neo4j_search_sync(query: str) -> str:
+    """동기적으로 Neo4j 검색을 실행하는 함수"""
+    service = None
+    try:
+        print(f"- Neo4j 서비스 인스턴스 생성")
+        service = Neo4jSearchService()
+
+        # 새 이벤트 루프에서 실행
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(service.search(query))
+            return result
+        finally:
+            loop.close()
+    except Exception as e:
+        print(f"- Neo4j 동기 검색 오류: {e}")
+        return f"Neo4j 동기 검색 오류: {e}"
+    finally:
+        if service:
+            service.close()
+
+
 async def neo4j_graph_search(query: str) -> str:
     """
     RAG 에이전트가 호출할 Neo4j 검색 도구의 메인 진입점 함수
 
     Args:
         query: 검색 질의
-        llm_client: LLM 클라이언트 (OpenAI 등)
 
     Returns:
         검색 결과 문자열

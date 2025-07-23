@@ -203,11 +203,5 @@ class PromptBuilder:
 - 총 출처: {total_sources}개
 - 평균 신뢰도: {int(credibility.get('average_reliability', 0) * 100)}%
 - 고신뢰도 출처: {credibility.get('high_reliability_count', 0)}개
-
-**출처 표기 규칙:**
-- PostgreSQL: (출처: 농진청 '21, RDB)
-- Vector DB: (출처: Vector DB - 연구자료)
-- Graph DB: (출처: Graph DB - 관계분석)
-- Web 검색: (출처: Web 검색 - 최신정보)
 """
         return instructions

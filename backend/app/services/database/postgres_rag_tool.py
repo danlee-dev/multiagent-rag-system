@@ -9,7 +9,7 @@ import typing
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
 
-class SmartKeywordExtractor:
+class KeywordExtractor:
     def __init__(self):
         self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
 
@@ -58,7 +58,7 @@ JSON만 응답하고 다른 설명은 하지 마세요.
             )
 
             result = json.loads(response.choices[0].message.content)
-            print(f">> LLM 추출 결과: {result}")
+            print(f"\n>> LLM 추출 결과: {result}")
             return result
 
         except Exception as e:
@@ -76,7 +76,7 @@ class PostgreSQLRAG:
     def __init__(self):
         """PostgreSQL 연결 풀 초기화"""
         self.pool = None
-        self.keyword_extractor = SmartKeywordExtractor()
+        self.keyword_extractor = KeywordExtractor()
         self._init_connection_pool()
 
     def _init_connection_pool(self):
@@ -127,7 +127,7 @@ class PostgreSQLRAG:
             print(">> PostgreSQL 연결 풀 정리 완료")
 
     def _extract_search_params(self, query: str) -> Dict[str, Any]:
-        """스마트 키워드 추출"""
+        """키워드 추출"""
         llm_result = self.keyword_extractor.extract_search_params(query)
 
         params = {
@@ -161,9 +161,9 @@ class PostgreSQLRAG:
         else:
             return None
 
-    def smart_search(self, query: str) -> Dict[str, Any]:
-        """스마트 검색 수행"""
-        print(f"\n>> 스마트 RDB 검색 시작: {query}")
+    def comprehensive_search(self, query: str) -> Dict[str, Any]:
+        """종합 검색 수행"""
+        print(f"\n>> RDB 종합 검색 시작: {query}")
 
         params = self._extract_search_params(query)
         print(f">> 추출된 파라미터: {params}")
@@ -182,15 +182,15 @@ class PostgreSQLRAG:
 
         if search_type == 'nutrition' or '영양' in query or '칼로리' in query:
             print(">> 영양 정보 우선 검색")
-            results['nutrition_data'] = self.search_nutrition_data_smart(params)
+            results['nutrition_data'] = self.search_nutrition_data(params)
 
         if search_type == 'price' or '가격' in query or '시세' in query:
             print(">> 가격 정보 우선 검색")
-            results['price_data'] = self.search_price_data_smart(params)
+            results['price_data'] = self.search_price_data(params)
 
         if search_type == 'general':
-            results['nutrition_data'] = self.search_nutrition_data_smart(params)
-            results['price_data'] = self.search_price_data_smart(params)
+            results['nutrition_data'] = self.search_nutrition_data(params)
+            results['price_data'] = self.search_price_data(params)
 
         results['total_results'] = (
             len(results['price_data']) +
@@ -202,8 +202,8 @@ class PostgreSQLRAG:
         print(f">> 검색 완료 - 총 {results['total_results']}건")
         return results
 
-    def search_nutrition_data_smart(self, params: Dict[str, Any]) -> List[Dict]:
-        """스마트 영양소 정보 검색"""
+    def search_nutrition_data(self, params: Dict[str, Any]) -> List[Dict]:
+        """영양소 정보 검색"""
         items = params.get('items', [])
 
         # items가 비어있으면 쿼리에서 품목명 추출 시도
@@ -218,7 +218,7 @@ class PostgreSQLRAG:
             for possible_item in food_items:
                 if possible_item in query_text and possible_item not in items:
                     items.append(possible_item)
-                    print(f"    → 폴백으로 '{possible_item}' 품목 추가")
+                    print(f"    - 폴백으로 '{possible_item}' 품목 추가")
 
         if not items:
             print(">> 검색할 품목이 없어서 영양소 검색 건너뜀")
@@ -382,8 +382,8 @@ class PostgreSQLRAG:
             print(f">> 영양소 데이터 검색 오류: {e}")
             return []
 
-    def search_price_data_smart(self, params: Dict[str, Any]) -> List[Dict]:
-        """스마트 가격 데이터 검색"""
+    def search_price_data(self, params: Dict[str, Any]) -> List[Dict]:
+        """가격 데이터 검색"""
         base_query = """
         SELECT
             id,
@@ -476,34 +476,6 @@ class PostgreSQLRAG:
             print(f">> 가격 데이터 검색 오류: {e}")
             return []
 
-    def search_nutrition_data(self, items: List[str]) -> List[Dict]:
-        """영양소 정보 검색"""
-        if not items:
-            return []
-
-        query = """
-        SELECT
-            식품군,
-            식품명,
-            출처
-        FROM nutrition_facts
-        WHERE 식품명 ILIKE ANY(%s)
-        LIMIT 50
-        """
-
-        like_patterns = [f"%{item}%" for item in items]
-
-        try:
-            with self.get_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(query, (like_patterns,))
-                    results = cursor.fetchall()
-                    return [dict(row) for row in results]
-
-        except Exception as e:
-            print(f">> 영양소 데이터 검색 오류: {e}")
-            return []
-
     def search_trade_data(self, params: Dict[str, Any]) -> List[Dict]:
         """수출입 통계 검색"""
         query = """
@@ -578,45 +550,6 @@ class PostgreSQLRAG:
             print(f">> 뉴스 메타데이터 검색 오류: {e}")
             return []
 
-    def comprehensive_search(self, query: str) -> Dict[str, Any]:
-        """종합 검색 수행"""
-        print(f"\n>> 포괄적 RDB 검색 시작: {query}")
-
-        params = self._extract_search_params(query)
-        print(f">> 추출된 파라미터: {params}")
-
-        results = {
-            'query': query,
-            'extracted_params': params,
-            'price_data': [],
-            'nutrition_data': [],
-            'trade_data': [],
-            'news_data': [],
-            'total_results': 0
-        }
-
-        if '가격' in query or '시세' in query or params.get('items'):
-            results['price_data'] = self.search_price_data_smart(params)
-
-        if '영양' in query or '칼로리' in query or '비타민' in query:
-            results['nutrition_data'] = self.search_nutrition_data_smart(params)
-
-        if '수출' in query or '수입' in query or '무역' in query:
-            results['trade_data'] = self.search_trade_data(params)
-
-        if '뉴스' in query or '기사' in query:
-            results['news_data'] = self.search_news_metadata(params.get('items', []))
-
-        results['total_results'] = (
-            len(results['price_data']) +
-            len(results['nutrition_data']) +
-            len(results['trade_data']) +
-            len(results['news_data'])
-        )
-
-        print(f">> 검색 완료 - 총 {results['total_results']}건")
-        return results
-
 # PostgreSQL RAG 인스턴스 생성
 postgres_rag = PostgreSQLRAG()
 
@@ -632,12 +565,24 @@ def postgres_rdb_search(query: str) -> str:
     try:
         search_results = postgres_rag.comprehensive_search(query)
 
+        # 실제 데이터가 있는지 먼저 확인
+        has_data = any([
+            search_results['price_data'],
+            search_results['nutrition_data'],
+            search_results['trade_data'],
+            search_results['news_data']
+        ])
+
+        if not has_data:
+            print(f">> RDB에서 '{query}' 관련 데이터 없음")
+            return f"PostgreSQL 검색 결과: '{query}'와 관련된 데이터를 찾을 수 없습니다."
+
         summary = f"PostgreSQL 검색 결과 (총 {search_results['total_results']}건):\n\n"
 
         if search_results['price_data']:
-            summary += f"### 📈 가격 데이터 ({len(search_results['price_data'])}건)\n"
+            summary += f"### 가격 데이터 ({len(search_results['price_data'])}건)\n"
             for item in search_results['price_data'][:5]:
-                # --- 1. 단기(전일 대비) 가격 정보 생성 (0: 하락, 1: 상승, 2: 변동없음)---
+                # 1. 단기(전일 대비) 가격 정보 생성 (0: 하락, 1: 상승, 2: 변동없음)
                 direction_map = {0: '▼', 1: '▲', 2: '-'}
                 direction_symbol = direction_map.get(item.get('direction'), '')
 
@@ -655,7 +600,7 @@ def postgres_rdb_search(query: str) -> str:
                     if price_diff != 0:
                         daily_trend_info = f" (어제보다 {abs(price_diff):,}원 {direction_symbol})"
 
-                # --- 2. 장기(월/년 단위) 가격 정보 생성 ---
+                # 2. 장기(월/년 단위) 가격 정보 생성
                 historical_info_parts = []
                 price_month_ago = item.get('dpr3')
                 price_year_ago = item.get('dpr4')
@@ -672,7 +617,7 @@ def postgres_rdb_search(query: str) -> str:
                     year_symbol = '▲' if year_change_pct > 0 else '▼'
                     historical_info_parts.append(f"1년 전: {year_change_pct:+.1f}% {year_symbol}")
 
-                # --- 3. 최종 요약 라인 조합 ---
+                # 3. 최종 요약 라인 조합
                 # 메인 정보 (현재 가격, 전일 대비)
                 summary += (
                     f"- **{item.get('item_name', 'N/A')}** ({item.get('category_name', 'N/A')}): "
@@ -684,13 +629,13 @@ def postgres_rdb_search(query: str) -> str:
                 if historical_info_parts:
                     summary += f"    - `추세: {' | '.join(historical_info_parts)}`\n"
 
-        if len(search_results['price_data']) > 5:
-            summary += f"... 외 {len(search_results['price_data']) - 5}건\n"
-        summary += "\n"
+            if len(search_results['price_data']) > 5:
+                summary += f"... 외 {len(search_results['price_data']) - 5}건\n"
+            summary += "\n"
 
         if search_results['nutrition_data']:
-            summary += f"### 🥗 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
-        
+            summary += f"### 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
+
             # 1. (개선) 동의어를 그룹으로 묶어 중복을 제거한 매핑 테이블
             NUTRIENT_MAP = {
                 # DB 컬럼명: {표시 이름, 동의어 리스트, 단위}
@@ -726,17 +671,17 @@ def postgres_rdb_search(query: str) -> str:
 
             for item in search_results['nutrition_data']:
                 summary += f"- **{item.get('food_name', 'N/A')}** ({item.get('food_group', 'N/A')}):\n"
-            
+
                 highlighted_summaries = []
                 processed_nutrients = set() # 이미 처리된 영양성분 기록 (중복 출력 방지)
-            
+
                 # 2. (개선) 새로운 MAP 구조에 맞춰 사용자 요청 정보 확인
                 if specific_info:
                     for db_key, nutrient_details in NUTRIENT_MAP.items():
                         # 이미 요약에 추가된 성분이면 건너뛰기
                         if db_key in processed_nutrients:
                             continue
-                    
+
                         # 사용자가 요청한 키워드가 현재 영양성분의 동의어 목록에 있는지 확인
                         for keyword in nutrient_details['keywords']:
                             if keyword.replace(" ", "") in specific_info:
@@ -758,7 +703,7 @@ def postgres_rdb_search(query: str) -> str:
                     fat = item.get('fat_g', 'N/A')
                     carb = item.get('carbohydrate_g', 'N/A')
                     sugar = item.get('sugars_g', 'N/A')
-                
+
                     summary += (
                         f"    - **주요성분**: "
                         f"칼로리 {energy}kcal/100g | "
@@ -767,7 +712,7 @@ def postgres_rdb_search(query: str) -> str:
                         f"탄수화물 {carb}g/100g | "
                         f"당류 {sugar}g/100g\n"
                     )
-                
+
             summary += "\n"
 
         if search_results['trade_data']:
