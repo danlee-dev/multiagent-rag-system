@@ -162,12 +162,14 @@ class PostgreSQLRAG:
             return None
 
     def comprehensive_search(self, query: str) -> Dict[str, Any]:
-        """종합 검색 수행"""
+        """
+        LLM의 search_type을 유일한 기준으로 사용하여 검색 대상을 결정하는 종합 검색 함수입니다.
+        """
         print(f"\n>> RDB 종합 검색 시작: {query}")
 
+        # 1. LLM을 통해 사용자 의도를 구조화된 정보(params)로 변환합니다.
         params = self._extract_search_params(query)
-        print(f">> 추출된 파라미터: {params}")
-
+        
         results = {
             'query': query,
             'extracted_params': params,
@@ -175,29 +177,33 @@ class PostgreSQLRAG:
             'nutrition_data': [],
             'trade_data': [],
             'news_data': [],
-            'total_results': 0
         }
 
         search_type = params.get('search_type', 'general')
 
-        if search_type == 'nutrition' or '영양' in query or '칼로리' in query:
-            print(">> 영양 정보 우선 검색")
-            results['nutrition_data'] = self.search_nutrition_data(params)
-
-        if search_type == 'price' or '가격' in query or '시세' in query:
-            print(">> 가격 정보 우선 검색")
+        # 2. 오직 search_type에 따라 어떤 정보를 검색할지 결정합니다.
+        #   - 'general' 타입은 관련된 모든 정보를 검색합니다.
+        #   - 특정 타입('price', 'nutrition' 등)은 해당 정보만 정확히 검색합니다.
+        
+        if search_type in ['price', 'general']:
+            print(">> 가격 정보 검색 수행")
             results['price_data'] = self.search_price_data(params)
 
-        if search_type == 'general':
+        if search_type in ['nutrition', 'general']:
+            print(">> 영양 정보 검색 수행")
             results['nutrition_data'] = self.search_nutrition_data(params)
-            results['price_data'] = self.search_price_data(params)
 
-        results['total_results'] = (
-            len(results['price_data']) +
-            len(results['nutrition_data']) +
-            len(results['trade_data']) +
-            len(results['news_data'])
-        )
+        if search_type in ['trade', 'general']:
+            print(">> 무역 정보 검색 수행")
+            results['trade_data'] = self.search_trade_data(params)
+
+        if search_type in ['news', 'general']:
+            print(">> 뉴스 정보 검색 수행")
+            # 뉴스 검색은 품목 키워드 리스트를 직접 전달합니다.
+            results['news_data'] = self.search_news_metadata(params.get('items', []))
+
+        # 3. 모든 검색 결과를 합산하여 총 개수를 계산합니다.
+        results['total_results'] = sum(len(data) for key, data in results.items() if key.endswith('_data'))
 
         print(f">> 검색 완료 - 총 {results['total_results']}건")
         return results
@@ -360,15 +366,15 @@ class PostgreSQLRAG:
             "트랜스 리놀레산(18:2t) (mg/100g)" as "trans_linoleic_acid_18_2t_mg",
             "트랜스 리놀렌산(18:3t) (mg/100g)" as "trans_linolenic_acid_18_3t_mg",
             "식염상당량 (g/100g)" as "salt_equivalent_g",
-            "폐기율 (%)" as "waste_rate_percent"
+            "폐기율 (%%)" as "waste_rate_percent"
         FROM nutrition_facts
-        WHERE "식품명" ILIKE ANY(%s)
+        WHERE 1=1
         """
 
         like_patterns = [f"%{item}%" for item in items]
         query_params = (like_patterns,)
 
-        base_query += " LIMIT 50"
+        base_query += " LIMIT 10"
 
         try:
             with self.get_connection() as conn:
@@ -466,7 +472,11 @@ class PostgreSQLRAG:
                     print(f">> 실행 쿼리: {base_query}")
                     print(f">> 파라미터: {query_params}")
 
-                    cursor.execute(base_query, query_params)
+                    if query_params:
+                        cursor.execute(base_query, query_params)
+                    else:
+                        cursor.execute(base_query)
+
                     results = cursor.fetchall()
 
                     print(f">> 검색 결과: {len(results)}건")
@@ -534,7 +544,7 @@ class PostgreSQLRAG:
         FROM news_metadata
         WHERE title ILIKE ANY(%s)
         ORDER BY published_date DESC
-        LIMIT 50
+        LIMIT 10
         """
 
         like_patterns = [f"%{keyword}%" for keyword in keywords]

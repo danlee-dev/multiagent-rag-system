@@ -5,7 +5,7 @@ from ...core.config.report_config import (
 )
 
 class ReportTemplateManager:
-    """보고서 템플릿 관리자 - 모든 팀과 보고서 타입에 대한 설정 포함"""
+    """모든 팀과 보고서 타입에 대한 설정 포함"""
 
     def __init__(self):
         self.templates = self._load_templates()
@@ -14,7 +14,7 @@ class ReportTemplateManager:
     def _load_templates(self) -> Dict[str, Dict[str, ReportTemplate]]:
         """모든 팀과 보고서 타입에 대한 템플릿 설정 로드"""
         return {
-            # --- 마케팅(MARKETING) 팀 템플릿 ---
+            # --- 마케팅 팀 템플릿 ---
             TeamType.MARKETING.value: {
                 ReportType.COMPREHENSIVE.value: ReportTemplate(
                     role_description="bain_principal_marketing",
@@ -47,7 +47,7 @@ class ReportTemplateManager:
                     total_words="500-800", charts="1-2"
                 )
             },
-            # --- 구매(PURCHASING) 팀 템플릿 ---
+            # --- 구매 팀 템플릿 ---
             TeamType.PURCHASING.value: {
                 ReportType.COMPREHENSIVE.value: ReportTemplate(
                     role_description="procurement_expert",
@@ -80,40 +80,132 @@ class ReportTemplateManager:
                     total_words="500-800", charts="1"
                 )
             },
-            # --- 제품개발(DEVELOPMENT) 팀 템플릿 ---
+            # --- 제품개발 팀 템플릿 ---
             TeamType.DEVELOPMENT.value: {
                 ReportType.COMPREHENSIVE.value: ReportTemplate(
-                    role_description="product_development_lead",
+                    role_description="organic_product_development_expert",
                     sections=[
-                        SectionConfig(key="nutritional_analysis_deep_dive", words="600", details=["key_nutrient_breakdown", "comparison_with_competitors"], chart_requirements=["nutrient_composition_pie_chart"]),
-                        SectionConfig(key="ingredient_sourcing_strategy", words="500", details=["potential_suppliers", "quality_and_cost_analysis"], chart_requirements=["ingredient_cost_comparison_chart"])
+                        SectionConfig(
+                            key="eco_organic_market_analysis",
+                            words="600",
+                            details=[
+                                "organic_ingredient_market_trends_2022_2025",
+                                "quarterly_production_consumption_data",
+                                "domestic_organic_ingredient_types_analysis",
+                                "consumer_spending_patterns_organic_foods"
+                            ],
+                            chart_requirements=[
+                                "organic_market_growth_trend_chart",
+                                "quarterly_consumption_volume_chart",
+                                "ingredient_type_market_share_pie"
+                            ]
+                        ),
+                        SectionConfig(
+                            key="sustainable_ingredient_sourcing_strategy",
+                            words="500",
+                            details=[
+                                "certified_organic_supplier_network",
+                                "eco_friendly_supply_chain_optimization",
+                                "seasonal_availability_price_analysis",
+                                "carbon_footprint_assessment"
+                            ],
+                            chart_requirements=[
+                                "supplier_sustainability_scorecard",
+                                "seasonal_price_fluctuation_chart"
+                            ]
+                        ),
+                        SectionConfig(
+                            key="product_development_roadmap",
+                            words="500",
+                            details=[
+                                "eco_product_concept_validation",
+                                "organic_certification_requirements",
+                                "target_consumer_segment_analysis",
+                                "competitive_organic_products_benchmarking"
+                            ],
+                            chart_requirements=[
+                                "development_timeline_gantt",
+                                "competitive_positioning_matrix"
+                            ]
+                        )
                     ],
-                    total_words="2000-3000", charts="6-8"
+                    total_words="2500-3500",
+                    charts="8-10"
                 ),
                 ReportType.DETAILED.value: ReportTemplate(
-                    role_description="food_scientist",
+                    role_description="sustainable_food_scientist",
                     sections=[
-                        SectionConfig(key="nutritional_information", words="400", details=["macro_nutrients", "micro_nutrients"], chart_requirements=["nutrient_table"]),
-                        SectionConfig(key="functional_benefits", words="300", details=["health_benefits", "scientific_evidence"], chart_requirements=[])
+                        SectionConfig(
+                            key="organic_ingredient_market_overview",
+                            words="450",
+                            details=[
+                                "2022_2025_market_size_trends",
+                                "major_organic_ingredient_categories",
+                                "domestic_vs_imported_ingredient_analysis"
+                            ],
+                            chart_requirements=[
+                                "market_growth_timeline",
+                                "ingredient_category_breakdown"
+                            ]
+                        ),
+                        SectionConfig(
+                            key="eco_product_feasibility_study",
+                            words="400",
+                            details=[
+                                "organic_certification_pathway",
+                                "sustainable_packaging_options",
+                                "cost_benefit_analysis_organic_vs_conventional"
+                            ],
+                            chart_requirements=[
+                                "certification_process_flowchart",
+                                "cost_comparison_analysis"
+                            ]
+                        )
                     ],
-                    total_words="1500-2000", charts="3-5"
+                    total_words="1800-2200",
+                    charts="5-7"
                 ),
                 ReportType.STANDARD.value: ReportTemplate(
-                    role_description="product_developer",
+                    role_description="eco_product_developer",
                     sections=[
-                        SectionConfig(key="ingredient_profile", words="400", details=["main_ingredients_list", "nutritional_facts"], chart_requirements=["main_nutrient_bar_chart"])
+                        SectionConfig(
+                            key="organic_ingredient_profile_analysis",
+                            words="400",
+                            details=[
+                                "key_organic_ingredients_list",
+                                "nutritional_sustainability_benefits",
+                                "market_availability_pricing"
+                            ],
+                            chart_requirements=[
+                                "ingredient_nutrition_comparison",
+                                "price_trend_summary"
+                            ]
+                        )
                     ],
-                    total_words="800-1200", charts="2-3"
+                    total_words="1000-1400",
+                    charts="3-4"
                 ),
                 ReportType.BRIEF.value: ReportTemplate(
-                    role_description="junior_researcher",
+                    role_description="organic_research_assistant",
                     sections=[
-                        SectionConfig(key="nutrient_summary", words="300", details=["key_nutrients_summary"], chart_requirements=[])
+                        SectionConfig(
+                            key="eco_ingredient_summary",
+                            words="300",
+                            details=[
+                                "trending_organic_ingredients_2025",
+                                "basic_market_data_overview"
+                            ],
+                            chart_requirements=[
+                                "trending_ingredients_snapshot"
+                            ]
+                        )
                     ],
-                    total_words="400-600", charts="1"
+                    total_words="500-700",
+                    charts="1-2"
                 )
             },
-            # --- 총무(GENERAL_AFFAIRS) 팀 템플릿 ---
+
+            # --- 총무팀 템플릿 ---
             TeamType.GENERAL_AFFAIRS.value: {
                 ReportType.DETAILED.value: ReportTemplate(
                     role_description="operations_manager",
@@ -124,7 +216,7 @@ class ReportTemplateManager:
                     total_words="1500-2000", charts="4-5"
                 ),
             },
-            # --- 일반(GENERAL) 팀 템플릿 (폴백용) ---
+            # --- 일반팀 템플릿 (폴백용) ---
             TeamType.GENERAL.value: {
                 ReportType.COMPREHENSIVE.value: ReportTemplate(
                     role_description="business_analyst",
@@ -180,6 +272,19 @@ class ReportTemplateManager:
                 "budget_efficiency_report": "예산 효율성 보고",
                 "executive_summary": "경영진 요약",
                 "detailed_analysis": "상세 분석",
+                "organic_product_development_expert": "당신은 친환경 유기농 제품 개발을 전문으로 하는 R&D 리더입니다. 2022년부터 2025년까지의 국내 친환경 유기농 시장 데이터와 트렌드를 깊이 분석하고, 지속가능한 신제품 개발 전략을 수립합니다.",
+                "sustainable_food_scientist": "당신은 지속가능한 식품 과학을 연구하는 전문가로, 친환경 유기농 식자재의 과학적 특성과 시장 동향을 분석합니다.",
+                "eco_product_developer": "당신은 친환경 제품 개발을 담당하는 연구원으로, 유기농 식자재를 활용한 제품 기획과 개발을 수행합니다.",
+                "organic_research_assistant": "당신은 유기농 식품 트렌드와 기초 시장 데이터를 조사하고 정리하는 연구 보조원입니다.",
+
+                # 새로운 Section 번역
+                "eco_organic_market_analysis": "친환경 유기농 시장 종합 분석",
+                "sustainable_ingredient_sourcing_strategy": "지속가능한 원료 소싱 전략",
+                "product_development_roadmap": "친환경 제품 개발 로드맵",
+                "organic_ingredient_market_overview": "유기농 식자재 시장 현황",
+                "eco_product_feasibility_study": "친환경 제품 타당성 연구",
+                "organic_ingredient_profile_analysis": "유기농 식자재 프로파일 분석",
+                "eco_ingredient_summary": "친환경 식자재 요약"
             }
         }
 

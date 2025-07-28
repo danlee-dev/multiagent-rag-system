@@ -61,11 +61,11 @@ class Neo4jSearchService:
                 "associations": ["association1", "association2"]
             }}
 
-            - products: Names of agricultural, marine, or livestock products (e.g., apple, mackerel, pork).
-            - regions: Geographic locations (e.g., Seoul, Jeju, Gyeonggi-do).
-            - categories: Classification of products (e.g., fruits, leafy vegetables). Only include if category is explicitly mentioned in query or query asks for similar products.
-            - fish_states: States of marine products (e.g., live, fresh, frozen, dried).
-            - associations: Associations or cooperatives (e.g., Jeju Fisheries Cooperative). Only include if explicitly mentioned in the query.
+            - products: Names of agricultural, marine, or livestock products (e.g., 사과, 문어, 돼지).
+            - regions: Geographic locations (e.g., 서울, 제주, 경기도, 고성).
+            - categories: Classification of agricultural products (e.g., 과실류, 엽채류, 양채류). Only include if **explicitly** mentioned in query or the query **asks for similar products**. Else, never include.
+            - fish_states: States of marine products (e.g., 활어, 선어, 냉동, 건어).
+            - associations: Associations or cooperatives (e.g., 경인서부수협, 통영수협). Only include if explicitly mentioned in the query.
 
             Respond only with the JSON object.
             """
@@ -126,6 +126,8 @@ class Neo4jSearchService:
 
             result = self._format_results(query, unique_nodes, relationships)
             print(f"- Neo4j 검색 완료: {len(unique_nodes)}개 항목, {len(relationships)}개 관계")
+
+
             return result
 
         except Exception as e:

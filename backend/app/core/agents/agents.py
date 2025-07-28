@@ -19,10 +19,6 @@ from langchain.prompts import PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
-import json
-from typing import Dict, List, AsyncGenerator
-from langchain_openai import ChatOpenAI
-
 # 로컬 imports
 from ...core.config.report_config import TeamType, ReportType, Language
 from ...services.templates.report_templates import ReportTemplateManager
@@ -46,7 +42,7 @@ from ...services.search.search_tools import (
     debug_web_search,
     graph_db_search,
     rdb_search,
-    mock_vector_search,
+    vector_db_search,
     scrape_and_extract_content,
 )
 from ...utils.utils import create_agent_message
@@ -60,10 +56,37 @@ class DataExtractor:
     async def extract_numerical_data(self, search_results: List[SearchResult], query: str) -> Dict[str, Any]:
         """검색 결과에서 수치 데이터를 추출"""
 
+        print(f"\n>> 수치 데이터 추출 시작")
+        print(f"- 검색 결과 개수: {len(search_results)}")
 
         combined_text = ""
         for result in search_results:
             combined_text += f"{result.content}\n"
+
+        print(f"- 결합된 텍스트 길이: {len(combined_text)}자")
+
+        # 텍스트 길이 제한 (하지만 중요한 부분 보존)
+        max_length = 8000  # 더 넉넉하게
+        if len(combined_text) > max_length:
+            # PostgreSQL 결과 우선 보존
+            postgres_parts = []
+            other_parts = []
+
+            for result in search_results:
+                if "PostgreSQL" in result.content or "가격 데이터" in result.content or "영양 정보" in result.content:
+                    postgres_parts.append(result.content)
+                else:
+                    other_parts.append(result.content)
+
+            # PostgreSQL 결과 전부 + 나머지 일부
+            combined_text = "\n".join(postgres_parts)
+            remaining_length = max_length - len(combined_text)
+
+            if remaining_length > 0:
+                other_text = "\n".join(other_parts)
+                combined_text += "\n" + other_text[:remaining_length]
+
+            print(f"- 텍스트 최적화 후 길이: {len(combined_text)}자")
 
         prompt = f"""
         다음 텍스트에서 숫자, 퍼센트, 통계 데이터를 추출하고 JSON 형태로 정리해주세요.
@@ -71,7 +94,7 @@ class DataExtractor:
         원본 질문: {query}
 
         텍스트:
-        {combined_text[:]}  # 너무 길면 잘라서
+        {combined_text}
 
         다음 형식으로 추출해주세요:
         {{
@@ -89,15 +112,27 @@ class DataExtractor:
             }}
         }}
 
-        실제 숫자가 없으면 빈 배열이나 객체를 반환하세요.
+        **중요 지침:**
+        1. PostgreSQL 검색 결과의 실제 수치를 최우선으로 추출
+        2. "가격 데이터", "영양 정보" 섹션의 모든 숫자 추출
+        3. 단위도 정확히 추출 (원, g, kcal, mg 등)
+        4. 실제 숫자가 없으면 빈 배열이나 객체를 반환
+
+        예시: "1,033원/100g" → {{"value": 1033, "unit": "원", "context": "100g당 가격"}}
         """
 
         try:
+            print("- LLM 수치 추출 시작...")
             response = await self.llm.ainvoke(prompt)
-            return json.loads(response.content)
-        except:
-            return {"extracted_numbers": [], "percentages": [], "trends": [], "categories": {}}
+            result = json.loads(response.content)
 
+            print(f"- 추출된 수치: {len(result.get('extracted_numbers', []))}개")
+            print(f"- 추출된 퍼센트: {len(result.get('percentages', []))}개")
+
+            return result
+        except Exception as e:
+            print(f"- 수치 추출 실패: {e}")
+            return {"extracted_numbers": [], "percentages": [], "trends": [], "categories": {}}
 
 
 class PlanningAgent:
@@ -110,7 +145,7 @@ class PlanningAgent:
     """
 
     def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o", temperature=0)
+        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
         self.agent_type = AgentType.PLANNING
 
     async def plan(self, state: StreamingAgentState) -> StreamingAgentState:
@@ -168,8 +203,8 @@ class PlanningAgent:
         state.query_plan = QueryPlan(
             original_query=query,
             sub_queries=[execution_plan],
-            estimated_complexity=mapped_complexity,  # 매핑된 소문자 값 사용
-            execution_strategy=mapped_strategy,  # 매핑된 소문자 값 사용
+            estimated_complexity=mapped_complexity,
+            execution_strategy=mapped_strategy,  
             resource_requirements=complexity_analysis.get("resource_requirements", {}),
         )
 
@@ -209,7 +244,7 @@ class PlanningAgent:
 ## 4단계 복잡도 분류 기준
 
 ### SIMPLE (직접 답변)
-- 단일 정보 요청, 기본 정의, 간단한 계산
+- 기본 정의, 간단한 계산
 - 추가 검색이나 분석 불필요
 - 1-2개 문장으로 답변 가능
 - 예: "아마란스가 뭐야?", "칼로리 알려줘"
@@ -224,12 +259,13 @@ class PlanningAgent:
 - 다단계 추론과 여러 소스 종합 필요
 - 전략적 사고와 맥락적 분석 필요
 - 복잡한 의사결정 지원
+- 산출 방식: 단일 전문가(ReAct 에이전트)가 모든 정보를 수집하고 분석하여 '하나의 완성된 분석 결과물'을 도출함
 - 예: "마케팅 전략 수립해줘", "시장 분석 보고서"
 
 ### SUPER_COMPLEX (다중 에이전트 협업)
 - 매우 복잡한 다영역 분석
 - 장기적 계획이나 종합적 전략 필요
-- 여러 전문가 관점 종합 필요
+- 산출 방식: 여러 전문가(에이전트)가 각자의 관점(예: 시장 분석, 전략, 리스크)에서 개별 분석을 수행하고, 이를 최종적으로 종합하여 '다각적인 보고서'를 생성함
 - 예: "글로벌 진출 전략", "5년 사업 계획"
 
 ## 실행 전략 매핑
@@ -415,22 +451,18 @@ class PlanningAgent:
 class RetrieverAgent:
     """통합 검색 에이전트 - 복잡도별 차등 + 병렬 처리"""
 
-    def __init__(self, vector_db=None, rdb=None, graph_db=None):
-        self.vector_db = vector_db
-        self.rdb = rdb
-        self.graph_db = graph_db
-
+    def __init__(self):
         # 사용 가능한 도구들
         self.available_tools = [
             debug_web_search,
             scrape_and_extract_content,
-            mock_vector_search,
+            vector_db_search,
             rdb_search,
             graph_db_search,
         ]
 
         self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        self.chat = ChatOpenAI(model="gpt-3.5-turbo")
+        self.chat = ChatOpenAI(model="gpt-4o-mini")
 
         # 날짜 정보
         self.current_date = datetime.now()
@@ -481,29 +513,84 @@ class RetrieverAgent:
         else:
             return await self._execute_basic_parallel_search(state, original_query)
 
-    async def _execute_basic_parallel_search(
-        self, state: StreamingAgentState, query: str
-    ) -> StreamingAgentState:
-        """기본 병렬 검색 (BASIC 복잡도)"""
-        print("\n>> 기본 병렬 검색 실행")
+    async def _determine_search_sources(self, query: str) -> Dict[str, bool]:
+        """LLM이 쿼리를 분석해서 어떤 DB를 검색할지 결정"""
 
-        # 병렬로 실행할 검색 작업들
+        prompt = f"""
+        다음 질문을 분석해서 어떤 데이터베이스를 검색해야 하는지 판단해라.
+
+        질문: "{query}"
+
+        검색 소스별 특징:
+        - vector_db: 일반적인 문서, 가이드, 설명서 (농업 기술, 재배법 등)
+        - rdb: 정확한 수치 데이터 (가격, 영양성분, 생산량 등)
+        - graph_db: 관계형 데이터 (공급망, 지역별 특산품, 연관 정보)
+        - web_search: 최신 뉴스, 트렌드, 실시간 정보
+
+        다음 JSON 형식으로만 답변해:
+        {{
+            "vector_db": true/false,
+            "rdb": true/false,
+            "graph_db": true/false,
+            "web_search": true/false,
+            "reasoning": "판단 근거"
+        }}
+        """
+
+        try:
+            response = await self.llm.ainvoke(prompt)
+            content = response.content.strip()
+
+            # JSON 파싱
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+
+            decision = json.loads(content)
+            return decision
+
+        except Exception as e:
+            print(f"소스 결정 오류: {e}")
+            # 오류시 안전하게 모든 소스 검색
+            return {
+                "vector_db": True,
+                "rdb": True,
+                "graph_db": True,
+                "web_search": True,
+                "reasoning": "판단 오류로 모든 소스 검색"
+            }
+
+    async def _execute_basic_parallel_search(self, state: StreamingAgentState, query: str) -> StreamingAgentState:
+        """LLM 판단 기반 선택적 병렬 검색"""
+        print("\n>> 지능형 선택적 병렬 검색 실행")
+
+        # DB 상태 확인
+        print(f"- DB 상태 확인:")
+        print(f"  vector_db: {self.vector_db is not None}")
+        print(f"  rdb: {self.rdb is not None}")
+        print(f"  graph_db: {self.graph_db is not None}")
+
+        # LLM이 어떤 소스를 검색할지 결정
+        search_decision = await self._determine_search_sources(query)
+        print(f"- 검색 결정: {search_decision}")
+
         search_tasks = []
 
-        # 1. Vector DB 검색
-        if self.vector_db:
+        # LLM 판단에 따라 선택적 검색
+        if search_decision.get("vector_db"):
             search_tasks.append(self._async_vector_search(query))
+            print("- Vector DB 검색 추가")
 
-        # 2. RDB 검색
-        if self.rdb:
+        if search_decision.get("rdb"):
             search_tasks.append(self._async_rdb_search(query))
+            print("- RDB 검색 추가")
 
-        # 3. Graph DB 검색
-        if self.graph_db:
+        if search_decision.get("graph_db"):
             search_tasks.append(self._async_graph_search(query))
+            print("- Graph DB 검색 추가")
 
-        # 4. 간단한 웹 검색
-        search_tasks.append(self._async_web_search_enhanced(query))
+        if search_decision.get("web_search"):
+            search_tasks.append(self._async_web_search_enhanced(query))
+            print("- 웹 검색 추가")
 
 
         try:
@@ -655,28 +742,28 @@ class RetrieverAgent:
     # ========== 개별 검색 메서드들 (비동기) ==========
 
     async def _async_vector_search(self, query: str) -> List[SearchResult]:
-        """비동기 Vector DB 검색"""
+        """비동기 Vector DB 검색 - search_tools 통일"""
         try:
             print(f"  └ Vector DB 검색: {query[:30]}...")
 
-            # 스레드 풀 사용
+            # search_tools.py의 vector_db_search 함수 사용
             loop = asyncio.get_event_loop()
             vector_results = await loop.run_in_executor(
                 self.thread_pool,
-                lambda: mock_vector_search.invoke({"query": query})
+                lambda: vector_db_search.invoke({"query": query})
             )
 
+            # 결과를 SearchResult로 변환
             results = []
-            if isinstance(vector_results, dict) and "results" in vector_results:
-                for i, doc in enumerate(vector_results["results"][:3]):
-                    result = SearchResult(
-                        source="vector_db",
-                        content=doc.get("content", ""),
-                        relevance_score=doc.get("similarity_score", 0.7),
-                        metadata={"search_type": "vector", "rank": i + 1},
-                        search_query=query,
-                    )
-                    results.append(result)
+            if isinstance(vector_results, str) and vector_results:
+                result = SearchResult(
+                    source="vector_db",
+                    content=vector_results,
+                    relevance_score=0.7,
+                    metadata={"search_type": "vector"},
+                    search_query=query,
+                )
+                results.append(result)
 
             print(f"    ✓ Vector DB: {len(results)}개 결과")
             return results
@@ -685,23 +772,26 @@ class RetrieverAgent:
             print(f"    ✗ Vector DB 오류: {e}")
             return []
 
+
     async def _async_graph_search(self, query: str) -> List[SearchResult]:
-        """비동기 Graph DB 검색"""
+        """비동기 Graph DB 검색 - search_tools 통일"""
         try:
             print(f"  └ Graph DB 검색: {query[:30]}...")
 
+            # search_tools.py의 graph_db_search 함수 사용
             loop = asyncio.get_event_loop()
-            graph_result_str = await loop.run_in_executor(
+            graph_results = await loop.run_in_executor(
                 self.thread_pool,
                 lambda: graph_db_search.invoke({"query": query})
             )
 
+            # 결과를 SearchResult로 변환
             results = []
-            if isinstance(graph_result_str, str) and "Neo4j" in graph_result_str:
+            if isinstance(graph_results, str) and "Neo4j" in graph_results:
                 result = SearchResult(
                     source="graph_db",
-                    content=graph_result_str,
-                    relevance_score=0.85, # 그래프 DB는 신뢰도가 높음
+                    content=graph_results,
+                    relevance_score=0.85,
                     metadata={"search_type": "graph"},
                     search_query=query,
                 )
@@ -714,52 +804,36 @@ class RetrieverAgent:
             print(f"    ✗ Graph DB 오류: {e}")
             return []
 
+
     async def _async_rdb_search(self, query: str) -> List[SearchResult]:
-        """비동기 RDB 검색"""
+        """비동기 RDB 검색 - search_tools 통일"""
         try:
             print(f"  └ RDB 검색: {query[:30]}...")
-
 
             processed_query = self._preprocess_rdb_query(query)
             print(f"    → 전처리된 쿼리: {processed_query}")
 
+            # search_tools.py의 rdb_search 함수 사용
             loop = asyncio.get_event_loop()
-            rdb_results_content = await loop.run_in_executor(
+            rdb_results = await loop.run_in_executor(
                 self.thread_pool,
                 lambda: rdb_search.invoke({"query": processed_query})
             )
 
-            # 반환값이 문자열인지 확인하여 처리하는 로직으로 변경
-            if isinstance(rdb_results_content, str) and rdb_results_content:
-                # 전체 문자열을 content로 하는 단일 SearchResult 객체 생성
+            # 결과를 SearchResult로 변환
+            results = []
+            if isinstance(rdb_results, str) and rdb_results:
                 result = SearchResult(
                     source="rdb",
-                    content=rdb_results_content,
-                    relevance_score=0.85, # DB에서 직접 온 정보이므로 신뢰도 높게 설정
+                    content=rdb_results,
+                    relevance_score=0.85,
                     metadata={"search_type": "rdb"},
                     search_query=processed_query,
                 )
-                print(f"    ✓ RDB: 1개 결과 객체 생성 완료")
-                return [result] # 생성된 객체를 리스트에 담아 반환
+                results.append(result)
 
-            # 딕셔너리 형태의 예외적인 경우도 처리
-            elif isinstance(rdb_results_content, dict) and "results" in rdb_results_content:
-                # 이 로직은 거의 실행되지 않겠지만, 호환성을 위해 유지
-                results = []
-                for i, doc in enumerate(rdb_results_content["results"][:2]):
-                    results.append(SearchResult(
-                        source="rdb",
-                        content=doc.get("content", ""),
-                        relevance_score=0.8,
-                        metadata={"search_type": "rdb", "rank": i + 1},
-                        search_query=processed_query,
-                    ))
-                print(f"    ✓ RDB (Dict): {len(results)}개 결과")
-                return results
-
-            else:
-                print(f"    ✗ RDB: 유효한 결과를 받지 못함 (Type: {type(rdb_results_content)})")
-                return []
+            print(f"    ✓ RDB: {len(results)}개 결과")
+            return results
 
         except Exception as e:
             print(f"    ✗ RDB 오류: {e}")
@@ -838,45 +912,72 @@ class RetrieverAgent:
 
 
     async def _async_web_search_enhanced(self, query: str) -> List[SearchResult]:
-        """비동기 웹 검색 (정찰 -> 선별 -> 분석)"""
-        print(f"  └ Enhanced Web 검색 시작: {query[:30]}...")
-
-        # 1. 정찰(Scout): debug_web_search로 URL과 요약 수집
-        # (주의: debug_web_search가 List[Dict]를 반환하도록 수정되어 있어야 함)
-        loop = asyncio.get_event_loop()
+        """비동기 웹 검색 - search_tools 통일"""
         try:
-            scout_results = await loop.run_in_executor(
+            print(f"  └ Enhanced Web 검색 시작: {query[:30]}...")
+
+            # search_tools.py의 debug_web_search 함수 사용
+            loop = asyncio.get_event_loop()
+            web_results = await loop.run_in_executor(
                 self.thread_pool,
                 lambda: debug_web_search.invoke({"query": query})
             )
-            if not scout_results or isinstance(scout_results[0], dict) and "error" in scout_results[0]:
-                print("    ✗ 웹 검색(정찰) 실패 또는 결과 없음")
-                return []
-            print(f"    ✓ 정찰 완료: {len(scout_results)}개 URL 후보 발견")
+
+            # 결과를 SearchResult로 변환
+            results = []
+            if isinstance(web_results, str) and web_results:
+                # 문자열에서 링크 추출해보기
+                import re
+                urls = re.findall(r'https?://[^\s]+', web_results)
+
+                if urls and len(urls) > 0:
+                    # 링크가 있으면 첫 번째 링크 스크래핑 시도
+                    print(f"    → {len(urls)}개 URL 발견, 첫 번째 스크래핑 시도")
+                    scraping_result = await self._async_scrape_url(urls[0], query)
+                    if scraping_result:
+                        return [scraping_result]
+
+                # 링크 스크래핑 실패하면 원본 문자열을 SearchResult로 반환
+                result = SearchResult(
+                    source="web_search_summary",
+                    content=web_results,
+                    relevance_score=0.6,
+                    metadata={"search_type": "web_summary"},
+                    search_query=query
+                )
+                results.append(result)
+
+            print(f"    ✓ Web Search: {len(results)}개 결과")
+            return results
+
         except Exception as e:
-            print(f"    ✗ 웹 검색(정찰) 중 예외 발생: {e}")
+            print(f"    ✗ 웹 검색 중 예외 발생: {e}")
             return []
 
-        # 2. 선별(Select): LLM을 이용해 스크래핑할 최적의 URL 선택
-        best_urls = await self._select_best_urls_for_scraping(query, scout_results)
-        if not best_urls:
-            print("    ✗ 스크래핑할 유효한 URL을 선택하지 못함")
-            # 스크래핑 실패 시, 정찰 결과 요약이라도 반환
-            summary_content = "\n".join([f"제목: {r.get('title', '')}\n요약: {r.get('snippet', '')}" for r in scout_results])
-            return [SearchResult(source="web_search_summary", content=summary_content, relevance_score=0.6)]
+    async def _async_scrape_url(self, url: str, query: str) -> Optional[SearchResult]:
+        """단일 URL을 비동기적으로 스크래핑 - search_tools 통일"""
+        try:
+            # search_tools.py의 scrape_and_extract_content 함수 사용
+            action_input = json.dumps({"url": url, "query": query})
 
+            loop = asyncio.get_event_loop()
+            content = await loop.run_in_executor(
+                self.thread_pool,
+                lambda: scrape_and_extract_content.invoke({"action_input": action_input})
+            )
 
-        # 3. 분석(Analyze): 선택된 URL들을 병렬로 스크래핑
-        print(f"    → {len(best_urls)}개 URL에 대한 병렬 스크래핑 시작...")
-        scraping_tasks = [self._async_scrape_url(url, query) for url in best_urls]
-        final_results = await asyncio.gather(*scraping_tasks)
-
-        # None이 아닌 유효한 결과만 필터링
-        valid_results = [res for res in final_results if res is not None]
-
-        print(f"    ✓ Enhanced Web 검색 완료: {len(valid_results)}개 상세 정보 획득")
-        return valid_results
-
+            if content and "오류" not in content:
+                return SearchResult(
+                    source="web_scrape",
+                    content=content,
+                    relevance_score=0.88,
+                    metadata={"search_type": "scrape", "source_url": url},
+                    search_query=query
+                )
+            return None
+        except Exception as e:
+            print(f"    ✗ URL({url}) 스크래핑 실패: {e}")
+            return None
 
     async def _async_react_search(self, query: str) -> Optional[SearchResult]:
         """비동기 ReAct 검색 - 모든 내용 다 합치기"""
@@ -1118,20 +1219,20 @@ class RetrieverAgent:
     def _create_enhanced_query_prompt(self, query: str) -> str:
         """ReAct용 향상된 프롬프트"""
         return f"""
-    Research this topic thoroughly: {query}
+Research this topic thoroughly: {query}
 
-    Current Date: {self.current_date_str}
+Current Date: {self.current_date_str}
 
-    Please use the available tools to research this topic.
+Please use the available tools to research this topic systematically.
 
-    IMPORTANT: Use this exact format for tools:
-    Action: tool_name
-    Action Input: search_query
+IMPORTANT: Use this exact format for tools:
+Action: tool_name
+Action Input: search_query
 
-    DO NOT use parentheses or function call syntax.
+DO NOT use parentheses or function call syntax.
 
-    Begin your research now.
-    """
+Begin your research now.
+"""
 
     def _create_react_agent(self):
         """ReAct 에이전트 생성 - 기존 코드 기반으로 최소한만 수정"""
@@ -1140,60 +1241,77 @@ class RetrieverAgent:
             base_prompt = hub.pull("hwchase17/react")
 
             system_instruction = f"""
-    You are a Senior Analyst at a prestigious agricultural-food economic research institute. Your mission is to provide objective, data-driven, and well-structured analysis based on verifiable information.
-    Current Date: {self.current_date_str}
+You are a Senior Analyst at a prestigious agricultural-food economic research institute. Your mission is to provide comprehensive, data-driven, and well-structured analysis by utilizing ALL AVAILABLE INFORMATION SOURCES.
+Current Date: {self.current_date_str}
 
-    CORE DIRECTIVES:
-    1. Prioritize Facts: Always prioritize verifiable data from reliable sources over speculation or opinion.
-    2. State Limitations: If you cannot find a satisfactory answer after a thorough search, clearly state that the information is unavailable. Do not invent information.
-    3. Follow Protocol: The research protocol below is mandatory.
+CORE DIRECTIVES:
+1. Complete Information Coverage: Find ALL relevant information using internal databases AND external web sources
+2. No Information Gaps: If internal sources are insufficient, ALWAYS supplement with web search
+3. User-First Approach: Prioritize providing complete answers over source preferences
+4. Cite All Sources: Clearly distinguish between internal data and web-sourced information
 
-    AVAILABLE TOOLS:
-    1. rdb_search: For specific, structured data (prices, nutrition). Highest priority for quantitative data.
-    2. graph_db_search: For relationship data (e.g., origins, suppliers).
-    3. debug_web_search: (Scout Tool) Finds candidate URLs. The output is incomplete and for triage purposes only.
-    4. scrape_and_extract_content: (Analyst Tool) Extracts the full, detailed information from a URL. This is the only source of valid web data.
-    5. mock_vector_search: For finding information within internal research papers.
+AVAILABLE TOOLS:
+- rdb_search, graph_db_search, vector_db_search, debug_web_search, scrape_and_extract_content
 
-    MANDATORY RESEARCH PROTOCOL:
+AGGRESSIVE RESEARCH STRATEGY:
 
-    1. Initial Analysis & Internal Search:
-    - Analyze the user's query to understand the core objective.
-    - First, attempt to find the answer in internal databases using rdb_search or graph_db_search.
+1. Start with Internal Tools:
+- Begin with the most appropriate internal tool (rdb_search for data, vector_db_search for knowledge, graph_db_search for relationships)
+- Quick assessment: Does this provide sufficient information for a complete answer?
 
-    2. Web Research Protocol (STRICT 3-Step Process):
-    - Step 2.1 (Scout): If internal data is insufficient, use debug_web_search to get candidate URLs.
-    - Step 2.2 (Assess & Select): From the scout results, assess the reliability of the sources. Prioritize official government sites, research institutions (like KREI), and established news media. Select the single most reliable and relevant URL to analyze first.
-    - Step 2.3 (Analyze & Verify): Use scrape_and_extract_content on the selected URL. If the scrape fails or the content is not useful, you MUST return to the scout results and try the second-best URL. You may attempt scraping a maximum of two URLs.
+2. Immediate Web Escalation Policy:
+**ALWAYS use debug_web_search if ANY of these conditions apply:**
+- Internal search returns insufficient data (less than 3 relevant results)
+- Information seems outdated (older than 6 months for market data)
+- User asks for "latest", "recent", "current", "today's" information
+- Internal data lacks specific details needed for complete answer
+- Query involves trends, news, or rapidly changing information
+- You need to verify or supplement internal data
+- Topic is not well covered in internal databases (like "반조리식품", "브랜드별 소비현황" etc.)
 
-    3. Synthesis & Final Answer:
-    - After gathering data from 1-2 tools, you MUST provide your Final Answer.
-    - Do NOT keep searching endlessly.
-    - Use: Final Answer: [comprehensive answer with the information you found]
-    - Even partial information is better than no answer.
+3. Comprehensive Information Gathering:
+- **DO NOT settle for partial information** - if internal tools give you basic data, search the web for additional context, recent updates, and market insights
+- **ALWAYS cross-reference** internal data with current web information
+- **EXPECT to use both internal and external sources** for most queries
 
-    FINAL ANSWER DIRECTIVES:
-    - When you have gathered enough information, you MUST provide your Final Answer.
-    - Use this EXACT format: Final Answer: [your comprehensive answer]
-    - Do NOT continue trying to use tools after you have enough information.
-    - Structure your final answer with clear headings and citations.
-    - If you have ANY relevant information, provide a Final Answer rather than continuing to search.
+4. Web Search Trigger Examples:
+- "반조리식품 브랜드별 소비현황" → Use internal tools THEN immediately use debug_web_search for comprehensive market analysis
+- "What's the current price of..." → Use rdb_search THEN web search for latest market updates
+- "Nutrition facts for X" → Use rdb_search THEN web search for additional health information
+- "Market trends for..." → Use internal tools THEN web search for current analysis
+- "How to..." → Use vector_db_search THEN web search for latest techniques/methods
 
-    TOOL USAGE FORMAT:
-    When a tool needs multiple inputs, provide them as a JSON dictionary.
+FINAL ANSWER CRITERIA:
+- Provide comprehensive answer combining BOTH internal and external sources
+- Structure with clear sections: "Internal Database Findings" and "Current Market Information"
+- Always indicate data sources and recency
+- Confidence levels: High (multiple sources, recent data), Medium (good sources, some gaps), Low (limited sources)
 
-    Action: tool_name
-    Action Input: search_query_or_json_string
+MANDATORY WEB SEARCH SCENARIOS:
+1. **Insufficient Internal Results**: If any internal tool returns fewer than 3 relevant results
+2. **Data Recency Concerns**: For market prices, trends, news, or time-sensitive information
+3. **Completeness Check**: When internal data provides basic facts but lacks context or recent developments
+4. **User Expectations**: Any query suggesting need for current, comprehensive, or trending information
+5. **Missing Topics**: When internal databases don't have information about the queried topic
 
-    CORRECT EXAMPLES:
-    Action: debug_web_search
-    Action Input: 2025년 사과 마케팅 전략
+TOOL USAGE FORMAT:
+Action: tool_name
+Action Input: search_query_or_json_string
 
-    Action: scrape_and_extract_content
-    Action Input: JSON string with url and query fields
+SEARCH SEQUENCE EXAMPLE FOR "반조리식품 브랜드별 소비현황":
+1. Try vector_db_search first → likely insufficient for specific market data
+2. IMMEDIATELY use debug_web_search → get comprehensive market analysis
+3. If web search finds detailed reports → use scrape_and_extract_content
+4. Combine all sources for comprehensive Final Answer
 
-    Remember: Follow the exact Thought/Action/Action Input/Observation format.
-    """
+PROHIBITED ACTIONS:
+- Do NOT provide incomplete answers when web search could provide better information
+- Do NOT rely solely on internal sources for market analysis or trending topics
+- Do NOT invent or fabricate data when real data is available through web search
+
+Remember: **Your goal is to provide the MOST COMPLETE and CURRENT information possible. Internal databases are starting points, not ending points. Web search is a REQUIRED complement for comprehensive analysis.**
+"""
+
 
             react_prompt = PromptTemplate(
                 template=system_instruction + "\n\n" + base_prompt.template,
@@ -1213,7 +1331,7 @@ class RetrieverAgent:
                 handle_parsing_errors="You must provide a Final Answer now. Stop trying to use tools and give your final response using: Final Answer: [your answer]",
                 max_iterations=4,
                 max_execution_time=120,
-                early_stopping_method="generate",  # generate로 변경
+                early_stopping_method="force",  # generate로 변경
                 return_intermediate_steps=True,
             )
 
@@ -1256,10 +1374,9 @@ class RetrieverAgent:
 
     async def _async_scrape_url(self, url: str, query: str) -> Optional[SearchResult]:
         """단일 URL을 비동기적으로 스크래핑하고 SearchResult로 변환합니다."""
-        # 이전에 정의한 scrape_and_extract_content 도구를 사용합니다.
-        # 이 도구는 search_tools.py에 정의되어 있어야 합니다.
+
         try:
-            from .search_tools import scrape_and_extract_content # 실제 경로에 맞게 수정
+            from ...services.search.search_tools import scrape_and_extract_content # 실제 경로에 맞게 수정
 
             loop = asyncio.get_event_loop()
             content = await loop.run_in_executor(
@@ -1348,7 +1465,7 @@ class CriticAgent1:
             content = r.content if hasattr(r, 'content') else str(r)
 
             # 훨씬 더 많은 내용 포함 (100자 → 1000자)
-            content_preview = content[:10000].strip().replace("\n", " ")
+            content_preview = content[:].strip().replace("\n", " ")
 
             print(f"      [{i+1}] 길이: {len(content)}자, 미리보기: {content_preview[:100]}...")
             summary += f"  - [{i+1}] 길이: {len(content)}자\n"
@@ -1393,7 +1510,7 @@ class CriticAgent1:
         ) + self._summarize_results(multi_results, "Multi-Source")
 
         # 실제 내용도 포함해서 프롬프트 작성
-        content_sample = total_content[:500] if total_content else "내용 없음"
+        content_sample = total_content[:] if total_content else "내용 없음"
 
         prompt = f"""
         다음 검색 결과를 바탕으로 정보 충분성을 평가해주세요.
@@ -1446,6 +1563,8 @@ class CriticAgent1:
                 result["status"] = "insufficient"
             if "reasoning" not in result:
                 result["reasoning"] = "판단 근거 없음"
+            if "confidence" not in result:
+                result["confidence"] = 0.5
             if result.get("status") == "insufficient" and not result.get("suggestion"):
                 result["suggestion"] = "내용 보강이 필요합니다."
 
@@ -1461,213 +1580,357 @@ class CriticAgent1:
 
 
 # ContextIntegratorAgent
+import re
+from typing import Dict, List, Any
+
 class ContextIntegratorAgent:
     def __init__(self):
-        # 최종 보고서 초안 작성이므로 더 성능 좋은 모델 사용을 고려해볼 수 있음
-        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        # 최종 보고서 초안의 품질을 높이기 위해 더 강력한 모델을 사용합니다.
+        self.chat = ChatOpenAI(model="gpt-4o", temperature=0.1)
         self.agent_type = AgentType.CONTEXT_INTEGRATOR
 
     async def integrate(self, state: StreamingAgentState) -> StreamingAgentState:
-        """수집된 모든 정보를 바탕으로 최종 답변의 '초안'을 생성"""
-        print(">> CONTEXT_INTEGRATOR 시작 (답변 초안 생성)")
+        """수집된 모든 정보를 분석하고 정제하여 최종 답변의 '핵심 초안'을 생성합니다."""
+        print(">> CONTEXT_INTEGRATOR 시작 (핵심 초안 생성)")
 
-        graph_results = state.graph_results_stream
-        multi_results = state.multi_source_results_stream
-        all_results = graph_results + multi_results
+        all_results = state.graph_results_stream + state.multi_source_results_stream
 
         if not all_results:
             print("- 통합할 결과가 없음")
-            state.integrated_context = (
-                "검색된 정보가 없어 답변 초안을 생성할 수 없습니다."
-            )
+            state.integrated_context = "검색된 정보가 없어 답변을 생성할 수 없습니다."
             return state
 
-        print(f"- 총 {len(all_results)}개 검색 결과를 바탕으로 초안 작성 시작")
+        print(f"- 총 {len(all_results)}개 검색 결과를 바탕으로 핵심 초안 작성 시작")
 
-        # PostgreSQL 결과를 먼저 파싱하여 구조화된 데이터 추출
-        structured_data = self._parse_postgresql_results(all_results)
-        print(f"- PostgreSQL 구조화 데이터: {len(structured_data.get('nutrition_data', []))}건 영양소, {len(structured_data.get('price_data', []))}건 가격")
+        # 수치 데이터 사전 추출
+        extracted_metrics = self._extract_numerical_data(all_results)
+        print(f"- 추출된 수치 데이터: {len(extracted_metrics)}개")
 
-        # _create_draft 함수를 호출하여 초안을 생성
-        draft = await self._create_draft(state.original_query, all_results, structured_data)
+        # LLM에 전달할 종합적인 컨텍스트를 생성합니다.
+        comprehensive_context = self._prepare_context_for_synthesis(all_results)
 
-        # 생성된 초안을 integrated_context에 저장
-        state.integrated_context = draft
+        # LLM을 사용하여 정제된 초안을 생성합니다.
+        synthesized_draft = await self._synthesize_draft(
+            state.original_query,
+            comprehensive_context,
+            extracted_metrics
+        )
 
-        print(f"- 답변 초안 생성 완료 (길이: {len(draft)}자)")
+        # 생성된 초안을 state에 저장합니다.
+        state.integrated_context = synthesized_draft
+
+        print(f"\n- 핵심 초안\n{synthesized_draft[:]}")
+        print(f"\n- 핵심 초안 생성 완료 (길이: {len(synthesized_draft)}자)")
         print("\n>> CONTEXT_INTEGRATOR 완료")
         return state
 
-    def _parse_postgresql_results(self, all_results: list) -> dict:
-        """PostgreSQL 검색 결과에서 구조화된 데이터 추출"""
-        structured_data = {
-            'nutrition_data': [],
-            'price_data': [],
-            'other_data': []
+    def _extract_numerical_data(self, all_results: list) -> Dict[str, List[Dict]]:
+        """모든 검색 결과에서 수치 데이터를 사전 추출"""
+        print("\n>> 수치 데이터 사전 추출 시작")
+
+        extracted_metrics = {
+            'percentages': [],
+            'amounts': [],
+            'years': [],
+            'rankings': [],
+            'growth_rates': [],
+            'market_sizes': [],
+            'age_groups': [],
+            'other_numbers': []
         }
 
         for result in all_results:
-            content = result.content
+            content = getattr(result, 'content', '')
+            source = getattr(result, 'source', 'unknown')
 
-            try:
-                # PostgreSQL 결과인지 확인
-                if 'PostgreSQL 검색 결과' in content:
-                    # 정확한 JSON 블록만 추출
-                    json_match = re.search(r'### 상세 데이터 \(JSON\)\s*(\{.*?\n\})', content, re.DOTALL)
-                    if json_match:
-                        json_content = json_match.group(1).strip()
-                        data = json.loads(json_content)
+            if not content.strip():
+                continue
 
-                        # 영양소 데이터 추출
-                        if 'nutrition_data' in data and data['nutrition_data']:
-                            for item in data['nutrition_data']:
-                                structured_item = {
-                                    '식품명': item.get('식품명', 'N/A'),
-                                    '식품군': item.get('식품군', 'N/A'),
-                                    '출처': item.get('출처', 'N/A'),
-                                    '칼로리': item.get('칼로리', 0),
-                                    '단백질': item.get('단백질', 0),
-                                    '지방': item.get('지방', 0),
-                                    '탄수화물': item.get('탄수화물', 0),
-                                    '식이섬유': item.get('식이섬유', 0),
-                                    '칼슘': item.get('칼슘', 0),
-                                    '철': item.get('철', 0),
-                                    '나트륨': item.get('나트륨', 0),
-                                    '칼륨': item.get('칼륨', 0),
-                                    '마그네슘': item.get('마그네슘', 0),
-                                    '비타민b1': item.get('비타민b1', 0),
-                                    '비타민b2': item.get('비타민b2', 0),
-                                    '비타민b6': item.get('비타민b6', 0),
-                                    '비타민c': item.get('비타민c', 0),
-                                    '비타민e': item.get('비타민e', 0),
-                                    '엽산': item.get('엽산', 0)
-                                }
-                                structured_data['nutrition_data'].append(structured_item)
+            print(f"- {source}에서 수치 추출 중...")
 
-                        # 가격 데이터 추출
-                        if 'price_data' in data and data['price_data']:
-                            for item in data['price_data']:
-                                structured_item = {
-                                    '품목명': item.get('product_cls_name', 'N/A'),
-                                    '카테고리': item.get('category_name', 'N/A'),
-                                    '가격': item.get('value', 0),
-                                    '단위': item.get('unit', 'kg'),
-                                    '날짜': item.get('regday', 'N/A')
-                                }
-                                structured_data['price_data'].append(structured_item)
-
-            # 디버깅을 위한 로그
-            except (json.JSONDecodeError, AttributeError) as e:
-                print(f"- PostgreSQL 결과 파싱 오류: {e}")
-                # 파싱 실패 시 원본 내용을 other_data에 추가
-                structured_data['other_data'].append({
-                    'source': result.source,
-                    'content': content[:500] + "..." if len(content) > 500 else content
+            # 퍼센트 추출
+            percentages = re.findall(r'(\d+(?:\.\d+)?)\s*%', content)
+            for pct in percentages:
+                extracted_metrics['percentages'].append({
+                    'value': float(pct),
+                    'source': source,
+                    'context': self._get_context_around_number(content, f"{pct}%")
                 })
 
-        return structured_data
+            # 금액/규모 추출 (조, 억, 만원 등)
+            amounts = re.findall(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s*(조|억|만원|원|달러|USD)', content)
+            for amount, unit in amounts:
+                extracted_metrics['amounts'].append({
+                    'value': amount.replace(',', ''),
+                    'unit': unit,
+                    'source': source,
+                    'context': self._get_context_around_number(content, f"{amount}{unit}")
+                })
 
+            # 연도 추출
+            years = re.findall(r'(20\d{2})년?', content)
+            for year in set(years):  # 중복 제거
+                extracted_metrics['years'].append({
+                    'value': int(year),
+                    'source': source,
+                    'context': self._get_context_around_number(content, f"{year}년")
+                })
 
-    async def _create_draft(self, original_query: str, all_results: list, structured_data: dict) -> str:
-        """수집된 정보를 바탕으로 자연스러운 문장의 초안을 작성 - PostgreSQL 데이터 우선 활용"""
+            # 연령대 추출
+            age_groups = re.findall(r'(\d+)대', content)
+            for age in set(age_groups):
+                extracted_metrics['age_groups'].append({
+                    'value': int(age),
+                    'source': source,
+                    'context': self._get_context_around_number(content, f"{age}대")
+                })
 
-        # 1. PostgreSQL 구조화 데이터를 우선 처리
-        postgresql_summary = self._format_postgresql_data(structured_data)
+            # 성장률 추출
+            growth_rates = re.findall(r'(\d+(?:\.\d+)?)\s*%\s*(?:성장|증가|상승)', content)
+            for rate in growth_rates:
+                extracted_metrics['growth_rates'].append({
+                    'value': float(rate),
+                    'source': source,
+                    'context': self._get_context_around_number(content, f"{rate}%")
+                })
 
-        # 2. 다른 검색 결과 요약 (PostgreSQL 제외)
-        other_results_summary = ""
-        non_postgresql_count = 0
-        for result in all_results[:10]:  # 최대 10개까지
-            if hasattr(result, 'source') and result.source == 'rdb':
-                continue  # PostgreSQL 결과는 이미 구조화해서 처리했으므로 스킵
+            # 기타 중요한 숫자들 추출
+            other_numbers = re.findall(r'(\d+(?:,\d{3})*(?:\.\d+)?)', content)
+            for num in other_numbers[:5]:  # 너무 많으면 상위 5개만
+                if len(num.replace(',', '')) >= 2:  # 2자리 이상 숫자만
+                    extracted_metrics['other_numbers'].append({
+                        'value': num.replace(',', ''),
+                        'source': source,
+                        'context': self._get_context_around_number(content, num)
+                    })
 
-            source_name = getattr(result, 'source', 'Unknown')
-            content = getattr(result, 'content', str(result))
-            other_results_summary += f"- 출처({source_name}): {content[:300]}...\n"
-            non_postgresql_count += 1
+        # 추출 결과 요약 출력
+        total_extracted = sum(len(v) for v in extracted_metrics.values())
+        print(f"- 총 추출된 수치: {total_extracted}개")
+        for key, values in extracted_metrics.items():
+            if values:
+                print(f"  - {key}: {len(values)}개")
 
-        prompt = f"""
-        당신은 여러 소스에서 수집된 복잡한 정보들을 종합하여, 사용자의 질문에 대한 답변 '초안'을 작성하는 수석 분석가입니다.
+        return extracted_metrics
 
-        ### 중요: PostgreSQL 농진청 데이터 최우선 활용
+    def _get_context_around_number(self, text: str, number_str: str, window: int = 50) -> str:
+        """숫자 주변의 맥락 텍스트를 추출"""
+        try:
+            index = text.find(number_str)
+            if index == -1:
+                return ""
 
-        **[원본 질문]**
-        {original_query}
+            start = max(0, index - window)
+            end = min(len(text), index + len(number_str) + window)
+            context = text[start:end].strip()
 
-        **[1순위: PostgreSQL 구조화 데이터 - 반드시 우선 활용]**
-        {postgresql_summary}
+            # 너무 짧거나 긴 맥락은 제외
+            if len(context) < 10:
+                return ""
 
-        **[2순위: 기타 검색 결과 - 보완적 활용]**
-        {other_results_summary if other_results_summary else "기타 검색 결과 없음"}
+            return context
+        except:
+            return ""
 
-        ### 작업 지침:
-        1. **PostgreSQL 농진청 데이터를 반드시 최우선으로 활용**하여 답변 작성
-        2. 영양소 데이터가 있으면 정확한 수치(칼로리, 단백질 등)를 반드시 포함
-        3. 가격 데이터가 있으면 최신 시세 정보를 포함
-        4. 농진청 출처 데이터는 반드시 "(출처: 농진청 'XX, RDB)" 형태로 명시
-        5. 기타 검색 결과는 PostgreSQL 데이터를 보완하는 용도로만 사용
-        6. 서론, 본론, 결론의 구조를 갖춘 자연스러운 설명글 형식 작성
-        7. 실제 수치가 있으면 절대 다른 수치로 대체하지 말 것
+    def _prepare_context_for_synthesis(self, all_results: list) -> str:
+        """분석 및 합성을 위해 모든 수집된 데이터를 단일 문자열로 준비합니다."""
 
-        ### 금지사항:
-        - PostgreSQL에 정확한 농진청 데이터가 있는데 다른 수치 사용 금지
-        - 일반적인 해외 데이터(USDA 등)를 농진청 데이터보다 우선 사용 금지
-        - 추정치나 임의 수치를 실제 데이터 대신 사용 금지
+        source_contents = {
+            'vector_db': [], 'graph_db': [], 'rdb': [], 'web_search_summary': [],
+            'web_scrape': [], 'react_agent': [], 'llm_analysis': [],
+            'strategic_synthesis': [], 'final_validation': [], 'other': []
+        }
 
-        **[답변 초안 작성]**
-        """
+        # 결과를 소스별로 분류
+        for result in all_results:
+            source = getattr(result, 'source', 'other')
+            content = getattr(result, 'content', '')
+            source_key = self._map_source_key(source)
+            if content.strip():
+                source_contents[source_key].append(content)
 
-        response = await self.chat.ainvoke(prompt)
-        return response.content
+        # 마크다운 형식으로 변환 (더 상세하게)
+        markdown_parts = ["# 수집된 원본 데이터 상세 분석"]
+        source_display_names = {
+            'vector_db': 'Vector Database (문서 검색)',
+            'graph_db': 'Graph Database (관계 분석)',
+            'rdb': 'PostgreSQL Database (구조적 데이터)',
+            'web_search_summary': 'Web Search Summary (최신 정보)',
+            'web_scrape': 'Web Scrape Results (웹 컨텐츠)',
+            'react_agent': 'ReAct Agent Analysis (추론 분석)',
+            'llm_analysis': 'LLM Analysis (심층 분석)',
+            'strategic_synthesis': 'Strategic Synthesis (전략적 종합)',
+            'final_validation': 'Final Validation (최종 검증)',
+            'other': 'Other Sources (기타 출처)'
+        }
 
-    def _format_postgresql_data(self, structured_data: dict) -> str:
-        """PostgreSQL 구조화 데이터를 읽기 쉬운 형태로 포맷팅"""
-        formatted = ""
+        for source_key, contents in source_contents.items():
+            if contents:
+                display_name = source_display_names.get(source_key, source_key.title())
+                markdown_parts.append(f"## {display_name}")
 
-        # 영양소 데이터 포맷팅
-        nutrition_data = structured_data.get('nutrition_data', [])
-        if nutrition_data:
-            formatted += "### 농진청 영양소 데이터 (PostgreSQL):\n"
-            for item in nutrition_data:
-                formatted += f"**{item['식품명']}** ({item['식품군']})\n"
-                formatted += f"- 출처: {item['출처']}\n"
-                formatted += f"- 칼로리: {item['칼로리']}kcal/100g\n"
-                formatted += f"- 단백질: {item['단백질']}g/100g\n"
-                formatted += f"- 지방: {item['지방']}g/100g\n"
-                formatted += f"- 탄수화물: {item['탄수화물']}g/100g\n"
-                formatted += f"- 식이섬유: {item['식이섬유']}g/100g\n"
+                # 각 소스의 내용을 더 상세하게 정리
+                for i, content in enumerate(contents, 1):
+                    # 내용을 적당한 길이로 자르기 (너무 길면)
+                    if len(content) > 500:
+                        content = content[:500] + "..."
 
-                # 미네랄 정보가 있으면 추가
-                if item['칼슘'] or item['철'] or item['마그네슘']:
-                    formatted += f"- 칼슘: {item['칼슘']}mg, 철: {item['철']}mg, 마그네슘: {item['마그네슘']}mg\n"
+                    markdown_parts.append(f"### {i}번째 결과:")
+                    markdown_parts.append(content.strip())
+                    markdown_parts.append("")
 
-                # 비타민 정보가 있으면 추가
-                if item['비타민b1'] or item['비타민b2'] or item['비타민e']:
-                    formatted += f"- 비타민B1: {item['비타민b1']}mg, 비타민B2: {item['비타민b2']}mg, 비타민E: {item['비타민e']}mg\n"
+        return "\n".join(markdown_parts)
 
-                formatted += "\n"
+    def _map_source_key(self, source: str) -> str:
+        """다양한 소스 문자열을 표준화된 키로 매핑합니다."""
+        source = source.lower()
+        if source in ['vector_db', 'vector']: return 'vector_db'
+        if source == 'graph_db': return 'graph_db'
+        if source in ['rdb', 'postgresql']: return 'rdb'
+        if source in ['web_search_summary', 'debug_web_search']: return 'web_search_summary'
+        if source == 'web_scrape': return 'web_scrape'
+        if source == 'react_agent': return 'react_agent'
+        if source == 'llm_analysis': return 'llm_analysis'
+        if source == 'strategic_synthesis': return 'strategic_synthesis'
+        if source == 'final_validation': return 'final_validation'
+        return 'other'
 
-        # 가격 데이터 포맷팅
-        price_data = structured_data.get('price_data', [])
-        if price_data:
-            formatted += "### 농수산물 가격 데이터 (PostgreSQL):\n"
-            for item in price_data:
-                formatted += f"**{item['품목명']}** ({item['카테고리']})\n"
-                formatted += f"- 가격: {item['가격']}원/{item['단위']}\n"
-                formatted += f"- 날짜: {item['날짜']}\n\n"
+    async def _synthesize_draft(self, original_query: str, context: str, extracted_metrics: Dict) -> str:
+        """LLM을 사용하여 제공된 컨텍스트를 바탕으로 초안을 정제하고 종합합니다."""
 
-        # 기타 데이터
-        other_data = structured_data.get('other_data', [])
-        if other_data:
-            formatted += "### 기타 RDB 데이터:\n"
-            for item in other_data:
-                formatted += f"- {item['content']}\n"
+        SYSTEM_PROMPT = """
+당신은 수석 데이터 분석가이자 보고서 설계 전문가입니다. 당신의 임무는 수집된 원본 데이터와 추출된 수치 정보를 바탕으로, 최종 보고서 작성을 위한 완벽하고 구체적인 '보고서 설계도(Blueprint)'를 만드는 것입니다.
 
-        if not formatted:
-            formatted = "PostgreSQL 구조화 데이터 없음\n"
+**[핵심 원칙]**
+1. **구체적인 수치 활용 필수**: 제공된 "추출된 수치 데이터"를 반드시 각 섹션에 구체적으로 포함해야 합니다.
+2. **출처 명시 의무**: 모든 데이터 포인트에 정확한 출처를 표기합니다.
+3. **차트 생성 지원**: "주요 수치 데이터 종합" 섹션에는 차트로 표현할 수 있는 구체적인 숫자들을 반드시 포함합니다.
 
-        return formatted
+**[작업 지침]**
 
+1. **보고서 구조 설계**: "사용자 원본 질문"을 분석하여 최종 보고서에 필요한 섹션들의 구조를 설계합니다.
+
+2. **데이터 매핑 및 정제**: 각 섹션별로 "수집된 원본 데이터"에서 어떤 내용을 사용할지 명시해야 합니다.
+   - **출처 명시**: 각 데이터 포인트 앞에 `[출처: Vector DB]`, `[출처: PostgreSQL]` 와 같이 반드시 출처를 표기합니다.
+   - **구체적인 수치 포함**: 퍼센트, 금액, 연도, 연령대, 성장률 등 모든 구체적인 숫자를 빠뜨리지 말고 포함합니다.
+   - **수치와 맥락 연결**: 각 숫자가 무엇을 의미하는지 명확하게 설명합니다.
+
+3. **차트 데이터 준비**: 마지막 섹션에서 차트로 표현할 수 있는 모든 정량적 데이터를 체계적으로 정리합니다.
+   - 카테고리별 분류 (연령대별, 시간별, 항목별 등)
+   - 비교 가능한 수치들 그룹화
+   - 차트 타입 제안 (bar, line, pie 등)
+
+**[출력 형식]**
+
+# 최종 보고서 설계도 (Report Blueprint)
+
+## 1. 섹션: [구체적인 섹션 제목]
+### 1.1. 핵심 메시지:
+- [구체적인 수치를 포함한 핵심 인사이트]
+### 1.2. 활용할 데이터 포인트:
+- [출처: XX] 구체적인 수치와 그 의미 (예: 20대 소비자 비중 35.2%)
+- [출처: XX] 구체적인 수치와 그 의미 (예: 2023년 시장 규모 1,250억원)
+- [출처: XX] 구체적인 수치와 그 의미
+
+## 주요 수치 데이터 종합 (Key Metrics for Charts)
+### 차트 1: 연령대별 분포
+- 20대: XX%
+- 30대: XX%
+- 40대: XX%
+- 차트 타입 제안: bar
+
+### 차트 2: 시간별 트렌드
+- 2021년: XX
+- 2022년: XX
+- 2023년: XX
+- 차트 타입 제안: line
+
+### 차트 3: 카테고리별 비교
+- 항목A: XX
+- 항목B: XX
+- 항목C: XX
+- 차트 타입 제안: pie
+"""
+
+        # 추출된 수치 데이터를 텍스트로 변환
+        metrics_summary = self._format_extracted_metrics(extracted_metrics)
+
+        HUMAN_PROMPT_TEMPLATE = """
+**사용자 원본 질문:**
+{query}
+
+---
+
+**추출된 수치 데이터:**
+{metrics}
+
+---
+
+**수집된 원본 데이터:**
+{context}
+
+---
+위의 정보들을 바탕으로, 구체적인 수치를 포함한 상세한 '보고서 설계도'를 작성해주십시오.
+반드시 추출된 수치 데이터를 각 섹션에 구체적으로 활용하고, 차트 생성이 가능하도록 정량적 데이터를 체계적으로 정리해주세요.
+"""
+
+        prompt = HUMAN_PROMPT_TEMPLATE.format(
+            query=original_query,
+            context=context,
+            metrics=metrics_summary
+        )
+
+        print("\n- LLM을 통해 컨텍스트 정제 및 종합 시작...")
+        print(f"- 추출된 수치 데이터 요약: {metrics_summary[:200]}..." if len(metrics_summary) > 200 else f"- 추출된 수치 데이터: {metrics_summary}")
+
+        messages = [
+            ("system", SYSTEM_PROMPT),
+            ("human", prompt)
+        ]
+
+        response = await self.chat.ainvoke(messages)
+        result = response.content.strip()
+        print(f"- LLM 응답 길이: {len(result)}자")
+
+        # 응답의 일부만 출력 (너무 길면)
+        preview = result[:300] + "..." if len(result) > 300 else result
+        print(f"- LLM 응답 미리보기: {preview}")
+
+        return result
+
+    def _format_extracted_metrics(self, extracted_metrics: Dict) -> str:
+        """추출된 수치 데이터를 LLM이 이해하기 쉬운 형태로 포맷팅"""
+        if not any(extracted_metrics.values()):
+            return "추출된 구체적인 수치 데이터가 없습니다."
+
+        formatted_parts = []
+
+        if extracted_metrics['percentages']:
+            formatted_parts.append("**퍼센트 데이터:**")
+            for item in extracted_metrics['percentages'][:5]:  # 상위 5개만
+                formatted_parts.append(f"- {item['value']}% [출처: {item['source']}] - {item['context'][:100]}...")
+
+        if extracted_metrics['amounts']:
+            formatted_parts.append("\n**금액/규모 데이터:**")
+            for item in extracted_metrics['amounts'][:5]:
+                formatted_parts.append(f"- {item['value']}{item['unit']} [출처: {item['source']}] - {item['context'][:100]}...")
+
+        if extracted_metrics['age_groups']:
+            formatted_parts.append("\n**연령대 데이터:**")
+            for item in extracted_metrics['age_groups'][:5]:
+                formatted_parts.append(f"- {item['value']}대 [출처: {item['source']}] - {item['context'][:100]}...")
+
+        if extracted_metrics['growth_rates']:
+            formatted_parts.append("\n**성장률 데이터:**")
+            for item in extracted_metrics['growth_rates'][:5]:
+                formatted_parts.append(f"- {item['value']}% 성장 [출처: {item['source']}] - {item['context'][:100]}...")
+
+        if extracted_metrics['years']:
+            formatted_parts.append("\n**연도 데이터:**")
+            unique_years = list(set(item['value'] for item in extracted_metrics['years']))
+            formatted_parts.append(f"- 관련 연도: {', '.join(map(str, sorted(unique_years)))}")
+
+        return "\n".join(formatted_parts) if formatted_parts else "구체적인 수치 데이터를 찾을 수 없습니다."
 
 
 # 리팩토링 관련 임포트(참고용)
@@ -1681,7 +1944,7 @@ class ReportGeneratorAgent:
     """보고서 생성 에이전트"""
 
     def __init__(self):
-        self.streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.9, streaming=True)
+        self.streaming_chat = ChatOpenAI(model="gpt-4o", temperature=0.4, streaming=True)
         self.non_streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
         self.agent_type = "REPORT_GENERATOR"
 
@@ -1690,28 +1953,95 @@ class ReportGeneratorAgent:
         self.data_extractor = DataExtractor()
 
     async def generate_streaming_with_sources(
-        self,
-        state: StreamingAgentState,
-        source_collection_data: Dict = None
-    ) -> AsyncGenerator[str, None]:
-        """스트리밍 보고서 생성 - 메인 로직"""
+    self,
+    state: StreamingAgentState,
+    source_collection_data: Dict = None
+) -> AsyncGenerator[str, None]:
+        """스트리밍 보고서 생성 - 마크다운 형식 지원"""
 
         print("\n>> REFACTORED REPORT_GENERATOR 시작")
 
-        # 기본 정보 추출
+        # integrated_context 타입 확인 및 처리
         integrated_context = state.integrated_context
         original_query = state.original_query
         memory_context = getattr(state, "memory_context", "")
         user_context = getattr(state, "user_context", None)
 
         print(f"- 쿼리: {original_query[:50]}...")
-        print(f"- 컨텍스트: {len(integrated_context)}자")
+        print(f"- integrated_context 타입: {type(integrated_context)}")
 
-        if not integrated_context:
-            error_msg = "분석할 충분한 정보가 수집되지 않았습니다."
+        # integrated_context가 딕셔너리(새로운 방식)인지 문자열(기존 방식)인지 확인
+        if isinstance(integrated_context, dict):
+            # 새로운 방식: 마크다운 데이터 패키지
+            data_package = integrated_context
+
+            # 데이터 패키지 검증
+            if not data_package:
+                error_msg = "분석할 충분한 정보가 수집되지 않았습니다."
+                state.final_answer = error_msg
+                yield error_msg
+                return
+
+            if data_package.get('error'):
+                error_msg = data_package['error']
+                state.final_answer = error_msg
+                yield error_msg
+                return
+
+            # 새로운 방식으로 처리
+            full_response = ""
+            async for chunk in self._process_markdown_data_package(data_package, original_query, user_context, source_collection_data):
+                full_response += chunk
+                yield chunk
+
+            state.final_answer = full_response
+
+        elif isinstance(integrated_context, str):
+            # 기존 방식: 문자열 컨텍스트
+            if not integrated_context:
+                error_msg = "분석할 충분한 정보가 수집되지 않았습니다."
+                state.final_answer = error_msg
+                yield error_msg
+                return
+
+            # 기존 방식으로 처리
+            full_response = ""
+            async for chunk in self._process_string_format(integrated_context, original_query, user_context, source_collection_data):
+                full_response += chunk
+                yield chunk
+
+            state.final_answer = full_response
+        else:
+            error_msg = f"지원하지 않는 integrated_context 타입: {type(integrated_context)}"
             state.final_answer = error_msg
             yield error_msg
             return
+
+    async def _process_markdown_data_package(
+        self,
+        data_package: Dict,
+        original_query: str,
+        user_context: Any,
+        source_collection_data: Dict
+    ) -> AsyncGenerator[str, None]:
+        """새로운 마크다운 데이터 패키지 형식 처리"""
+
+
+        print(f"- 데이터 패키지 타입: {type(data_package)}")
+        print(f"- 총 결과 개수: {data_package.get('total_results_count', 0)}")
+
+        # 마크다운 content 확인
+        markdown_content = data_package.get('markdown_content', '')
+        print(f"- 마크다운 컨텐츠: {len(markdown_content)}자")
+
+        # 각 source별 데이터 개수 출력
+        data_summary = data_package.get('data_summary', {})
+        print(f"- Vector DB: {data_summary.get('vector_db_count', 0)}건")
+        print(f"- Graph DB: {data_summary.get('graph_db_count', 0)}건")
+        print(f"- PostgreSQL: {data_summary.get('rdb_count', 0)}건")
+        print(f"- Web Search: {data_summary.get('web_search_summary_count', 0)}건")
+        print(f"- Web Scrape: {data_summary.get('web_scrape_count', 0)}건")
+        print(f"- React Agent: {data_summary.get('react_agent_count', 0)}건")
 
         # 1. 쿼리 분석
         team_type = QueryAnalyzer.detect_team_type(original_query)
@@ -1721,15 +2051,96 @@ class ReportGeneratorAgent:
 
         print(f"- 분석 결과: {team_type.value} / {report_type.value} / {language.value}")
 
-        # 2. 실제 데이터 추출
-        all_results = getattr(state, 'graph_results_stream', []) + getattr(state, 'multi_source_results_stream', [])
-        extracted_data = await self.data_extractor.extract_numerical_data(all_results, original_query)
+        # 2. Source별 content를 SearchResult 형태로 재구성 (DataExtractor 호환)
+        all_search_results = []
+        source_contents = data_package.get('source_contents', {})
 
+        for source_name, contents in source_contents.items():
+            for content in contents:
+                if content.strip():  # 빈 내용이 아닌 경우만
+                    class SearchResultLike:
+                        def __init__(self, source, content, relevance_score=0.0):
+                            self.source = source
+                            self.content = content
+                            self.relevance_score = relevance_score
+                            self.metadata = {}
+
+                    search_result = SearchResultLike(
+                        source=source_name,
+                        content=content,
+                        relevance_score=0.8
+                    )
+                    all_search_results.append(search_result)
+
+        print(f"- 재구성된 SearchResult: {len(all_search_results)}개")
+
+        # 3. 실제 데이터 추출
+        extracted_data = await self.data_extractor.extract_numerical_data(all_search_results, original_query)
         print(f"- 추출된 수치: {len(extracted_data.get('extracted_numbers', []))}개")
+
+        # 4. 차트 생성
+        real_charts = await self._create_data_driven_charts(extracted_data, original_query)
+        print(f"- 생성된 차트: {len(real_charts)}개")
+
+        # 5. 마크다운 content를 메인 컨텍스트로 사용
+        enhanced_context = self._create_enhanced_context_with_markdown(data_package, markdown_content)
+        print(f"- 향상된 컨텍스트: {len(enhanced_context)}자")
+
+        # 6. 프롬프트 생성
+        prompt = self.prompt_builder.build_prompt(
+            query=original_query,
+            context=enhanced_context,
+            team_type=team_type,
+            report_type=report_type,
+            language=language,
+            extracted_data=extracted_data,
+            real_charts=real_charts,
+            source_data=source_collection_data
+        )
+
+        # 7. 스트리밍 생성
+        try:
+            print("- 스트리밍 시작...")
+            async for chunk in self.streaming_chat.astream(prompt):
+                if chunk.content:
+                    yield chunk.content
+        except Exception as e:
+            error_msg = f"답변 생성 중 오류: {str(e)}"
+            yield error_msg
+
+    async def _process_string_format(
+        self,
+        integrated_context: str,
+        original_query: str,
+        user_context: Any,
+        source_collection_data: Dict
+    ) -> AsyncGenerator[str, None]:
+        """기존 문자열 형식 처리 (하위 호환성)"""
+
+        print(f"- 기존 문자열 형식으로 처리: {len(integrated_context)}자")
+
+        # 1. 쿼리 분석
+        team_type = QueryAnalyzer.detect_team_type(original_query)
+        language = QueryAnalyzer.detect_language(original_query)
+        complexity_analysis = QueryAnalyzer.analyze_complexity(original_query, user_context)
+        report_type = complexity_analysis["report_type"]
+
+        print(f"- 분석 결과: {team_type.value} / {report_type.value} / {language.value}")
+
+        # 2. 데이터 추출 (문자열에서 직접)
+        # 임시로 SearchResult 객체 생성
+        class TempSearchResult:
+            def __init__(self, content):
+                self.content = content
+                self.source = "integrated_context"
+                self.relevance_score = 1.0
+                self.metadata = {}
+
+        temp_results = [TempSearchResult(integrated_context)]
+        extracted_data = await self.data_extractor.extract_numerical_data(temp_results, original_query)
 
         # 3. 차트 생성
         real_charts = await self._create_data_driven_charts(extracted_data, original_query)
-        print(f"- 생성된 차트: {len(real_charts)}개")
 
         # 4. 프롬프트 생성
         prompt = self.prompt_builder.build_prompt(
@@ -1744,20 +2155,87 @@ class ReportGeneratorAgent:
         )
 
         # 5. 스트리밍 생성
-        full_response = ""
         try:
             print("- 스트리밍 시작...")
             async for chunk in self.streaming_chat.astream(prompt):
                 if chunk.content:
-                    full_response += chunk.content
                     yield chunk.content
         except Exception as e:
             error_msg = f"답변 생성 중 오류: {str(e)}"
             yield error_msg
-            full_response = error_msg
 
-        state.final_answer = full_response
-        print(f"- 스트리밍 완료 (총 {len(full_response)}자)")
+    def _create_enhanced_context_with_markdown(self, data_package: Dict, markdown_content: str) -> str:
+        """마크다운 content를 활용한 향상된 컨텍스트 생성"""
+
+
+        context_parts = []
+
+        # 1. PostgreSQL 구조화 데이터 (최우선)
+        postgresql_structured = data_package.get('postgresql_structured_data', {})
+        if postgresql_structured:
+            formatted_postgresql = self._format_postgresql_data_for_context(postgresql_structured)
+            if formatted_postgresql:
+                context_parts.append("## 농진청 공식 구조화 데이터 (PostgreSQL)")
+                context_parts.append(formatted_postgresql)
+                context_parts.append("")
+
+        # 2. 마크다운 형식의 모든 source content (메인 컨텐츠)
+        if markdown_content:
+            context_parts.append("## 수집된 정보 (Source별 정리)")
+            context_parts.append(markdown_content)
+            context_parts.append("")
+
+        # 3. 데이터 요약 정보
+        data_summary = data_package.get('data_summary', {})
+        summary_info = f"""## 수집 데이터 요약
+    - 총 검색 결과: {data_package.get('total_results_count', 0)}건
+    - Vector DB: {data_summary.get('vector_db_count', 0)}건
+    - Graph DB: {data_summary.get('graph_db_count', 0)}건
+    - PostgreSQL: {data_summary.get('rdb_count', 0)}건 (영양소: {data_summary.get('nutrition_data_count', 0)}건, 가격: {data_summary.get('price_data_count', 0)}건)
+    - Web Search Summary: {data_summary.get('web_search_summary_count', 0)}건
+    - Web Scrape: {data_summary.get('web_scrape_count', 0)}건
+    - ReAct Agent: {data_summary.get('react_agent_count', 0)}건
+    - LLM Analysis: {data_summary.get('llm_analysis_count', 0)}건
+    - Strategic Synthesis: {data_summary.get('strategic_synthesis_count', 0)}건
+    - Final Validation: {data_summary.get('final_validation_count', 0)}건
+    - 기타: {data_summary.get('other_count', 0)}건
+    """
+        context_parts.append(summary_info)
+
+        enhanced_context = "\n".join(context_parts)
+
+        print(f"  - 컨텍스트 섹션 수: {len([p for p in context_parts if p.startswith('##')])}")
+        print(f"  - 총 컨텍스트 길이: {len(enhanced_context)}자")
+
+        return enhanced_context
+
+    def _format_postgresql_data_for_context(self, structured_data: dict) -> str:
+        """PostgreSQL 구조화 데이터를 컨텍스트용으로 포맷팅"""
+        formatted_parts = []
+
+        # 영양소 데이터
+        nutrition_data = structured_data.get('nutrition_data', [])
+        if nutrition_data:
+            formatted_parts.append("### 영양성분 정보")
+            for item in nutrition_data[:5]:  # 최대 5개
+                formatted_parts.append(f"**{item.get('식품명', 'N/A')}** ({item.get('식품군', 'N/A')})")
+                formatted_parts.append(f"- 칼로리: {item.get('칼로리', 0)}kcal/100g")
+                formatted_parts.append(f"- 단백질: {item.get('단백질', 0)}g, 지방: {item.get('지방', 0)}g, 탄수화물: {item.get('탄수화물', 0)}g")
+                if item.get('칼슘') or item.get('철') or item.get('비타민c'):
+                    formatted_parts.append(f"- 칼슘: {item.get('칼슘', 0)}mg, 철: {item.get('철', 0)}mg, 비타민C: {item.get('비타민c', 0)}mg")
+                formatted_parts.append("")
+
+        # 가격 데이터
+        price_data = structured_data.get('price_data', [])
+        if price_data:
+            formatted_parts.append("### 가격 정보")
+            for item in price_data[:5]:  # 최대 5개
+                formatted_parts.append(f"**{item.get('품목명', 'N/A')}** ({item.get('카테고리', 'N/A')})")
+                formatted_parts.append(f"- 가격: {item.get('가격', 0)}원/{item.get('단위', 'kg')}")
+                formatted_parts.append(f"- 기준일: {item.get('날짜', 'N/A')}")
+                formatted_parts.append("")
+
+        return "\n".join(formatted_parts) if formatted_parts else ""
 
     async def _create_data_driven_charts(self, extracted_data: Dict, query: str) -> List[Dict]:
         """실제 데이터 기반 차트 생성 - 데이터 검증 로직 강화"""
@@ -1992,7 +2470,7 @@ class SimpleAnswererAgent:
 """
 
         return f"""
-당신은 농수산물 전문 AI 어시스턴트입니다. 사용자와의 이전 대화를 기억하고 개인화된 답변을 제공합니다.
+당신은 식품 전문 AI 어시스턴트입니다. 사용자와의 이전 대화를 기억하고 개인화된 답변을 제공합니다.
 
 **오늘 날짜:** {current_date_str}
 
@@ -2026,7 +2504,7 @@ class SimpleAnswererAgent:
    - 목록이 필요한 경우: - 항목1, - 항목2
    - 긴 답변의 경우 적절한 단락 구분 사용
    - 표가 필요한 경우: | 컬럼1 | 컬럼2 | 형태로 작성
-   - 수식은 꼭 Latex문법으로 표현(React에서 렌더링 가능하도록)
+   - 수식은 꼭 LaTex문법으로 표현(React에서 렌더링 가능하도록)
    - 차트 생성 후에는 해당 차트에 대한 설명과 주요 내용을 마크다운 ('>')를 사용하여 작성해주세요.(예시: > 이 차트는 각 캠페인의 예상 ROI를 보여줍니다. 추정 데이터 기반으로 경상북도가 집중해야 할 캠페인 전략을 시사합니다.)
 
 **답변 (마크다운 형식으로):**

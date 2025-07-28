@@ -532,7 +532,7 @@ class RAGWorkflow:
         # 최종 출처 정보를 step_results에 저장 (프론트엔드에서 사용)
         if source_collection_data:
             state.add_step_result("final_sources", source_collection_data)
-
+            
         print(">>> STREAMING REPORT GENERATION 완료")
         return state
 

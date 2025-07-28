@@ -11,3 +11,5 @@ neo4j==5.15.0
 psycopg2-binary==2.9.10
 playwright
 pypdf
+numpy
+elasticsearch==8.18.1

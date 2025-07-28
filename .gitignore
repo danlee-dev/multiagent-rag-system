@@ -235,3 +235,5 @@ data/processed/
 # Notebooks output
 notebooks/output/
 *.html
+
+rag_config.py

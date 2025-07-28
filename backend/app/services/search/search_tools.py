@@ -9,6 +9,7 @@ from pypdf import PdfReader
 # 각 RAG 툴의 메인 함수를 import
 from ..database.postgres_rag_tool import postgres_rdb_search
 from ..database.neo4j_rag_tool import neo4j_search_sync
+from ..database.elastic_search_rag_tool import search, MultiIndexRAGSearchEngine, RAGConfig
 
 from ..database.mock_databases import create_mock_vector_db
 
@@ -23,7 +24,6 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 
-mock_vector_db = create_mock_vector_db()
 
 
 # --------------------------------------------------
@@ -220,41 +220,155 @@ def _extract_key_info(content: str, query: str) -> str:
 @tool
 def rdb_search(query: str) -> str:
     """
-    PostgreSQL DB에 저장된 정형 데이터를 조회하여 정확한 수치나 통계를 제공합니다.
-    - 사용 시점:
-      1. 구체적인 품목, 날짜, 지역 등의 조건으로 정확한 데이터를 찾을 때 (예: '최근 일주일간 제주도산 감귤의 평균 가격 알려줘')
-      2. 영양 정보, 수급량 등 명확한 스펙이나 통계 수치를 물을 때 (예: '사과 100g당 칼로리와 비타민C 함량은?')
-      3. 특정 기간의 데이터 순위나 추이를 알고 싶을 때 (예: '작년 한국이 가장 많이 수입한 과일은?')
+    # PostgreSQL DB에 저장된 식자재 관련 정형 데이터를 조회합니다.
+
+    ## 포함된 데이터:
+    1. 식자재 영양소 정보 (단백질, 탄수화물, 지방, 비타민, 미네랄 등의 상세 영양 성분)
+    2. 농산물/수산물 시세 데이터 (매일 크롤링으로 업데이트되는 최신 가격 정보)
+
+    ### 검색 전략 - 결과가 만족스럽지 않으면 다른 키워드로 재시도하세요:
+
+    1차 시도: 구체적인 식품명으로 검색
+    - 예: "유기농 채소" (not "organic vegetables")
+    - 예: "친환경 농산물" (not "eco-friendly agricultural products")
+
+    2차 시도: 더 넓은 카테고리로 검색
+    - 예: "채소류", "과일류", "곡물류"
+
+    3차 시도: 관련 키워드로 검색
+    - 예: "농산물 영양", "식품 성분"
+
+    ## 검색 결과 평가 기준:
+    - 결과가 질문과 관련 없으면 → 다른 키워드로 재시도
+    - 영양성분만 나오는데 생산/소비 정보가 필요하면 → vector_db나 graph_db 사용
+    - 가격 정보만 나오는데 다른 정보가 필요하면 → 다른 키워드로 재시도 후 다른 DB 활용
+
+    사용 시점:
+    1. 특정 식자재의 영양 성분을 정확히 알고 싶을 때
+    2. 농산물/수산물의 현재 시세나 가격 변동을 확인하고 싶을 때
+    3. 특정 지역/품종별 가격 비교가 필요할 때
+    4. 영양소 기준으로 식자재를 비교/분석하고 싶을 때
+
+    ## 검색 팁:
+    - 반드시 한국어로 검색 (예: "유기농" not "organic")
+    - 첫 검색 결과가 원하는 정보가 아니면 키워드를 바꿔서 2-3회 더 시도
+    - 구체적인 식품명 → 카테고리명 → 관련 키워드 순으로 점진적 확장
+    - 생산량/소비량 통계가 필요하면 이 DB로는 한계가 있으니 다른 DB 활용
+
+    예시 검색 시퀀스:
+    1. "유기농 채소" → 관련 없는 결과 →
+    2. "채소류 영양" → 일부 관련 결과 →
+    3. "친환경 농산물" → 원하는 결과 또는 다른 DB로 전환
+
+    주의: 시세 데이터는 매일 업데이트되므로 '오늘', '현재' 가격 질문에 적합합니다.
     """
-    print(f"\n>> 실제 PostgreSQL 검색 시작: {query}")
+
+    print(f"\n>> PostgreSQL 검색 시작: {query}")
     try:
-        return postgres_rdb_search(query)
+        result = postgres_rdb_search(query)
+        # print(f"- 검색 결과: {result}")
+        return result
     except Exception as e:
         error_msg = f"PostgreSQL 연결 오류: {str(e)}"
         print(f">> {error_msg}")
         return error_msg
 
 
+
 @tool
-def mock_vector_search(query: str) -> str:
+def vector_db_search(query: str, top_k = 10) -> str:
     """
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
-    - 사용 시점:
-      1. 특정 주제에 대한 심층적인 분석이나 여러 문서에 걸친 종합적인 정보가 필요할 때 (예: '기후 변화가 농산물 가격에 미치는 영향에 대한 보고서 찾아줘')
-      2. 문서의 단순 키워드 매칭이 아닌, 문맥적 의미나 논조를 파악해야 할 때 (예: 'AI 기술의 긍정적 측면을 다룬 뉴스 기사 요약해줘')
-      3. 특정 보고서나 논문의 내용을 확인하고 싶을 때
     """
-    print(f"Vector DB 검색 실행: {query}")
-    search_results = mock_vector_db.search(query)
-    if not search_results:
+    config = RAGConfig()
+    config.OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    search_engine = MultiIndexRAGSearchEngine(openai_api_key=config.OPENAI_API_KEY, config=config)
+
+    print(f"\n>> Vector DB 검색 시작: {query}")
+    results = search_engine.advanced_rag_search(query)
+    top_results = results.get('results', [])[:top_k]
+
+    print(f"- 검색된 문서 수: {len(top_results)}개")
+
+    if not top_results:
+        print(">> Vector DB 검색 완료: 관련 문서 없음")
         return f"'{query}'에 대한 관련 문서를 찾을 수 없습니다."
-    summary = f"Vector DB 검색 결과 (상위 {len(search_results)}개 문서):\n\n"
-    for i, doc in enumerate(search_results):
-        summary += f"{i+1}. 제목: {doc.get('title', 'N/A')}\n"
-        summary += f"   - 출처: {doc.get('metadata', {}).get('source', 'N/A')}\n"
-        summary += f"   - 유사도: {doc.get('similarity_score', 0):.2f}\n"
-        content_preview = doc.get("content", "")[:100]
-        summary += f"   - 내용 미리보기: {content_preview}...\n\n"
+
+    # ReAct가 판단하기 쉬운 핵심 정보만 추출
+    processed_docs = []
+    for i, doc in enumerate(top_results):
+        # 핵심 필드 추출
+        title = doc.get('name', doc.get('title', 'N/A'))
+        content = doc.get('page_content', doc.get('content', ''))
+        metadata = doc.get('meta_data', doc.get('metadata', {}))
+
+        # 문서 제목과 출처 정보
+        doc_title = metadata.get('document_title', title)
+        source_info = metadata.get('document_file_path', metadata.get('source', 'N/A'))
+        page_num = metadata.get('page_number', [])
+        if isinstance(page_num, list) and page_num:
+            page_info = f"p.{page_num[0]}" if len(page_num) == 1 else f"p.{page_num[0]}-{page_num[-1]}"
+        else:
+            page_info = ""
+
+        # 인덱스 정보
+        index_name = doc.get('_index', 'unknown')
+
+        # 유사도 점수
+        similarity = doc.get('score', doc.get('rerank_score', doc.get('similarity_score', 0)))
+        if similarity > 1:  # rerank_score는 보통 1보다 큰 값
+            similarity = min(similarity / 4, 1.0)  # 0-1 범위로 정규화
+
+        # 내용 요약 (너무 길면 자름)
+        content_summary = content[:400] if content else "내용 없음"
+
+        processed_doc = {
+            'rank': i + 1,
+            'title': title,
+            'document_title': doc_title,
+            'content_preview': content_summary,
+            'source_file': source_info.split('/')[-1] if source_info != 'N/A' else 'N/A',
+            'page_info': page_info,
+            'index': index_name,
+            'relevance_score': round(similarity, 3),
+            'content_length': len(content)
+        }
+        processed_docs.append(processed_doc)
+
+    # ReAct가 이해하기 쉬운 형태로 요약
+    summary = f"Vector DB 검색 완료 - '{query}' 관련 {len(processed_docs)}개 문서 발견\n\n"
+    summary += "=== 검색 결과 요약 ===\n"
+
+    for doc in processed_docs:
+        summary += f"[{doc['rank']}] {doc['title']}\n"
+        summary += f"  - 문서: {doc['document_title']}\n"
+        summary += f"  - 출처: {doc['source_file']}"
+        if doc['page_info']:
+            summary += f" ({doc['page_info']})"
+        summary += f"\n  - 관련도: {doc['relevance_score']:.3f}\n"
+        summary += f"  - 인덱스: {doc['index']}\n"
+        summary += f"  - 내용: {doc['content_preview'][:]}...\n\n"
+
+    # 검색 품질 평가 정보 추가
+    high_relevance_count = len([d for d in processed_docs if d['relevance_score'] > 0.7])
+    medium_relevance_count = len([d for d in processed_docs if 0.5 <= d['relevance_score'] <= 0.7])
+
+    summary += "=== 검색 품질 평가 ===\n"
+    summary += f"- 고관련도 문서 (0.7+): {high_relevance_count}개\n"
+    summary += f"- 중관련도 문서 (0.5-0.7): {medium_relevance_count}개\n"
+    summary += f"- 평균 관련도: {sum(d['relevance_score'] for d in processed_docs) / len(processed_docs):.3f}\n"
+
+    if high_relevance_count >= 3:
+        summary += "✓ 충분한 고품질 문서 확보됨\n"
+    elif high_relevance_count + medium_relevance_count >= 5:
+        summary += "△ 적당한 품질의 문서 확보됨\n"
+    else:
+        summary += "⚠ 관련도가 낮은 문서가 많음 - 검색어 조정 필요\n"
+
+    print(f">> Vector DB 검색 완료: {len(processed_docs)}개 문서, 평균 관련도 {sum(d['relevance_score'] for d in processed_docs) / len(processed_docs):.3f}")
+
+    print(f"=== 검색 결과 ===\n{summary}")
+
     return summary
 
 
@@ -273,11 +387,15 @@ def graph_db_search(query: str) -> str:
             print(f"- 기존 이벤트 루프 감지됨, 별도 스레드에서 실행")
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(neo4j_search_sync, query)
-                return future.result()
+                result = future.result()
+                print(f"- Neo4j 검색 결과: {result}")
+                return result
         except RuntimeError:
             # 실행 중인 루프가 없으면 직접 동기 함수 호출
             print(f"- 동기 방식으로 Neo4j 검색 실행")
-            return neo4j_search_sync(query)
+            result = neo4j_search_sync(query)
+            print(f"- Neo4j 검색 결과: {result}")
+            return result
     except Exception as e:
         print(f"- Graph DB 검색 중 오류 발생: {e}")
         return f"Graph DB 검색 중 오류: {e}"
