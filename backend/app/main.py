@@ -41,7 +41,6 @@ from .core.agents.agents import (
     PlanningAgent,
     RetrieverAgent,  # 통합된 RetrieverAgent 사용
     CriticAgent1,
-    CriticAgent2,
     ContextIntegratorAgent,
     ReportGeneratorAgent,
     SimpleAnswererAgent,
@@ -92,9 +91,7 @@ class RAGWorkflow:
         self.simple_answerer = SimpleAnswererAgent(self.vector_db)
         self.critic1 = CriticAgent1()
         self.context_integrator = ContextIntegratorAgent()
-        self.critic2 = CriticAgent2()
         self.report_generator = ReportGeneratorAgent()
-
         self.retriever = RetrieverAgent()
 
         # 워크플로우 그래프 생성
@@ -112,7 +109,6 @@ class RAGWorkflow:
         self.graph.add_node("unified_retrieval", self.unified_retrieval_node)
         self.graph.add_node("critic1", self.critic1_node)
         self.graph.add_node("context_integration", self.context_integration_node)
-        self.graph.add_node("critic2", self.critic2_node)
         self.graph.add_node("report_generation", self.streaming_report_generation_node)
 
         # 엣지 정의 - 4단계 라우팅
@@ -140,13 +136,8 @@ class RAGWorkflow:
             self.check_info_sufficient,
             {"sufficient": "context_integration", "insufficient": "planning"},
         )
-
-        self.graph.add_edge("context_integration", "critic2")
-        self.graph.add_conditional_edges(
-            "critic2",
-            self.check_context_sufficient,
-            {"sufficient": "report_generation", "insufficient": "planning"},
-        )
+        
+        self.graph.add_edge("context_integration", "report_generation")
         self.graph.add_edge("report_generation", END)
 
         # checkpointer 없이 컴파일 (SimpleAgentMemory 직렬화 문제 해결)
@@ -358,23 +349,7 @@ class RAGWorkflow:
 
         print(">>> CONTEXT INTEGRATION 완료")
         return state
-
-    async def critic2_node(self, state: StreamingAgentState) -> StreamingAgentState:
-        """2차 검토 노드"""
-        print("\n>>> CRITIC_2 시작")
-
-        state = await self.critic2.evaluate(state)
-
-        # 반복 제한 체크
-        if not state.context_sufficient and state.current_iteration >= state.max_iterations:
-            print(f"- 최대 반복 횟수({state.max_iterations}) 도달, 진행 허용")
-            state.context_sufficient = True
-        elif not state.context_sufficient:
-            print(f"- 컨텍스트 부족, 반복 시도 ({state.current_iteration + 1}/{state.max_iterations})")
-            state.current_iteration += 1
-            state.search_complete = False
-
-        return state
+    
 
     def _enhance_search_results_with_sources(self, results: List[SearchResult], source_type: str):
         """검색 결과에 출처 정보 강화"""
@@ -635,9 +610,6 @@ class RAGWorkflow:
     # 조건 함수들
     def check_info_sufficient(self, state: StreamingAgentState) -> str:
         return "sufficient" if state.info_sufficient else "insufficient"
-
-    def check_context_sufficient(self, state: StreamingAgentState) -> str:
-        return "sufficient" if state.context_sufficient else "insufficient"
 
 
     async def _extract_and_save_user_info(self, state: StreamingAgentState):
@@ -937,7 +909,6 @@ class RAGWorkflow:
                     "unified_retrieval": "관련 정보 수집 중...",
                     "critic1": "정보 충분성 검토 중...",
                     "context_integration": "수집된 정보 통합 중...",
-                    "critic2": "최종 품질 검토 중...",
                     "report_generation": "전문 보고서 작성을 시작합니다...",
                 }
 

@@ -18,6 +18,11 @@ from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+from langchain_core.pydantic_v1 import BaseModel as LangchainBaseModel
+
+from typing import Dict, Optional, Literal
+from pydantic import Field
 
 # 로컬 imports
 from ...core.config.report_config import TeamType, ReportType, Language
@@ -135,22 +140,50 @@ class DataExtractor:
             return {"extracted_numbers": [], "percentages": [], "trends": [], "categories": {}}
 
 
+# ==============================================================================
+# ⭐️ Pydantic 모델 정의: 안정적인 구조화를 위해 클래스 외부에 정의
+# ==============================================================================
+class ResourceRequirements(LangchainBaseModel):
+    """실행 계획에 필요한 리소스 요구사항을 정의합니다."""
+    search_needed: bool = Field(description="정보 검색이 필요한지 여부")
+    react_needed: bool = Field(description="자체 추론 루프(Tool Calling)가 필요한지 여부")
+    multi_agent_needed: bool = Field(description="다중 에이전트 협업이 필요한지 여부")
+    estimated_time: Literal['fast', 'medium', 'slow', 'very_slow'] = Field(description="예상 소요 시간")
+
+class ComplexityAnalysis(LangchainBaseModel):
+    """사용자 질문의 복잡도 분석 결과를 담는 데이터 구조입니다."""
+    complexity_level: Literal['SIMPLE', 'MEDIUM', 'COMPLEX', 'SUPER_COMPLEX'] = Field(description="분석된 복잡도 수준")
+    execution_strategy: Literal['direct_answer', 'basic_search', 'full_react', 'multi_agent'] = Field(description="복잡도에 따른 실행 전략")
+    reasoning: str = Field(description="복잡도를 판단한 근거를 2-3문장으로 설명")
+    resource_requirements: ResourceRequirements = Field(description="필요한 리소스 요구사항")
+    expected_output_type: Literal['simple_text', 'analysis', 'report', 'comprehensive_strategy'] = Field(description="예상되는 결과물 유형")
+
+class DecomposedQuery(LangchainBaseModel):
+    """사용자의 복잡한 질문을 해결 가능한 여러 개의 하위 질문으로 분해한 결과입니다."""
+    sub_queries: List[str] = Field(
+        description="분해된 2~5개의 간단하고 명확하며 독립적으로 검색 가능한 하위 질문 목록"
+    )
+
 class PlanningAgent:
     """
-    4단계 복잡도 분류를 지원하는 향상된 계획 수립 에이전트
+    4단계 복잡도 분류 및 쿼리 분해를 지원하는 향상된 계획 수립 에이전트.
+    Tool Calling을 사용하여 안정적으로 분석 결과를 구조화합니다.
     - SIMPLE: 직접 답변 가능
     - MEDIUM: 기본 검색 + 간단 분석
-    - COMPLEX: 풀 ReAct 에이전트 활용
+    - COMPLEX: 자체 Reasoning Loop 활용
     - SUPER_COMPLEX: 다중 에이전트 협업
     """
 
     def __init__(self):
         self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # ⭐️ 복잡도 분석용 LLM과 쿼리 분해용 LLM을 별도로 초기화
+        self.structured_llm = self.chat.with_structured_output(ComplexityAnalysis)
+        self.decomposer_llm = self.chat.with_structured_output(DecomposedQuery)
         self.agent_type = AgentType.PLANNING
 
     async def plan(self, state: StreamingAgentState) -> StreamingAgentState:
-        """질문을 4단계로 분석하고 최적의 실행 계획 수립"""
-        print(">> PLANNING 단계 시작 (4단계 복잡도 분류)")
+        """질문을 분석하고, 필요 시 분해하여 최적의 실행 계획 수립"""
+        print(">> PLANNING 단계 시작 (복잡도 분석 및 쿼리 분해)")
         query = state.original_query
         print(f"- 원본 쿼리: {query}")
 
@@ -159,16 +192,14 @@ class PlanningAgent:
         if feedback_context:
             print(f"- 피드백 반영: {feedback_context}")
 
-        # 4단계 복잡도 분석
-        complexity_analysis = await self._analyze_query_complexity_4levels(
+        # ⭐️ Tool Calling을 사용하는 수정된 분석 함수를 호출합니다.
+        complexity_analysis_model = await self._analyze_query_complexity_with_tool_calling(
             query, feedback_context
         )
+        # ⭐️ Pydantic 모델을 나중 단계에서 사용하기 편한 딕셔너리 형태로 변환합니다.
+        complexity_analysis = complexity_analysis_model.dict()
+        
         print(f"- 복잡도 분석 결과: {complexity_analysis}")
-
-        # 복잡도별 실행 계획 수립
-        execution_plan = await self._create_execution_plan_by_complexity(
-            query, complexity_analysis, feedback_context
-        )
 
         # 복잡도와 전략 값을 소문자로 변환
         complexity_mapping = {
@@ -182,29 +213,31 @@ class PlanningAgent:
             "super_complex": "super_complex",
         }
 
-        strategy_mapping = {
-            "direct_answer": "direct_answer",
-            "basic_search": "basic_search",
-            "full_react": "full_react",
-            "multi_agent": "multi_agent",
-        }
-
-        # 원본 값들
         raw_complexity = complexity_analysis.get("complexity_level", "MEDIUM")
-        raw_strategy = complexity_analysis.get("execution_strategy", "basic_search")
-
-        # 매핑된 값들
+        # ⭐️ Pydantic 모델이 정확한 값을 보장하므로 strategy_mapping이 더 이상 필요 없습니다.
+        mapped_strategy = complexity_analysis.get("execution_strategy", "basic_search")
         mapped_complexity = complexity_mapping.get(raw_complexity, "medium")
-        mapped_strategy = strategy_mapping.get(raw_strategy, "basic_search")
 
-        print(f"- 복잡도 매핑: {raw_complexity} → {mapped_complexity}")
-        print(f"- 전략 매핑: {raw_strategy} → {mapped_strategy}")
+        sub_queries = [query]  # 기본값은 원본 쿼리
+        # ⭐️ 복잡도가 'complex' 또는 'super_complex'일 경우에만 쿼리 분해 실행
+        if mapped_complexity in ["complex", "super_complex"]:
+            print("- 복잡한 질문 감지, 쿼리 분해 시작...")
+            try:
+                decomposed_model = await self._decompose_query(query)
+                # 분해된 질문이 1개이거나, 원본과 너무 유사하면 원본 쿼리 사용
+                if len(decomposed_model.sub_queries) > 1:
+                    sub_queries = decomposed_model.sub_queries
+                print(f"- 분해된 하위 질문: {sub_queries}")
+            except Exception as e:
+                print(f"- 쿼리 분해 실패, 원본 쿼리 사용: {e}")
+
+        execution_plan = f"'{query}'에 대한 분석 계획 수립. 총 {len(sub_queries)}개의 하위 작업으로 분할. 실행 전략: {mapped_strategy}"
 
         state.query_plan = QueryPlan(
             original_query=query,
-            sub_queries=[execution_plan],
+            sub_queries=sub_queries, # ⭐️ 분해된 하위 쿼리 리스트를 저장
             estimated_complexity=mapped_complexity,
-            execution_strategy=mapped_strategy,  
+            execution_strategy=mapped_strategy,
             resource_requirements=complexity_analysis.get("resource_requirements", {}),
         )
 
@@ -213,28 +246,52 @@ class PlanningAgent:
         return state
 
     def _collect_feedback(self, state: StreamingAgentState) -> Optional[str]:
-        """이전 단계의 피드백을 수집"""
-        if state.critic2_result and state.critic2_result.status == "insufficient":
-            return f"최종 검수 피드백: {state.critic2_result.suggestion}"
-        elif state.critic1_result and state.critic1_result.status == "insufficient":
+        """이전 단계의 피드백을 수집 (Critic2 관련 로직 제거)"""
+        if state.critic1_result and state.critic1_result.status == "insufficient":
             return f"초기 수집 피드백: {state.critic1_result.suggestion}"
         return None
 
-    async def _analyze_query_complexity_4levels(
-        self, query: str, feedback: Optional[str] = None
-    ) -> Dict:
-        """질문을 4단계 복잡도로 분석"""
+    # ⭐️ 쿼리 분해를 위한 전용 함수
+    async def _decompose_query(self, query: str) -> DecomposedQuery:
+        """복잡한 질문을 간단한 하위 질문 여러 개로 분해합니다 (Tool Calling 방식)."""
+        prompt = f"""당신은 사용자의 복잡하고 모호한 질문을 명확하고 독립적으로 검색 가능한 여러 개의 하위 질문으로 분해하는 전문가입니다.
 
+        ## 원본 질문
+        "{query}"
+
+        ## 작업 지침
+        1. 원본 질문의 핵심 의도를 파악하세요.
+        2. 질문을 2~5개의 더 작고 구체적인 하위 질문으로 나누세요.
+        3. 각 하위 질문은 독립적으로 검색하거나 도구를 통해 답변할 수 있어야 합니다.
+        4. 원래 질문의 모든 측면이 하위 질문에 포함되도록 하세요.
+
+        ## 예시
+        - 원본: "서울의 사과와 부산의 배 가격을 비교하고, 최근 관련 뉴스를 찾아줘."
+        - 분해 결과: ["서울 지역의 최근 사과 가격 정보 찾아줘", "부산 지역의 최근 배 가격 정보 찾아줘", "최근 사과와 배 가격 관련 뉴스 기사 3개 찾아줘"]
+        
+        - 원본: "기후 변화가 국내 쌀 생산량에 미치는 영향과 정부의 대응 정책을 분석해줘."
+        - 분해 결과: ["최근 5년간 국내 기후 변화 데이터 요약해줘", "기후 변화와 국내 쌀 생산량의 상관관계에 대한 자료 찾아줘", "기후 변화 관련 대한민국 정부의 농업 정책 문서를 찾아줘"]
+        """
+        try:
+            decomposed_result = await self.decomposer_llm.ainvoke(prompt)
+            return decomposed_result
+        except Exception as e:
+            print(f"- 쿼리 분해 중 오류 발생: {e}")
+            return DecomposedQuery(sub_queries=[query])
+
+    async def _analyze_query_complexity_with_tool_calling(
+        self, query: str, feedback: Optional[str] = None
+    ) -> ComplexityAnalysis:
+        """질문을 4단계 복잡도로 분석 (Tool Calling 방식)"""
         feedback_section = ""
         if feedback:
             feedback_section = f"""
 ## 이전 시도 피드백
 {feedback}
+위 피드백을 고려하여 분석해주세요."""
 
-위 피드백을 고려하여 분석해주세요.
-"""
-
-        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트입니다. 사용자의 질문을 4단계 복잡도로 정확히 분류해야 합니다.
+        # ⭐️ LLM이 JSON 구조 대신 분석에만 집중하도록 프롬프트를 간소화
+        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트입니다. 사용자의 질문을 4단계 복잡도로 정확히 분류하고, 그에 맞는 실행 전략과 필요 리소스를 판단해야 합니다.
 
 {feedback_section}
 
@@ -244,214 +301,205 @@ class PlanningAgent:
 ## 4단계 복잡도 분류 기준
 
 ### SIMPLE (직접 답변)
-- 기본 정의, 간단한 계산
-- 추가 검색이나 분석 불필요
-- 1-2개 문장으로 답변 가능
-- 예: "아마란스가 뭐야?", "칼로리 알려줘"
+- **특징**: 기본 정의, 간단한 계산 등 추가적인 정보 검색이나 깊은 분석이 필요 없는 경우입니다.
+- **답변 형태**: 1~2개의 문장으로 즉시 답변이 가능합니다.
+- **예시**: "아마란스가 뭐야?", "100 더하기 200은?"
+- **실행 전략**: "direct_answer"
 
 ### MEDIUM (기본 검색 + 간단 분석)
-- 최신 정보나 간단한 비교가 필요
-- 1-2개 소스에서 정보 수집 후 종합
-- 단순한 분석이나 요약 필요
-- 예: "오늘 채소 시세는?", "A와 B 차이점은?"
+- **특징**: 최신 정보나 두세 가지 사실을 비교하는 질문입니다. 1~2개의 신뢰할 수 있는 소스에서 정보를 찾아 종합하고 요약해야 합니다.
+- **답변 형태**: 몇 개의 단락으로 구성된 정보성 답변입니다.
+- **예시**: "오늘 전국 사과 평균 도매 시세는?", "퀴노아와 렌틸콩의 영양성분 차이점 알려줘."
+- **실행 전략**: "basic_search"
 
-### COMPLEX (풀 ReAct 에이전트)
-- 다단계 추론과 여러 소스 종합 필요
-- 전략적 사고와 맥락적 분석 필요
-- 복잡한 의사결정 지원
-- 산출 방식: 단일 전문가(ReAct 에이전트)가 모든 정보를 수집하고 분석하여 '하나의 완성된 분석 결과물'을 도출함
-- 예: "마케팅 전략 수립해줘", "시장 분석 보고서"
+### COMPLEX (자체 추론 루프)
+- **특징**: 여러 단계의 추론과 다양한 소스(DB, 웹 등)의 정보를 종합적으로 분석해야 하는 질문입니다. 전략적 사고와 깊은 맥락 이해가 필요합니다.
+- **답변 형태**: 특정 주제에 대한 상세 분석 보고서 형식입니다.
+- **예시**: "최근 이상 기후가 국내 쌀 생산량 및 가격에 미친 영향에 대한 분석 보고서를 작성해줘.", "MZ세대를 타겟으로 한 새로운 대체 우유 마케팅 전략을 수립해줘."
+- **실행 전략**: "full_react"
 
 ### SUPER_COMPLEX (다중 에이전트 협업)
-- 매우 복잡한 다영역 분석
-- 장기적 계획이나 종합적 전략 필요
-- 산출 방식: 여러 전문가(에이전트)가 각자의 관점(예: 시장 분석, 전략, 리스크)에서 개별 분석을 수행하고, 이를 최종적으로 종합하여 '다각적인 보고서'를 생성함
-- 예: "글로벌 진출 전략", "5년 사업 계획"
+- **특징**: 경제, 사회, 기술 등 여러 영역에 걸친 매우 복잡하고 종합적인 분석이 필요합니다. 장기적인 계획이나 다각적인 전략 수립을 요구합니다.
+- **답변 형태**: 여러 전문가의 관점이 포함된 종합 전략 보고서입니다.
+- **예시**: "국내 농산물 유통 구조를 개선하기 위한 5년 장기 디지털 전환(DX) 전략을 수립해줘.", "기후 변화에 대응하기 위한 한국의 지속 가능한 미래 식량 안보 전략 보고서."
+- **실행 전략**: "multi_agent"
 
-## 실행 전략 매핑
-
-### SIMPLE → "direct_answer"
-- SimpleAnswererAgent만 사용
-- 즉시 답변 생성
-
-### MEDIUM → "basic_search"
-- 기본 Vector/RDB 검색
-- 간단한 LLM 분석
-- ReAct 없이 직접 처리
-
-### COMPLEX → "full_react"
-- 완전한 ReAct 에이전트 활용
-- 다단계 검색 및 추론
-- 상세한 분석 및 종합
-
-### SUPER_COMPLEX → "multi_agent"
-- 여러 전문 에이전트 협업
-- 단계별 검증 및 피드백
-- 종합적 보고서 생성
-
-## 출력 형식
-다음 JSON 형식으로만 응답하세요:
-
-```json
-{{
-  "complexity_level": "SIMPLE|MEDIUM|COMPLEX|SUPER_COMPLEX",
-  "execution_strategy": "direct_answer|basic_search|full_react|multi_agent",
-  "reasoning": "판단 근거를 2-3문장으로 설명",
-  "resource_requirements": {{
-    "search_needed": true|false,
-    "react_needed": true|false,
-    "multi_agent_needed": true|false,
-    "estimated_time": "fast|medium|slow|very_slow"
-  }},
-  "expected_output_type": "simple_text|analysis|report|comprehensive_strategy"
-}}
-```
-
-정확한 JSON 형식을 준수하고, 질문의 진짜 복잡도를 신중히 판단하세요."""
-
+위 기준에 따라 질문을 신중하게 분석하고 가장 적절한 복잡도 수준과 실행 전략을 결정하세요.
+"""
         try:
-            response = await self.chat.ainvoke(prompt)
-            # JSON 파싱 시도
-            import json
-
-            # 코드 블록이 있다면 제거
-            content = response.content.strip()
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0].strip()
-
-            result = json.loads(content)
-            return result
-
+            analysis_result = await self.structured_llm.ainvoke(prompt)
+            return analysis_result
         except Exception as e:
-            print(f"복잡도 분석 파싱 오류: {e}")
-            return {
-                "complexity_level": "MEDIUM",
-                "execution_strategy": "basic_search",
-                "reasoning": "분석 중 오류 발생으로 기본값 적용",
-                "resource_requirements": {
-                    "search_needed": True,
-                    "react_needed": False,
-                    "multi_agent_needed": False,
-                    "estimated_time": "medium",
-                },
-                "expected_output_type": "analysis",
-            }
-
-    async def _create_execution_plan_by_complexity(
-        self, query: str, complexity_analysis: Dict, feedback: Optional[str] = None
-    ) -> str:
-        """복잡도별 맞춤 실행 계획 생성"""
-
-        complexity_level = complexity_analysis["complexity_level"]
-        execution_strategy = complexity_analysis["execution_strategy"]
-
-        if complexity_level == "SIMPLE":
-            return f"직접 답변 생성: {query}"
-
-        elif complexity_level == "MEDIUM":
-            return f"기본 검색 후 분석: {query} - Vector DB 및 RDB 검색 활용"
-
-        elif complexity_level == "COMPLEX":
-            return await self._create_complex_execution_plan(
-                query, complexity_analysis, feedback
+            print(f"복잡도 분석 및 구조화 오류: {e}")
+            return ComplexityAnalysis(
+                complexity_level="MEDIUM",
+                execution_strategy="basic_search",
+                reasoning="분석 중 오류 발생으로 기본값 적용",
+                resource_requirements=ResourceRequirements(
+                    search_needed=True,
+                    react_needed=False,
+                    multi_agent_needed=False,
+                    estimated_time="medium",
+                ),
+                expected_output_type="analysis",
             )
 
-        elif complexity_level == "SUPER_COMPLEX":
-            return await self._create_super_complex_execution_plan(
-                query, complexity_analysis, feedback
-            )
+    async def _create_execution_plan_by_complexity(self, query: str, complexity_analysis: Dict, feedback: Optional[str] = None) -> str:
+        """실행 계획 생성을 단순화된 문자열 반환으로 통일합니다."""
+        strategy = complexity_analysis.get('execution_strategy', 'unknown')
+        return f"'{query}'에 대한 분석 계획 수립 완료. 결정된 실행 전략: {strategy}"
 
-        else:
-            return f"기본 실행 계획: {query}"
+# ==============================================================================
+# Tool Calling 기반의 새로운 Reasoning 에이전트
+# ==============================================================================
+class ToolCallingAgent:
+    """
+    LangChain의 Tool Calling 기능을 사용하여 ReAct Loop를 직접 구현한 에이전트.
+    LLM이 직접 Tool을 선택하고, 구조화된 응답을 받아 처리합니다.
+    ⭐️ 자동 재시도 및 첫 턴 결과 검증 로직 존재
+    """
+    def __init__(self, llm, tools: List[Any]):
+        self.llm = llm
+        self.tools = tools
+        self.llm_with_tools = self.llm.bind_tools(self.tools)
+        self.tool_mapping = {tool.name: tool for tool in tools}
+        self.current_date_str = datetime.now().strftime("%Y년 %m월 %d일")
 
-    async def _create_complex_execution_plan(
-        self, query: str, analysis: Dict, feedback: Optional[str] = None
-    ) -> str:
-        """COMPLEX 레벨 실행 계획"""
+    async def _verify_tool_result(self, query: str, tool_name: str, tool_args: dict, observation: str) -> bool:
+        """
+        ⭐️ 도구 실행 결과가 사용자의 원래 질문 의도에 부합하는지 LLM을 통해 검증합니다.
+        """
+        print(f"---> 결과 검증 시작: {tool_name}")
+        
+        verification_prompt = f"""당신은 AI 에이전트의 행동을 감독하는 엄격한 품질 관리자입니다.
+        
+        사용자의 원본 질문과, 이 질문을 해결하기 위해 에이전트가 사용한 도구 및 그 결과를 보고 결과가 적절한지 평가해주세요.
 
-        feedback_section = ""
-        if feedback:
-            feedback_section = f"""
-## 중요: 이전 시도 피드백
-{feedback}
+        - **원본 질문**: "{query}"
+        - **사용된 도구**: `{tool_name}`
+        - **도구 입력값**: `{tool_args}`
+        - **도구 실행 결과**: "{observation}"
 
-위 피드백을 반드시 해결하는 새로운 접근법을 포함해야 합니다.
-"""
+        [평가 기준]
+        1. **적절성**: 이 도구와 결과가 원본 질문에 대한 답변을 찾는 데 정말로 도움이 됩니까?
+        2. **유효성**: 결과가 "오류"나 "결과 없음" 같은 무의미한 내용은 아닙니까?
 
-        prompt = f"""당신은 전략 컨설턴트입니다. 복합적 분석이 필요한 질문에 대한 체계적 실행 계획을 수립하세요.
+        "YES" 또는 "NO"로만 답변해주세요.
+        - **YES**: 결과가 질문과 관련이 있고 유용할 때.
+        - **NO**: 결과가 질문과 전혀 관련이 없거나, 오류 메시지이거나, "결과 없음"일 때.
+        
+        판단 (YES/NO):
+        """
+        
+        response = await self.llm.ainvoke(verification_prompt)
+        decision = "yes" in response.content.lower()
+        print(f"---> 검증 결과: {'통과' if decision else '실패'}")
+        return decision
+    
+    async def run(self, query: str) -> SearchResult:
+        """Tool Calling을 사용한 Reasoning Loop를 실행합니다."""
+        print("\n>> Tool Calling Reasoning Loop 시작 (재시도/검증 기능 탑재)")
+        
+        system_prompt = f"""당신은 농수산물 경제 연구소의 수석 분석가입니다. 
+오늘 날짜: {self.current_date_str}
+사용자의 질문에 답하기 위해 주어진 도구를 체계적으로 사용하여 포괄적이고 데이터 기반의 답변을 찾아야 합니다.
 
-{feedback_section}
+**[업무 가이드라인]**
+1. **숫자 데이터 우선**: 사용자의 질문에 '가격', '시세', '영양성분', '칼로리' 등 구체적인 수치를 묻는 키워드가 포함되어 있다면, **반드시 `rdb_search` 도구를 가장 먼저 사용**하여 내부 데이터베이스의 정확한 정보를 확인해야 합니다.
+2. **내부 검색 후 외부 검색**: `rdb_search`나 `vector_db_search` 같은 내부 도구를 사용했는데 결과가 충분하지 않거나, 사용자가 '최신', '최근', '트렌드'를 물어본 경우에만 **그 다음 단계로 `debug_web_search`를 사용**하여 외부 정보를 보충하세요.
+3. **URL 검증 필수**: 웹 페이지의 상세 내용을 가져오는 `scrape_and_extract_content` 도구는, 반드시 `debug_web_search`를 통해 유효한 URL을 먼저 확보한 후에만 사용해야 합니다. 절대 URL 없이 이 도구를 호출하지 마세요.
 
-## 클라이언트 요청
-"{query}"
+필요한 모든 정보를 찾았다고 판단되면, 더 이상 도구를 사용하지 말고 최종 답변을 자연스러운 문장으로 작성하세요."""
 
-## 요청 분석 결과
-- 복잡도: {analysis.get('complexity_level', 'COMPLEX')}
-- 예상 결과물: {analysis.get('expected_output_type', 'analysis')}
-- 판단 근거: {analysis.get('reasoning', '')}
+        history = [
+            HumanMessage(content=system_prompt, name="system"),
+            HumanMessage(content=query, name="user")
+        ]
+        max_turns = 5
 
-## 실행 계획 수립 지침
+        for i in range(max_turns):
+            print(f"--- Turn {i+1}/{max_turns} ---")
 
-다음 단계로 체계적인 실행 계획을 작성하세요:
+            ai_response = await self.llm_with_tools.ainvoke(history)
+            history.append(ai_response)
 
-1. **정보 수집 전략**: 어떤 정보를 어떤 방식으로 수집할지
-2. **분석 접근법**: 수집된 정보를 어떻게 분석하고 종합할지
-3. **결과물 구성**: 최종 답변을 어떤 형태로 제공할지
+            if not ai_response.tool_calls:
+                print(">> LLM이 Tool 사용 대신 최종 답변을 결정했습니다.")
+                break
 
-## 출력 형식
-구체적인 실행 지시문 형태로 작성 (200-300자):
+            print(f"LLM wants to use {len(ai_response.tool_calls)} tool(s): {[tc['name'] for tc in ai_response.tool_calls]}")
+            
+            tool_messages = []
+            for tool_call in ai_response.tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                tool_function = self.tool_mapping.get(tool_name)
+                
+                if not tool_function:
+                    tool_messages.append(ToolMessage(content=f"오류: '{tool_name}'이라는 이름의 도구를 찾을 수 없습니다.", tool_call_id=tool_call["id"]))
+                    continue
 
-**실행 계획:**
-[ReAct 에이전트가 그대로 실행할 수 있을 정도로 구체적이고 명확한 계획]
-"""
+                observation = None
+                # ⭐️ 1. 명시적인 자동 재시도 로직 추가 (최대 2회)
+                retry_attempts = 2
+                for attempt in range(retry_attempts):
+                    try:
+                        print(f"Executing Tool: {tool_name} (Attempt {attempt + 1}/{retry_attempts})")
+                        observation = tool_function.invoke(tool_args)
+                        break  # 성공 시 재시도 루프 탈출
+                    except Exception as e:
+                        print(f"Tool execution attempt {attempt + 1} failed: {e}")
+                        observation = f"Tool '{tool_name}' 실행 오류: {e}"
+                        if attempt < retry_attempts - 1:
+                            await asyncio.sleep(1) # 잠시 후 재시도
+                
+                # ⭐️ 2&3. 첫 번째 Turn일 때만 결과 검증을 수행
+                is_valid = True # 기본값은 True로 설정
+                if i == 0: 
+                    is_valid = await self._verify_tool_result(query, tool_name, tool_args, str(observation))
 
-        try:
-            response = await self.chat.ainvoke(prompt)
-            return response.content.strip()
-        except Exception as e:
-            print(f"복합 계획 생성 오류: {e}")
-            return f"'{query}' 요청에 대한 체계적 분석과 전략적 솔루션을 제공합니다."
+                if is_valid:
+                    tool_messages.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
+                else:
+                    # 검증 실패 시 LLM에게 명확한 피드백을 주어 다른 행동을 유도
+                    feedback_content = f"'{tool_name}' 도구의 결과가 원본 질문과 관련이 없거나 유효하지 않습니다. 다른 도구나 다른 접근 방식을 시도해주세요. (실패한 도구의 실행 결과: {str(observation)[:200]}...)"
+                    tool_messages.append(ToolMessage(content=feedback_content, tool_call_id=tool_call["id"]))
 
-    async def _create_super_complex_execution_plan(
-        self, query: str, analysis: Dict, feedback: Optional[str] = None
-    ) -> str:
-        """SUPER_COMPLEX 레벨 실행 계획 - 다중 에이전트 협업"""
+            history.extend(tool_messages)
 
-        prompt = f"""당신은 McKinsey 시니어 파트너입니다. 매우 복잡한 전략적 과제에 대한 다단계 실행 계획을 수립하세요.
-
-## 전략적 과제
-"{query}"
-
-## 다중 에이전트 협업 계획
-
-다음 관점에서 종합적 실행 계획을 수립하세요:
-
-1. **1단계 - 현황 분석**: 시장/상황 분석 전문가 관점
-2. **2단계 - 전략 수립**: 전략 기획 전문가 관점
-3. **3단계 - 실행 방안**: 실행 전문가 관점
-4. **4단계 - 리스크 관리**: 위험 관리 전문가 관점
-5. **5단계 - 종합 검증**: 통합 검증 및 최종 제안
-
-각 단계별로 어떤 정보를 수집하고 어떻게 분석할지 구체적으로 명시하세요.
-
-**다단계 실행 계획 (300-400자):**
-"""
-
-        try:
-            response = await self.chat.ainvoke(prompt)
-            return response.content.strip()
-        except Exception as e:
-            print(f"초복합 계획 생성 오류: {e}")
-            return f"'{query}' 요청에 대한 다단계 협업 분석과 종합적 전략을 제공합니다."
+        final_answer = history[-1].content if isinstance(history[-1], AIMessage) else "답변을 생성하지 못했습니다."
+        
+        return SearchResult(
+            source="tool_calling_agent",
+            content=final_answer,
+            relevance_score=0.9,
+            metadata={"steps_taken": i + 1},
+            search_query=query,
+        )
 
 
+# ==============================================================================
+# ⭐️ Pydantic 모델 정의: 안정적인 구조화를 위해 클래스 외부에 정의
+# ==============================================================================
+class SearchSourceDecision(LangchainBaseModel):
+    """어떤 데이터 소스를 검색할지에 대한 결정 구조"""
+    vector_db: bool = Field(description="일반적인 문서, 가이드, 설명서(농업 기술, 재배법 등) 검색 필요 여부")
+    rdb: bool = Field(description="정확한 수치 데이터(가격, 영양성분, 생산량 등) 검색 필요 여부")
+    graph_db: bool = Field(description="관계형 데이터(공급망, 지역별 특산품 등) 검색 필요 여부")
+    web_search: bool = Field(description="최신 뉴스, 트렌드, 실시간 정보 검색 필요 여부")
+    reasoning: str = Field(description="이렇게 판단한 구체적인 근거")
 
+
+# ==============================================================================
+# ⭐️ RetrieverAgent 수정
+# ==============================================================================
 class RetrieverAgent:
-    """통합 검색 에이전트 - 복잡도별 차등 + 병렬 처리"""
+    """통합 검색 에이전트 - 복잡도별 차등 + 병렬 처리 + 자체 Reasoning Loop"""
 
     def __init__(self):
+        """
+        ⭐️ 부품 교체: 기존 ReAct Executor 대신 ToolCallingAgent를 생성합니다.
+        """
         # 사용 가능한 도구들
         self.available_tools = [
             debug_web_search,
@@ -469,14 +517,17 @@ class RetrieverAgent:
         self.current_date_str = self.current_date.strftime("%Y년 %m월 %d일")
         self.current_year = self.current_date.year
 
-        # ReAct 에이전트 (복잡한 쿼리용)
-        self.react_agent_executor = self._create_react_agent()
+        # ⭐️ ToolCallingAgent 초기화
+        self.tool_calling_agent = ToolCallingAgent(llm=self.llm, tools=self.available_tools)
+        self.source_determiner_llm = self.llm.with_structured_output(SearchSourceDecision)
 
         # 병렬 처리용 스레드 풀
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
 
     async def search(self, state: StreamingAgentState) -> StreamingAgentState:
-        """복잡도별 차등 + 병렬 검색 실행"""
+        """
+        ⭐️ 호출 방식 변경: 복잡도에 따라 적절한 실행 함수를 호출합니다.
+        """
         print(">> 통합 RETRIEVER 시작")
 
         if not state.query_plan or not state.query_plan.sub_queries:
@@ -485,39 +536,94 @@ class RetrieverAgent:
 
         # 복잡도 및 실행 전략 결정
         complexity_level = state.get_complexity_level()
-        execution_strategy = self._determine_execution_strategy(state, complexity_level)
-
+        execution_strategy = state.query_plan.execution_strategy
         original_query = state.original_query
 
         print(f"- 복잡도: {complexity_level}")
         print(f"- 실행 전략: {execution_strategy}")
         print(f"- 원본 쿼리: {original_query}")
 
-        # 실행 전략에 따른 병렬 검색
+        # 실행 전략에 따른 분기
         if execution_strategy == ExecutionStrategy.DIRECT_ANSWER:
             print("- SIMPLE: 검색 생략")
             return state
 
         elif execution_strategy == ExecutionStrategy.BASIC_SEARCH:
-            print("- BASIC: 기본 병렬 검색")
+            print("- MEDIUM: 기본 병렬 검색")
             return await self._execute_basic_parallel_search(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.FULL_REACT:
-            print("- COMPLEX: 풀 병렬 검색 + ReAct")
-            return await self._execute_full_parallel_search(state, original_query)
+            # ⭐️ "COMPLEX" 전략일 때, 새로운 reasoning loop 함수를 호출하도록 변경
+            print("- COMPLEX: Tool Calling Agent 실행")
+            return await self._execute_reasoning_loop(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.MULTI_AGENT:
             print("- SUPER_COMPLEX: 다단계 병렬 검색")
+            # ⭐️ SUPER_COMPLEX의 첫 단계도 새로운 reasoning loop를 사용하도록 변경
             return await self._execute_multi_stage_parallel_search(state, original_query)
 
         else:
             return await self._execute_basic_parallel_search(state, original_query)
 
-    async def _determine_search_sources(self, query: str) -> Dict[str, bool]:
-        """LLM이 쿼리를 분석해서 어떤 DB를 검색할지 결정"""
+    async def _execute_reasoning_loop(
+        self, state: StreamingAgentState, query: str
+    ) -> StreamingAgentState:
+        """
+        ⭐️ 실행 함수 교체: ToolCallingAgent를 실행하는 새로운 함수입니다.
+        """
+        print("\n>> Custom Reasoning Agent 단독 실행 (분해된 쿼리 처리")
+        sub_queries = state.query_plan.sub_queries
+        
+        # 각 하위 쿼리에 대한 결과를 저장할 리스트
+        all_reasoning_contents = []
+        total_execution_time = 0
+        
+        for i, sub_query in enumerate(sub_queries):
+            print(f"\n>> 하위 질문 {i+1}/{len(sub_queries)} 처리 시작: \"{sub_query}\"")
+            try:
+                start_time = time.time()
+                # 각 하위 쿼리에 대해 ToolCallingAgent 실행
+                reasoning_result = await self.tool_calling_agent.run(sub_query)
+                execution_time = time.time() - start_time
+                total_execution_time += execution_time
+                print(f"- 하위 질문 처리 완료: {execution_time:.2f}초")
 
-        prompt = f"""
-        다음 질문을 분석해서 어떤 데이터베이스를 검색해야 하는지 판단해라.
+                if reasoning_result and reasoning_result.content:
+                    # 결과 내용에 어떤 하위 질문에 대한 답변인지 명시하여 추가
+                    result_text = f"### 하위 질문 '{sub_query}'에 대한 분석 결과:\n{reasoning_result.content}"
+                    all_reasoning_contents.append(result_text)
+                
+            except Exception as e:
+                print(f"- 하위 질문 '{sub_query}' 처리 중 실패: {e}")
+                all_reasoning_contents.append(f"### 하위 질문 '{sub_query}' 처리 중 오류 발생:\n{e}")
+
+        # ⭐️ 모든 하위 질문의 결과를 하나의 컨텐츠로 통합
+        final_combined_content = "\n\n---\n\n".join(all_reasoning_contents)
+
+        # 통합된 결과를 하나의 SearchResult로 만들어 state에 추가
+        final_search_result = SearchResult(
+            source="reasoning_aggregator",
+            content=final_combined_content,
+            relevance_score=0.95,
+            metadata={"total_sub_queries": len(sub_queries)},
+            search_query=query, # 원본 쿼리를 저장
+        )
+        state.add_multi_source_result(final_search_result)
+        
+        state.add_step_result("custom_reasoning_search", {
+            "execution_time": total_execution_time,
+            "total_results": 1 # 최종적으로는 하나의 통합된 결과
+        })
+        print(f"- 모든 하위 질문 처리 및 결과 통합 완료. 총 소요 시간: {total_execution_time:.2f}초")
+        
+        return state
+    
+    async def _determine_search_sources(self, query: str) -> Dict[str, bool]:
+        """
+        ⭐️ LLM이 쿼리를 분석해서 어떤 DB를 검색할지 결정 (Tool Calling 방식)
+        """
+        print(f"\n>> 검색 소스 결정 시작 (Tool Calling 방식)")
+        prompt = f"""다음 질문을 분석해서 어떤 데이터베이스를 검색해야 하는지 판단해라.
 
         질문: "{query}"
 
@@ -526,36 +632,16 @@ class RetrieverAgent:
         - rdb: 정확한 수치 데이터 (가격, 영양성분, 생산량 등)
         - graph_db: 관계형 데이터 (공급망, 지역별 특산품, 연관 정보)
         - web_search: 최신 뉴스, 트렌드, 실시간 정보
-
-        다음 JSON 형식으로만 답변해:
-        {{
-            "vector_db": true/false,
-            "rdb": true/false,
-            "graph_db": true/false,
-            "web_search": true/false,
-            "reasoning": "판단 근거"
-        }}
         """
-
         try:
-            response = await self.llm.ainvoke(prompt)
-            content = response.content.strip()
-
-            # JSON 파싱
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0].strip()
-
-            decision = json.loads(content)
-            return decision
-
+            # .ainvoke()를 호출하면 파싱이 완료된 Pydantic 모델 객체를 바로 받습니다.
+            decision_model = await self.source_determiner_llm.ainvoke(prompt)
+            return decision_model.dict()  # Pydantic 모델을 딕셔너리로 변환하여 반환
         except Exception as e:
             print(f"소스 결정 오류: {e}")
-            # 오류시 안전하게 모든 소스 검색
+            # 오류 시 안전하게 모든 소스를 검색하도록 폴백(fallback)
             return {
-                "vector_db": True,
-                "rdb": True,
-                "graph_db": True,
-                "web_search": True,
+                "vector_db": True, "rdb": True, "graph_db": True, "web_search": True,
                 "reasoning": "판단 오류로 모든 소스 검색"
             }
 
@@ -637,46 +723,7 @@ class RetrieverAgent:
 
         return state
 
-    async def _execute_full_parallel_search(
-        self, state: StreamingAgentState, query: str
-    ) -> StreamingAgentState:
-        """
-        ReAct 에이전트 단독 실행 (COMPLEX 복잡도)
-        - 복잡한 질문은 ReAct 에이전트에게 모든 검색 및 추론 과정을 위임
-        """
 
-        print("\n>> ReAct 에이전트 단독 실행")
-
-        react_task = self._async_react_search(query)
-
-        try:
-            start_time = time.time()
-
-            react_result = await react_task
-
-            execution_time = time.time() - start_time
-            print(f"- ReAct 에이전트 실행 완료: {execution_time:.2f}초")
-
-            total_results = 0
-            # ReAct 결과 처리
-            if not isinstance(react_result, Exception) and react_result:
-                state.add_multi_source_result(react_result)
-                total_results += 1
-
-            state.add_step_result("full_react_search", {
-                "execution_time": execution_time,
-                "total_results": total_results,
-                "react_included": True
-            })
-
-            print(f"- 총 {total_results}개 결과 추가 (ReAct)")
-
-        except Exception as e:
-            print(f"- ReAct 에이전트 실행 실패: {e}")
-            fallback_result = self._create_fallback_result(query, "react_agent_error")
-            state.add_multi_source_result(fallback_result)
-
-        return state
 
     async def _execute_multi_stage_parallel_search(
         self, state: StreamingAgentState, query: str
@@ -685,9 +732,9 @@ class RetrieverAgent:
         print("\n>> 다단계 병렬 검색 실행")
 
         try:
-            # 1단계: 초기 정보 수집
-            print("- 1단계: 초기 정보 수집")
-            await self._execute_full_parallel_search(state, query)
+            # ⭐️ 1단계: 초기 정보 수집도 새로운 Reasoning Loop를 사용합니다.
+            print("- 1단계: 초기 정보 수집 (by Tool Calling Agent)")
+            state = await self._execute_reasoning_loop(state, query)
 
             # 2단계: 키워드 확장 및 심화 검색
             print("- 2단계: 키워드 확장 검색")
@@ -979,68 +1026,6 @@ class RetrieverAgent:
             print(f"    ✗ URL({url}) 스크래핑 실패: {e}")
             return None
 
-    async def _async_react_search(self, query: str) -> Optional[SearchResult]:
-        """비동기 ReAct 검색 - 모든 내용 다 합치기"""
-        try:
-            print(f"  └ ReAct 검색: {query[:30]}...")
-
-            if not self.react_agent_executor:
-                print(f"    ✗ ReAct 에이전트가 초기화되지 않음")
-                return None
-
-            enhanced_prompt = self._create_enhanced_query_prompt(query)
-
-            result = await asyncio.wait_for(
-                self.react_agent_executor.ainvoke({"input": enhanced_prompt}),
-                timeout=180
-            )
-
-            output = result.get("output", "")
-            intermediate_steps = result.get("intermediate_steps", [])
-
-            print(f"    → ReAct output: {len(output)}자")
-            print(f"    → intermediate_steps: {len(intermediate_steps)}개")
-
-
-            all_content = ""
-
-            for i, step in enumerate(intermediate_steps):
-                if isinstance(step, tuple) and len(step) >= 2:
-                    action, observation = step[0], step[1]
-
-                    if isinstance(observation, str) and len(observation) > 10:
-                        all_content += f"=== Step {i+1} ===\n{observation}\n\n"
-                        print(f"      - Step {i+1}: {len(observation)}자 추가")
-
-            if output:
-                all_content += f"=== Final Output ===\n{output}\n"
-                print(f"      - Final Output: {len(output)}자 추가")
-
-            print(f"    → 전체 합친 내용: {len(all_content)}자")
-
-            if len(all_content) > 50:
-                search_result = SearchResult(
-                    source="react_agent",
-                    content=all_content,
-                    relevance_score=0.9,
-                    metadata={
-                        "search_type": "react",
-                        "steps_count": len(intermediate_steps),
-                        "total_length": len(all_content),
-                        "output_length": len(output)
-                    },
-                    search_query=query,
-                )
-                print(f"    ✓ ReAct 완료: 전체 {len(all_content)}자")
-                return search_result
-            else:
-                print(f"    ✗ 내용이 너무 짧음: {len(all_content)}자")
-                return None
-
-        except Exception as e:
-            print(f"    ✗ ReAct 오류: {e}")
-            return None
-
 
 
     def _determine_execution_strategy(self, state: StreamingAgentState, complexity_level: str) -> ExecutionStrategy:
@@ -1216,128 +1201,6 @@ class RetrieverAgent:
             print(f"- 최종 검증 오류: {e}")
             return None
 
-    def _create_enhanced_query_prompt(self, query: str) -> str:
-        """ReAct용 향상된 프롬프트"""
-        return f"""
-Research this topic thoroughly: {query}
-
-Current Date: {self.current_date_str}
-
-Please use the available tools to research this topic systematically.
-
-IMPORTANT: Use this exact format for tools:
-Action: tool_name
-Action Input: search_query
-
-DO NOT use parentheses or function call syntax.
-
-Begin your research now.
-"""
-
-    def _create_react_agent(self):
-        """ReAct 에이전트 생성 - 기존 코드 기반으로 최소한만 수정"""
-        try:
-            # 기본 ReAct 프롬프트 가져오기
-            base_prompt = hub.pull("hwchase17/react")
-
-            system_instruction = f"""
-You are a Senior Analyst at a prestigious agricultural-food economic research institute. Your mission is to provide comprehensive, data-driven, and well-structured analysis by utilizing ALL AVAILABLE INFORMATION SOURCES.
-Current Date: {self.current_date_str}
-
-CORE DIRECTIVES:
-1. Complete Information Coverage: Find ALL relevant information using internal databases AND external web sources
-2. No Information Gaps: If internal sources are insufficient, ALWAYS supplement with web search
-3. User-First Approach: Prioritize providing complete answers over source preferences
-4. Cite All Sources: Clearly distinguish between internal data and web-sourced information
-
-AVAILABLE TOOLS:
-- rdb_search, graph_db_search, vector_db_search, debug_web_search, scrape_and_extract_content
-
-AGGRESSIVE RESEARCH STRATEGY:
-
-1. Start with Internal Tools:
-- Begin with the most appropriate internal tool (rdb_search for data, vector_db_search for knowledge, graph_db_search for relationships)
-- Quick assessment: Does this provide sufficient information for a complete answer?
-
-2. Immediate Web Escalation Policy:
-**ALWAYS use debug_web_search if ANY of these conditions apply:**
-- Internal search returns insufficient data (less than 3 relevant results)
-- Information seems outdated (older than 6 months for market data)
-- User asks for "latest", "recent", "current", "today's" information
-- Internal data lacks specific details needed for complete answer
-- Query involves trends, news, or rapidly changing information
-- You need to verify or supplement internal data
-- Topic is not well covered in internal databases (like "반조리식품", "브랜드별 소비현황" etc.)
-
-3. Comprehensive Information Gathering:
-- **DO NOT settle for partial information** - if internal tools give you basic data, search the web for additional context, recent updates, and market insights
-- **ALWAYS cross-reference** internal data with current web information
-- **EXPECT to use both internal and external sources** for most queries
-
-4. Web Search Trigger Examples:
-- "반조리식품 브랜드별 소비현황" → Use internal tools THEN immediately use debug_web_search for comprehensive market analysis
-- "What's the current price of..." → Use rdb_search THEN web search for latest market updates
-- "Nutrition facts for X" → Use rdb_search THEN web search for additional health information
-- "Market trends for..." → Use internal tools THEN web search for current analysis
-- "How to..." → Use vector_db_search THEN web search for latest techniques/methods
-
-FINAL ANSWER CRITERIA:
-- Provide comprehensive answer combining BOTH internal and external sources
-- Structure with clear sections: "Internal Database Findings" and "Current Market Information"
-- Always indicate data sources and recency
-- Confidence levels: High (multiple sources, recent data), Medium (good sources, some gaps), Low (limited sources)
-
-MANDATORY WEB SEARCH SCENARIOS:
-1. **Insufficient Internal Results**: If any internal tool returns fewer than 3 relevant results
-2. **Data Recency Concerns**: For market prices, trends, news, or time-sensitive information
-3. **Completeness Check**: When internal data provides basic facts but lacks context or recent developments
-4. **User Expectations**: Any query suggesting need for current, comprehensive, or trending information
-5. **Missing Topics**: When internal databases don't have information about the queried topic
-
-TOOL USAGE FORMAT:
-Action: tool_name
-Action Input: search_query_or_json_string
-
-SEARCH SEQUENCE EXAMPLE FOR "반조리식품 브랜드별 소비현황":
-1. Try vector_db_search first → likely insufficient for specific market data
-2. IMMEDIATELY use debug_web_search → get comprehensive market analysis
-3. If web search finds detailed reports → use scrape_and_extract_content
-4. Combine all sources for comprehensive Final Answer
-
-PROHIBITED ACTIONS:
-- Do NOT provide incomplete answers when web search could provide better information
-- Do NOT rely solely on internal sources for market analysis or trending topics
-- Do NOT invent or fabricate data when real data is available through web search
-
-Remember: **Your goal is to provide the MOST COMPLETE and CURRENT information possible. Internal databases are starting points, not ending points. Web search is a REQUIRED complement for comprehensive analysis.**
-"""
-
-
-            react_prompt = PromptTemplate(
-                template=system_instruction + "\n\n" + base_prompt.template,
-                input_variables=base_prompt.input_variables
-            )
-
-            # ReAct 에이전트 생성
-            react_agent_runnable = create_react_agent(
-                self.llm, self.available_tools, react_prompt
-            )
-
-
-            return AgentExecutor(
-                agent=react_agent_runnable,
-                tools=self.available_tools,
-                verbose=True,
-                handle_parsing_errors="You must provide a Final Answer now. Stop trying to use tools and give your final response using: Final Answer: [your answer]",
-                max_iterations=4,
-                max_execution_time=120,
-                early_stopping_method="force",  # generate로 변경
-                return_intermediate_steps=True,
-            )
-
-        except Exception as e:
-            print(f"ReAct 에이전트 초기화 실패: {e}")
-            return None
 
     async def _select_best_urls_for_scraping(self, query: str, search_results: List[Dict]) -> List[str]:
         """LLM을 사용하여 스크래핑할 최적의 URL을 선택합니다."""
@@ -2628,121 +2491,3 @@ Decision (YES/NO):
         except Exception as e:
             print(f"- Vector DB 검색 오류: {e}")
             return []
-
-
-# CriticAgent2: 컨텍스트 품질/신뢰도 평가
-class CriticAgent2:
-    def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        self.agent_type = AgentType.CRITIC_2
-
-    async def evaluate(self, state: StreamingAgentState) -> StreamingAgentState:
-        print(">> CRITIC_2 시작")
-        integrated_context = state.integrated_context
-        original_query = state.original_query
-
-        if not integrated_context:
-            state.critic2_result = CriticResult(
-                status="insufficient",
-                suggestion="통합된 맥락이 없어 평가 불가",
-                confidence=0.0,
-                reasoning="맥락 통합 단계 미완료",
-            )
-            state.context_sufficient = False
-            return state
-
-        print(f"- 통합 맥락 길이: {len(integrated_context)}자")
-
-        evaluation_result = await self._evaluate_context_quality(
-            original_query, integrated_context, state.critic1_result
-        )
-
-        print(f"- 평가 결과: {evaluation_result.get('status', 'insufficient')}")
-        print(f"- 평가 이유: {evaluation_result.get('reasoning', 'N/A')}")
-
-        state.critic2_result = CriticResult(**evaluation_result)
-
-        if evaluation_result.get("status") == "sufficient":
-            state.context_sufficient = True
-            print("- 맥락 완성도 충분 - 보고서 생성 가능")
-        else:
-            state.context_sufficient = False
-            print("- 맥락 완성도 부족 - 추가 보완 필요")
-
-        memory = state.get_agent_memory(AgentType.CRITIC_2)
-        memory.add_finding(f"맥락 완성도 평가: {state.context_sufficient}")
-        memory.update_metric(
-            "context_quality_score", evaluation_result.get("confidence", 0.5)
-        )
-        print("\n>> CRITIC_2 완료")
-        return state
-
-    async def _evaluate_context_quality(
-        self, original_query, integrated_context, critic1_result
-    ):
-        critic1_summary = "이전 Critic1의 피드백 없음. (1차 검수 통과)"
-        if critic1_result and critic1_result.status == "insufficient":
-            critic1_summary = f"이전 단계에서 정보 부족 평가가 있었음. (피드백: '{critic1_result.suggestion}')"
-
-        prompt = f"""
-        당신은 최종 보고서 작성을 앞두고, 현재까지 수집 및 통합된 정보가 사용자의 질문에 대한 완벽한 답변이 될 수 있는지 최종 검수하는 수석 분석가입니다.
-
-        ### 최종 검수 기준:
-        1.  **답변의 완성도:** '통합된 맥락'이 '원본 질문'에 대해 완전하고 명확한 답변을 제공하는가? 모호하거나 빠진 부분은 없는가?
-        2.  **논리적 흐름:** 정보들이 자연스럽고 논리적으로 연결되어 있는가? 이야기의 흐름이 매끄러운가?
-        3.  **피드백 반영 여부:** (만약 있다면) '이전 단계 피드백'에서 요구한 내용이 '통합된 맥락'에 잘 반영되었는가?
-        ---
-
-        <원본 질문>
-        "{original_query}"
-
-        <이전 단계 피드백>
-        {critic1_summary}
-
-        <최종 보고서의 기반이 될 통합된 맥락>
-        {integrated_context}
-        ---
-
-        **[최종 검수 결과]** (아래 형식을 반드시 준수하여 답변하세요.)
-        STATUS: sufficient 또는 insufficient
-        REASONING: [판단 근거를 간결하게 작성. 피드백이 잘 반영되었는지 여부를 반드시 언급.]
-        SUGGESTION: [insufficient일 경우, 최종 보고서 생성 전에 무엇을 더 보강해야 할지 구체적으로 제안.]
-        CONFIDENCE: [0.0 ~ 1.0 사이의 신뢰도 점수]
-        """
-        response = await self.chat.ainvoke(prompt)
-        return self._parse_evaluation(response.content)
-
-    def _parse_evaluation(self, response_content):
-        # Critic1과 동일한 파서를 사용해도 무방
-        try:
-            lines = response_content.strip().split("\n")
-            result = {}
-            for line in lines:
-                if line.startswith("STATUS:"):
-                    result["status"] = line.split(":", 1)[1].strip()
-                elif line.startswith("REASONING:"):
-                    result["reasoning"] = line.split(":", 1)[1].strip()
-                elif line.startswith("SUGGESTION:"):
-                    result["suggestion"] = line.split(":", 1)[1].strip()
-                elif line.startswith("CONFIDENCE:"):
-                    try:
-                        result["confidence"] = float(line.split(":", 1)[1].strip())
-                    except:
-                        result["confidence"] = 0.5
-
-            if "status" not in result:
-                result["status"] = "insufficient"
-            if "reasoning" not in result:
-                result["reasoning"] = "판단 근거 없음"
-            if result.get("status") == "insufficient" and not result.get("suggestion"):
-                result["suggestion"] = "내용 보강이 필요합니다."
-
-            return result
-        except Exception as e:
-            print(f"- 파싱 실패: {e}, 기본값 사용")
-            return {
-                "status": "insufficient",
-                "reasoning": "평가 파싱 실패",
-                "suggestion": "맥락 재구성 권장",
-                "confidence": 0.5,
-            }
