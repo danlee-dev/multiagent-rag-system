@@ -14,6 +14,7 @@ import openai
 from datetime import datetime
 import re
 from ...core.config.rag_config import RAGConfig
+from sentence_transformers import SentenceTransformer
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -32,8 +33,8 @@ class MultiIndexRAGSearchEngine:
             es_host or config.ELASTICSEARCH_HOST,
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
         )
-        self.TEXT_INDEX = "documents_text"
-        self.TABLE_INDEX = "documents_table"
+        self.TEXT_INDEX = "bge_text"
+        self.TABLE_INDEX = "bge_table"
         self.config = config
         self.HYBRID_ALPHA = config.HYBRID_ALPHA
         self.TOP_K_RETRIEVAL = config.TOP_K_RETRIEVAL
@@ -52,11 +53,9 @@ class MultiIndexRAGSearchEngine:
     def embed_text(self, text: str) -> List[float]:
         try:
             safe_text = text.encode('utf-8', errors='ignore').decode('utf-8')
-            response = self.client.embeddings.create(
-                input=safe_text,
-                model="text-embedding-ada-002"
-            )
-            return response.data[0].embedding
+            # Hugging Face 모델로 임베딩 생성
+            embedding = self.hf_model.encode(safe_text)
+            return embedding.tolist()
         except Exception as e:
             print(f"임베딩 생성 오류: {e}")
             return []
