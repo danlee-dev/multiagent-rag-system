@@ -66,8 +66,8 @@ class HierarchicalMemorySystem:
 
         # LLM 요약기 초기화
         try:
-            from langchain_openai import ChatOpenAI
-            self.summarizer_llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.3)
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            self.summarizer_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.3)
             self.llm_available = True
             print("- LLM 요약기 초기화 완료")
         except Exception as e:

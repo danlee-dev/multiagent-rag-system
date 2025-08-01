@@ -7,10 +7,29 @@
 """
 import sys
 import json
+import os
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from elasticsearch import Elasticsearch
-import openai
+from datetime import datetime
+import re
+from ...core.config.rag_config import RAGConfig
+from sentence_transformers import SentenceTransformer
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+"""
+멀티 인덱스 RAG 검색 엔진 (JSON 결과 버전)
+- multi_index_search_engine.py의 모든 로직을 포함
+- 결과를 HTML이 아닌 VectorDB.json 파일로 저장
+- rag_config.py만 있으면 동작
+"""
+import sys
+import json
+import numpy as np
+from typing import List, Dict, Any, Optional, Tuple
+from elasticsearch import Elasticsearch
+import google.generativeai as genai
 from datetime import datetime
 import re
 from ...core.config.rag_config import RAGConfig
@@ -22,13 +41,16 @@ if hasattr(sys.stdin, 'reconfigure'):
     sys.stdin.reconfigure(encoding='utf-8')
 
 class MultiIndexRAGSearchEngine:
-    def __init__(self, openai_api_key: str = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
+    def __init__(self, google_api_key: str = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
         if config is None:
             config = RAGConfig()
-        api_key = openai_api_key or config.OPENAI_API_KEY
-        if api_key == "your-openai-api-key-here":
-            raise ValueError("OpenAI API 키를 설정해주세요 (rag_config.py 또는 초기화 파라미터)")
-        self.client = openai.OpenAI(api_key=api_key)
+        api_key = google_api_key or os.getenv('GOOGLE_API_KEY')
+        if not api_key:
+            raise ValueError("Google API 키를 설정해주세요 (환경변수 GOOGLE_API_KEY)")
+        
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        self.client = genai.GenerativeModel('gemini-2.5-flash')
         self.es = Elasticsearch(
             es_host or config.ELASTICSEARCH_HOST,
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
@@ -82,13 +104,8 @@ class MultiIndexRAGSearchEngine:
 
 질문: {query}
 답변:"""
-            response = self.client.chat.completions.create(
-                model=self.HYDE_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.HYDE_MAX_TOKENS,
-                temperature=self.HYDE_TEMPERATURE
-            )
-            hypothetical_doc = response.choices[0].message.content.strip()
+            response = self.client.generate_content(prompt)
+            hypothetical_doc = response.text.strip()
             enhanced_query = f"{query} {hypothetical_doc}"
             return enhanced_query
         except Exception as e:
@@ -117,13 +134,8 @@ class MultiIndexRAGSearchEngine:
 
 이와 같은 형식으로 답변해주세요.
 """
-            response = self.client.chat.completions.create(
-                model=self.HYDE_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.HYDE_MAX_TOKENS,
-                temperature=self.HYDE_TEMPERATURE
-            )
-            hypothetical_doc = response.choices[0].message.content.strip()
+            response = self.client.generate_content(prompt)
+            hypothetical_doc = response.text.strip()
             enhanced_query = f"{query} {hypothetical_doc}"
             return enhanced_query
         except Exception as e:
@@ -366,13 +378,8 @@ class MultiIndexRAGSearchEngine:
                 try:
                     prompt = f"""
 다음 문서를 주어진 질문과 관련된 핵심 내용 위주로 요약해주세요.\n요약 길이: 원본의 {self.SUMMARIZATION_RATIO}% 정도\n질문: {query}\n문서 내용:\n{page_content}\n요약:"""
-                    response = self.client.chat.completions.create(
-                        model="gpt-3.5-turbo",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=self.SUMMARIZATION_MAX_TOKENS,
-                        temperature=0.3
-                    )
-                    summary = response.choices[0].message.content.strip()
+                    response = self.client.generate_content(prompt)
+                    summary = response.text.strip()
                     result["summarized_content"] = summary
                     result["original_length"] = len(page_content)
                     result["summary_length"] = len(summary)
@@ -430,15 +437,15 @@ def search(query: str, top_k: int = 50):
     결과를 json 객체로 반환합니다.
     """
     config = RAGConfig()
-    if config.OPENAI_API_KEY == "your-openai-api-key-here":
-        print("⚠️ rag_config.py에서 OpenAI API 키가 설정되지 않았습니다.")
-        api_key = input("OpenAI API 키를 입력하세요 (또는 Enter로 스킵): ").strip()
+    if config.GOOGLE_API_KEY == "your-google-api-key-here":
+        print("⚠️ rag_config.py에서 Google API 키가 설정되지 않았습니다.")
+        api_key = input("Google API 키를 입력하세요 (또는 Enter로 스킵): ").strip()
         if not api_key:
             print("❌ API 키 없이는 테스트할 수 없습니다.")
             return None
     else:
-        api_key = config.OPENAI_API_KEY
-    search_engine = MultiIndexRAGSearchEngine(openai_api_key=api_key, config=config)
+        api_key = config.GOOGLE_API_KEY
+    search_engine = MultiIndexRAGSearchEngine(google_api_key=api_key, config=config)
     if not query:
         print("검색어가 입력되지 않았습니다.")
         return None

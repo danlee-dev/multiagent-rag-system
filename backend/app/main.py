@@ -528,8 +528,8 @@ class RAGWorkflow:
 
 
         try:
-            from langchain_openai import ChatOpenAI
-            chat = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1)
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1)
 
             # 메모리 컨텍스트도 활용
             memory_info = ""
@@ -576,8 +576,8 @@ class RAGWorkflow:
             context_summary += f"- {result.content[:200]}\n"
 
         try:
-            from langchain_openai import ChatOpenAI
-            chat = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.1)
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1)
 
             # 메모리 컨텍스트도 활용
             memory_info = ""

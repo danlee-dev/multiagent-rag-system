@@ -17,7 +17,7 @@ from langchain import hub
 from langchain.agents import AgentExecutor, create_react_agent
 from langchain.prompts import PromptTemplate
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from pydantic import BaseModel, Field
 
@@ -55,7 +55,8 @@ class DataExtractor:
     """검색 결과에서 실제 수치 데이터를 추출하는 클래스"""
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Gemini 2.5 Flash로 변경 (빠른 수치 데이터 추출)
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
 
     async def extract_numerical_data(self, search_results: List[SearchResult], query: str) -> Dict[str, Any]:
         """검색 결과에서 수치 데이터를 추출"""
@@ -170,7 +171,8 @@ class PlanningAgent:
     """
 
     def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+        # Gemini 2.5 Flash로 변경 (섹션 기반 계획 수립)
+        self.chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.3)
         self.agent_type = AgentType.PLANNING
 
     async def plan(self, state: StreamingAgentState) -> StreamingAgentState:
@@ -181,7 +183,7 @@ class PlanningAgent:
 
         # 1. 보고서 섹션 계획 수립
         print('- 의도 분석 시작...')
-        intent = await self._analyze_intent(query)
+        intent = await self._intention_analysis(query)
         print(f"- 분석된 의도: {intent}")
         query = f"원본 쿼리: {query}\n사용자 의도 분석 결과: {intent}"  # 의도를 쿼리에 추가
         print("- 섹션 계획 수립 시작...")
@@ -298,9 +300,15 @@ class PlanningAgent:
 
     async def _intention_analysis(self, query: str) -> Dict:
         """질문을 분석하여 사용자의 의도 파악"""
-        prompt = f"""당신은 비즈니스 질문 분석 전문가입니다.
-        사용자의 질문의도를 파악하여, 보고서 섹션 계획 수립에 도움이 될 수 있는 정보를 제공해주세요.
-"""
+        prompt = f"""다음 사용자 질문을 분석하여 의도를 간단히 파악해주세요:
+
+질문: "{query}"
+
+다음 형식으로 간단히 답변해주세요:
+- 질문 유형: [정보조회/분석요청/비교/추천/기타]
+- 핵심 관심사: [한 줄로 요약]
+- 분석 범위: [구체적/일반적/광범위]
+- 예상 보고서 형태: [요약형/상세형/비교분석형]"""
 
         try:
             response = await self.chat.ainvoke(prompt)
@@ -628,8 +636,9 @@ class RetrieverAgent:
             graph_db_search,
         ]
 
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        self.chat = ChatOpenAI(model="gpt-4o-mini")
+        # Gemini 2.5 Flash로 변경 (Tool Calling 및 빠른 처리)
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+        self.chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
         # 날짜 정보
         self.current_date = datetime.now()
@@ -639,6 +648,11 @@ class RetrieverAgent:
         # ToolCallingAgent 초기화
         self.tool_calling_agent = ToolCallingAgent(llm=self.llm, tools=self.available_tools)
         self.source_determiner_llm = self.llm.with_structured_output(SearchSourceDecision)
+        
+        # DB 인스턴스 (현재는 None으로 초기화, 향후 실제 DB 연결 시 설정)
+        self.vector_db = None
+        self.rdb = None
+        self.graph_db = None
 
         # 병렬 처리용 스레드 풀
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
@@ -1565,7 +1579,8 @@ class RetrieverAgent:
 # CriticAgent1: 정보량 충분성 평가
 class CriticAgent1:
     def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Gemini 2.5 Flash로 변경 (빠른 정보량 평가)
+        self.chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
         self.agent_type = AgentType.CRITIC_1
 
     async def evaluate(self, state: StreamingAgentState) -> StreamingAgentState:
@@ -1739,8 +1754,8 @@ from typing import Dict, List, Any
 
 class ContextIntegratorAgent:
     def __init__(self):
-        # 최종 보고서 초안의 품질을 높이기 위해 더 강력한 모델을 사용합니다.
-        self.chat = ChatOpenAI(model="gpt-4o", temperature=0.1)
+        # Gemini 2.5 Pro로 변경 (복잡한 데이터 통합 및 고품질 컨텍스트 생성)
+        self.chat = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.1)
         self.agent_type = AgentType.CONTEXT_INTEGRATOR
 
 # ContextIntegratorAgent
@@ -1749,7 +1764,8 @@ from typing import Dict, List, Any
 
 class ContextIntegratorAgent:
     def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o", temperature=0.1)
+        # Gemini 2.5 Pro로 변경 (복잡한 데이터 통합)
+        self.chat = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.1)
         self.agent_type = AgentType.CONTEXT_INTEGRATOR
 
     async def integrate(self, state: StreamingAgentState) -> StreamingAgentState:
@@ -1953,8 +1969,9 @@ class ReportGeneratorAgent:
     """보고서 생성 에이전트"""
 
     def __init__(self):
-        self.streaming_chat = ChatOpenAI(model="gpt-4o", temperature=0.4, streaming=True)
-        self.non_streaming_chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+        # Gemini 2.5 Pro로 변경 (고품질 보고서 생성 및 스트리밍)
+        self.streaming_chat = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0.4)
+        self.non_streaming_chat = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
         self.agent_type = "REPORT_GENERATOR"
 
         self.template_manager = ReportTemplateManager()
@@ -2580,8 +2597,9 @@ class SimpleAnswererAgent:
 
     def __init__(self, vector_db=None):
         self.vector_db = vector_db
-        self.streaming_chat = ChatOpenAI(
-            model="gpt-4o-mini", temperature=0.9, streaming=True
+        # Gemini 2.5 Flash로 변경 (빠른 단순 질문 응답)
+        self.streaming_chat = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", temperature=0.9
         )
         self.agent_type = "SIMPLE_ANSWERER"
 

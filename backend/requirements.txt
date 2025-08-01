@@ -1,7 +1,8 @@
 fastapi==0.116.1
 langchain==0.3.26
 langchain_core==0.3.68
-langchain_openai==0.3.27
+langchain-google-genai==2.0.7
+google-generativeai==0.8.5
 langgraph==0.5.2
 pydantic==2.11.7
 python-dotenv==1.1.1
@@ -13,3 +14,4 @@ playwright
 pypdf
 numpy
 elasticsearch==8.18.1
+sentence-transformers

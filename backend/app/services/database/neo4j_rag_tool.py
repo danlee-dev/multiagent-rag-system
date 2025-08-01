@@ -7,7 +7,7 @@ import asyncio
 
 from dotenv import load_dotenv
 from neo4j import GraphDatabase, basic_auth
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 
 class Neo4jSearchService:
@@ -15,7 +15,7 @@ class Neo4jSearchService:
     def __init__(self):
         """Neo4j 연결 초기화"""
         self.driver = self._init_driver()
-        self.llm_client = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        self.llm_client = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
 
     def _init_driver(self):
         """Neo4j 드라이버 초기화"""

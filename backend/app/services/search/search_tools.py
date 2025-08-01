@@ -19,7 +19,7 @@ from ...core.models.models import ScrapeInput
 
 from playwright.sync_api import sync_playwright
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
@@ -193,7 +193,8 @@ def _extract_key_info(content: str, query: str) -> str:
     """추출된 전체 텍스트에서 LLM을 이용해 핵심 정보를 다시 추출합니다."""
     print(f"  → LLM 분석 시작...")
     try:
-        extractor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Gemini 2.5 Flash로 변경 (빠른 정보 추출)
+        extractor_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
         prompt = ChatPromptTemplate.from_template(
             """당신은 유능한 데이터 분석가입니다. 아래 원본 텍스트에서 사용자의 질문과 가장 관련 있는 핵심 정보, 특히 수치 데이터, 통계, 주요 사실들을 정확하게 추출하고 요약해주세요.
 

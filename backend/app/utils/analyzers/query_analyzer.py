@@ -1,5 +1,5 @@
 from ...core.config.report_config import TeamType, ReportType, Language
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 import json
 import re
 
@@ -7,7 +7,7 @@ class QueryAnalyzer:
     """질문 분석기 - 팀 타입, 언어, 복잡도 분석"""
 
     def __init__(self):
-        self.llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        self.llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1)
 
     @classmethod
     def detect_team_type(cls, query: str) -> TeamType:
@@ -15,7 +15,7 @@ class QueryAnalyzer:
         if not query:
             return TeamType.GENERAL
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1)
 
         prompt = f"""다음 질문이 어느 팀의 업무와 가장 관련이 있는지 분석해줘:
 
@@ -72,7 +72,7 @@ class QueryAnalyzer:
 
         from ...services.templates.report_templates import ReportTemplateManager
 
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.1)
 
         prompt = f"""다음 질문의 복잡도를 분석해줘:
 

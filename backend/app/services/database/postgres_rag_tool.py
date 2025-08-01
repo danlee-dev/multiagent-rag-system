@@ -4,14 +4,16 @@ import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
-from openai import OpenAI
+import google.generativeai as genai
 import typing
 from typing import Dict, Any, List
 from datetime import datetime, timedelta
 
 class KeywordExtractor:
     def __init__(self):
-        self.client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+        api_key = os.getenv('GOOGLE_API_KEY')
+        genai.configure(api_key=api_key)
+        self.client = genai.GenerativeModel('gemini-2.5-flash')
 
     def extract_search_params(self, query: str) -> Dict[str, Any]:
         """LLM을 사용하여 검색 파라미터 추출"""
@@ -51,13 +53,8 @@ JSON만 응답하고 다른 설명은 하지 마세요.
 """
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
-            )
-
-            result = json.loads(response.choices[0].message.content)
+            response = self.client.generate_content(prompt)
+            result = json.loads(response.text)
             print(f"\n>> LLM 추출 결과: {result}")
             return result
 
