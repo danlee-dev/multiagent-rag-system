@@ -648,7 +648,7 @@ class RetrieverAgent:
         # ToolCallingAgent 초기화
         self.tool_calling_agent = ToolCallingAgent(llm=self.llm, tools=self.available_tools)
         self.source_determiner_llm = self.llm.with_structured_output(SearchSourceDecision)
-        
+
         # DB 인스턴스 (현재는 None으로 초기화, 향후 실제 DB 연결 시 설정)
         self.vector_db = None
         self.rdb = None

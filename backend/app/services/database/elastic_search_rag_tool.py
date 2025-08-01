@@ -47,7 +47,7 @@ class MultiIndexRAGSearchEngine:
         api_key = google_api_key or os.getenv('GOOGLE_API_KEY')
         if not api_key:
             raise ValueError("Google API 키를 설정해주세요 (환경변수 GOOGLE_API_KEY)")
-        
+
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         self.client = genai.GenerativeModel('gemini-2.5-flash')
