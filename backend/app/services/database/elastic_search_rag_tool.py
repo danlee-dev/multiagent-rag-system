@@ -33,6 +33,17 @@ class MultiIndexRAGSearchEngine:
             es_host or config.ELASTICSEARCH_HOST,
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
         )
+        try:
+            self.hf_model = SentenceTransformer(
+                "dragonkue/bge-m3-ko",
+                device="cuda"  # GPU 사용
+            )
+        except Exception:
+            # GPU가 없거나 meta tensor 에러가 난다면 CPU로 fallback
+            self.hf_model = SentenceTransformer(
+                "dragonkue/bge-m3-ko",
+                device="cpu"
+            )
         self.TEXT_INDEX = "bge_text"
         self.TABLE_INDEX = "bge_table"
         self.config = config

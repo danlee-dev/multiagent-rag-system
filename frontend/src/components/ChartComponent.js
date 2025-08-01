@@ -95,21 +95,57 @@ const colorPalettes = {
     "#F97316",
     "#3B82F6",
   ],
+  vibrant: [
+    "#FF6B6B",
+    "#4ECDC4",
+    "#45B7D1",
+    "#96CEB4",
+    "#FECA57",
+    "#FF9FF3",
+    "#54A0FF",
+    "#5F27CD",
+    "#00D2D3",
+    "#FF9F43",
+  ],
+  corporate: [
+    "#2C3E50",
+    "#34495E",
+    "#7F8C8D",
+    "#95A5A6",
+    "#BDC3C7",
+    "#3498DB",
+    "#9B59B6",
+    "#E74C3C",
+    "#E67E22",
+    "#F39C12",
+  ],
+  gradient: [
+    "#667eea",
+    "#764ba2",
+    "#f093fb",
+    "#f5576c",
+    "#4facfe",
+    "#00f2fe",
+    "#43e97b",
+    "#38f9d7",
+    "#ffecd2",
+    "#fcb69f",
+  ],
 };
 
 
 const convertBackendDataToChartData = (rawData, chartType) => {
+  // 1. 이벤트 기반 데이터 (프로젝트 타임라인 등)
   if (rawData.events && Array.isArray(rawData.events)) {
     const events = rawData.events;
 
-
     if (chartType === "timeline" || chartType === "timeseries") {
       return {
-        labels: events.map((event) => event.date),
+        labels: events.map((event) => event.date || event.time || event.label),
         datasets: [
           {
             label: "프로젝트 진행도",
-            data: events.map((_, index) => index + 1),
+            data: events.map((event, index) => event.value || event.progress || index + 1),
             borderColor: "#4F46E5",
             backgroundColor: "#4F46E520",
             tension: 0.4,
@@ -125,14 +161,29 @@ const convertBackendDataToChartData = (rawData, chartType) => {
       };
     }
 
+    if (chartType === "gantt") {
+      return {
+        labels: events.map((event) => event.task || event.event || event.label),
+        datasets: [
+          {
+            label: "작업 기간",
+            data: events.map((event) => event.duration || event.value || 1),
+            backgroundColor: events.map((_, index) => {
+              const colors = ["#4F46E5", "#7C3AED", "#EC4899", "#10B981", "#F59E0B"];
+              return colors[index % colors.length];
+            }),
+          },
+        ],
+      };
+    }
 
     if (chartType === "bar" || chartType === "column") {
       return {
-        labels: events.map((event) => event.event),
+        labels: events.map((event) => event.event || event.label || event.name),
         datasets: [
           {
             label: "프로젝트 일정",
-            data: events.map((_, index) => index + 1),
+            data: events.map((event, index) => event.value || event.count || index + 1),
             backgroundColor: ["#4F46E5", "#7C3AED", "#EC4899", "#10B981"],
           },
         ],
@@ -140,12 +191,181 @@ const convertBackendDataToChartData = (rawData, chartType) => {
     }
   }
 
+  // 2. 메트릭 기반 데이터 (성능 지표, KPI 등)
+  if (rawData.metrics && Array.isArray(rawData.metrics)) {
+    const metrics = rawData.metrics;
 
+    if (chartType === "radar") {
+      return {
+        labels: metrics.map(m => m.name || m.label),
+        datasets: [
+          {
+            label: "성능 지표",
+            data: metrics.map(m => m.value || m.score),
+            borderColor: "#4F46E5",
+            backgroundColor: "#4F46E520",
+            pointBackgroundColor: "#4F46E5",
+          },
+        ],
+      };
+    }
+
+    if (chartType === "pie" || chartType === "doughnut") {
+      return {
+        labels: metrics.map(m => m.name || m.label),
+        datasets: [
+          {
+            data: metrics.map(m => m.value || m.percentage),
+            backgroundColor: colorPalettes.modern.slice(0, metrics.length),
+          },
+        ],
+      };
+    }
+  }
+
+  // 3. 시계열 데이터 (매출, 트래픽 등)
+  if (rawData.timeseries && Array.isArray(rawData.timeseries)) {
+    const timeseries = rawData.timeseries;
+
+    return {
+      labels: timeseries.map(t => t.date || t.time || t.period),
+      datasets: [
+        {
+          label: rawData.label || "시계열 데이터",
+          data: timeseries.map(t => t.value || t.amount),
+          borderColor: "#4F46E5",
+          backgroundColor: "#4F46E520",
+          tension: 0.4,
+        },
+      ],
+    };
+  }
+
+  // 4. 카테고리별 데이터 (부서별, 지역별 등)
+  if (rawData.categories && Array.isArray(rawData.categories)) {
+    const categories = rawData.categories;
+
+    if (chartType === "stacked" && rawData.series) {
+      return {
+        labels: categories.map(c => c.name || c.label),
+        datasets: rawData.series.map((series, index) => ({
+          label: series.name || `시리즈 ${index + 1}`,
+          data: categories.map(c => c.values ? c.values[index] || 0 : c.value || 0),
+          backgroundColor: colorPalettes.modern[index % colorPalettes.modern.length],
+          stack: "Stack 0",
+        })),
+      };
+    }
+
+    return {
+      labels: categories.map(c => c.name || c.label),
+      datasets: [
+        {
+          label: rawData.label || "카테고리 데이터",
+          data: categories.map(c => c.value || c.count),
+          backgroundColor: colorPalettes.modern.slice(0, categories.length),
+        },
+      ],
+    };
+  }
+
+  // 5. 스캐터/버블 차트용 좌표 데이터
+  if (rawData.points && Array.isArray(rawData.points)) {
+    const points = rawData.points;
+
+    if (chartType === "bubble") {
+      return {
+        datasets: [
+          {
+            label: rawData.label || "버블 차트",
+            data: points.map(p => ({
+              x: p.x,
+              y: p.y,
+              r: p.size || p.r || 10,
+            })),
+            backgroundColor: colorPalettes.modern.slice(0, points.length),
+          },
+        ],
+      };
+    }
+
+    if (chartType === "scatter") {
+      return {
+        datasets: [
+          {
+            label: rawData.label || "스캐터 차트",
+            data: points.map(p => ({
+              x: p.x,
+              y: p.y,
+            })),
+            backgroundColor: "#4F46E5",
+            borderColor: "#4F46E5",
+          },
+        ],
+      };
+    }
+  }
+
+  // 6. 복합 차트 데이터 (여러 타입 조합)
+  if (rawData.mixed && Array.isArray(rawData.mixed)) {
+    const mixed = rawData.mixed;
+
+    return {
+      labels: mixed[0]?.labels || [],
+      datasets: mixed.map((dataset, index) => ({
+        type: dataset.type || (index === 0 ? 'bar' : 'line'),
+        label: dataset.label || `데이터셋 ${index + 1}`,
+        data: dataset.data || [],
+        backgroundColor: dataset.backgroundColor || colorPalettes.modern[index % colorPalettes.modern.length],
+        borderColor: dataset.borderColor || colorPalettes.modern[index % colorPalettes.modern.length],
+        yAxisID: dataset.yAxisID || (index === 0 ? 'y' : 'y1'),
+      })),
+    };
+  }
+
+  // 7. 원시 숫자 배열 데이터
+  if (Array.isArray(rawData) && rawData.length > 0 && typeof rawData[0] === 'number') {
+    return {
+      labels: rawData.map((_, index) => `항목 ${index + 1}`),
+      datasets: [
+        {
+          label: "데이터",
+          data: rawData,
+          backgroundColor: colorPalettes.modern.slice(0, rawData.length),
+        },
+      ],
+    };
+  }
+
+  // 8. 객체 배열 데이터 (일반적인 형태)
+  if (Array.isArray(rawData) && rawData.length > 0 && typeof rawData[0] === 'object') {
+    const firstItem = rawData[0];
+    const labelKey = Object.keys(firstItem).find(key =>
+      ['name', 'label', 'category', 'date', 'time'].includes(key)
+    ) || Object.keys(firstItem)[0];
+
+    const valueKey = Object.keys(firstItem).find(key =>
+      ['value', 'count', 'amount', 'score', 'percentage'].includes(key)
+    ) || Object.keys(firstItem)[1] || Object.keys(firstItem)[0];
+
+    return {
+      labels: rawData.map(item => item[labelKey]),
+      datasets: [
+        {
+          label: valueKey || "데이터",
+          data: rawData.map(item => item[valueKey]),
+          backgroundColor: colorPalettes.modern.slice(0, rawData.length),
+        },
+      ],
+    };
+  }
+
+  // 9. Chart.js 표준 형태는 그대로 반환
   if (rawData.labels && rawData.datasets) {
     return rawData;
   }
 
-
+  // 10. 기본값
   return {
     labels: [],
     datasets: [],
@@ -170,19 +390,30 @@ const chartComponents = {
   polararea: PolarArea,
   scatter: Scatter,
   bubble: Bubble,
-  area: Line,
+  area: Line, // fill 옵션으로 구분
   column: Bar,
   donut: Doughnut,
   polar: PolarArea,
   horizontalbar: Bar,
   stacked: Bar,
-  mixed: Line,
+  mixed: Line, // 복합 차트는 Line 컴포넌트 사용
   funnel: Bar,
   waterfall: Bar,
   gauge: Doughnut,
   timeseries: Line,
   timeline: Line,
   gantt: Bar,
+  // 새로운 차트 타입들
+  multiline: Line, // 다중 라인 차트
+  groupedbar: Bar, // 그룹화된 바 차트
+  stackedarea: Line, // 스택된 영역 차트
+  combo: Line, // 콤보 차트 (바+라인)
+  heatmap: Bar, // 히트맵 (바 차트로 구현)
+  treemap: Bar, // 트리맵 (바 차트로 구현)
+  sankey: Bar, // 산키 다이어그램 (바 차트로 근사)
+  candlestick: Line, // 캔들스틱 (라인 차트로 근사)
+  violin: Bar, // 바이올린 플롯 (바 차트로 근사)
+  boxplot: Bar, // 박스 플롯 (바 차트로 근사)
 };
 
 // 고급 옵션 설정
@@ -625,6 +856,233 @@ const getAdvancedOptions = (chartType, chartConfig) => {
         },
       };
 
+    case "mixed":
+    case "combo":
+    case "multiline":
+      return {
+        ...baseOptions,
+        scales: {
+          x: {
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+              lineWidth: 1,
+              drawBorder: false,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+              padding: 12,
+            },
+          },
+          y: {
+            type: "linear",
+            display: true,
+            position: "left",
+            beginAtZero: true,
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+              lineWidth: 1,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+          y1: {
+            type: "linear",
+            display: true,
+            position: "right",
+            beginAtZero: true,
+            grid: {
+              drawOnChartArea: false,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+        },
+      };
+
+    case "stackedarea":
+      return {
+        ...baseOptions,
+        scales: {
+          x: {
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+              lineWidth: 1,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+          y: {
+            stacked: true,
+            beginAtZero: true,
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+              lineWidth: 1,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+        },
+        interaction: {
+          mode: "index",
+          intersect: false,
+        },
+      };
+
+    case "groupedbar":
+      return {
+        ...baseOptions,
+        scales: {
+          x: {
+            grid: {
+              display: false,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+              maxRotation: 45,
+            },
+          },
+          y: {
+            beginAtZero: true,
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+              lineWidth: 1,
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+        },
+        plugins: {
+          ...baseOptions.plugins,
+          legend: {
+            ...baseOptions.plugins.legend,
+            position: "top",
+          },
+        },
+      };
+
+    case "heatmap":
+      return {
+        ...baseOptions,
+        scales: {
+          x: {
+            type: "category",
+            grid: {
+              display: false,
+            },
+            ticks: {
+              font: {
+                size: 11,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+          y: {
+            type: "category",
+            grid: {
+              display: false,
+            },
+            ticks: {
+              font: {
+                size: 11,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+        },
+        elements: {
+          bar: {
+            borderWidth: 1,
+            borderColor: "#FFFFFF",
+          },
+        },
+      };
+
+    case "candlestick":
+      return {
+        ...baseOptions,
+        scales: {
+          x: {
+            type: "time",
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+          y: {
+            beginAtZero: false,
+            grid: {
+              display: true,
+              color: "rgba(156, 163, 175, 0.3)",
+            },
+            ticks: {
+              font: {
+                size: 12,
+                weight: "500",
+                family: "'Inter', sans-serif",
+              },
+              color: "#6B7280",
+            },
+          },
+        },
+      };
+
     default:
       return baseOptions;
   }
@@ -644,7 +1102,10 @@ const preprocessAdvancedChartData = (chartType, data) => {
   }
 
   let processedData = { ...convertedData };
-  const palette = colorPalettes.modern;
+
+  // 차트 설정에서 색상 팔레트 선택 (기본값: modern)
+  const paletteType = chartConfig.palette || "modern";
+  const palette = colorPalettes[paletteType] || colorPalettes.modern;
 
   processedData.datasets = processedData.datasets.map(
     (dataset, datasetIndex) => {
@@ -771,6 +1232,97 @@ const preprocessAdvancedChartData = (chartType, data) => {
             borderWidth: 2,
           };
 
+        case "mixed":
+        case "combo":
+          return {
+            ...dataset,
+            type: dataset.type || (datasetIndex === 0 ? 'bar' : 'line'),
+            backgroundColor: dataset.type === 'line' ? `${baseColor}20` : baseColor,
+            borderColor: baseColor,
+            borderWidth: dataset.type === 'line' ? 3 : 0,
+            fill: dataset.type === 'line' ? false : undefined,
+            tension: dataset.type === 'line' ? 0.4 : undefined,
+            yAxisID: dataset.yAxisID || (datasetIndex === 0 ? 'y' : 'y1'),
+          };
+
+        case "multiline":
+          return {
+            ...dataset,
+            borderColor: baseColor,
+            backgroundColor: `${baseColor}20`,
+            fill: false,
+            tension: 0.4,
+            borderWidth: 3,
+            pointBackgroundColor: "#FFFFFF",
+            pointBorderColor: baseColor,
+            pointBorderWidth: 2,
+            pointRadius: 4,
+          };
+
+        case "stackedarea":
+          return {
+            ...dataset,
+            borderColor: baseColor,
+            backgroundColor: `${baseColor}60`,
+            fill: true,
+            tension: 0.4,
+            borderWidth: 2,
+          };
+
+        case "groupedbar":
+          return {
+            ...dataset,
+            backgroundColor: baseColor,
+            borderColor: `${baseColor}CC`,
+            borderWidth: 1,
+            borderRadius: 4,
+          };
+
+        case "heatmap":
+          // 히트맵의 경우 데이터 값에 따라 색상 강도 조절
+          return {
+            ...dataset,
+            backgroundColor: dataset.data.map((value, index) => {
+              const maxValue = Math.max(...dataset.data);
+              const intensity = value / maxValue;
+              return `${baseColor}${Math.floor(intensity * 255).toString(16).padStart(2, '0')}`;
+            }),
+            borderColor: "#FFFFFF",
+            borderWidth: 1,
+          };
+
+        case "candlestick":
+          // 캔들스틱은 상승/하락에 따라 색상 구분
+          return {
+            ...dataset,
+            borderColor: dataset.data.map((candle, index) =>
+              candle.close > candle.open ? "#10B981" : "#EF4444"
+            ),
+            backgroundColor: dataset.data.map((candle, index) =>
+              candle.close > candle.open ? "#10B98120" : "#EF444420"
+            ),
+            borderWidth: 2,
+          };
+
+        case "treemap":
+        case "sankey":
+          return {
+            ...dataset,
+            backgroundColor: palette.slice(0, dataset.data.length),
+            borderColor: "#FFFFFF",
+            borderWidth: 2,
+          };
+
+        case "violin":
+        case "boxplot":
+          return {
+            ...dataset,
+            backgroundColor: `${baseColor}40`,
+            borderColor: baseColor,
+            borderWidth: 2,
+            borderRadius: 0,
+          };
+
         default:
           return {
             ...dataset,
@@ -800,6 +1352,80 @@ const preprocessAdvancedChartData = (chartType, data) => {
         (i) => dataset.backgroundColor[i]
       );
     }
+  }
+
+  // waterfall 차트의 경우 누적 계산
+  if (
+    chartType === "waterfall" &&
+    processedData.datasets[0] &&
+    Array.isArray(processedData.datasets[0].data)
+  ) {
+    const dataset = processedData.datasets[0];
+    let cumulative = 0;
+    const waterfallData = dataset.data.map((value, index) => {
+      if (index === 0) {
+        cumulative = value;
+        return [0, value];
+      } else {
+        const start = cumulative;
+        cumulative += value;
+        return [start, cumulative];
+      }
+    });
+
+    processedData.datasets[0].data = waterfallData;
+  }
+
+  // heatmap 차트의 경우 2D 데이터를 1D로 변환
+  if (chartType === "heatmap" && data.matrix && Array.isArray(data.matrix)) {
+    const matrix = data.matrix;
+    const flatData = [];
+    const labels = [];
+
+    matrix.forEach((row, rowIndex) => {
+      row.forEach((value, colIndex) => {
+        flatData.push(value);
+        labels.push(`${rowIndex}-${colIndex}`);
+      });
+    });
+
+    processedData = {
+      labels: labels,
+      datasets: [
+        {
+          data: flatData,
+          backgroundColor: flatData.map(value => {
+            const maxValue = Math.max(...flatData);
+            const intensity = value / maxValue;
+            return `rgba(79, 70, 229, ${intensity})`;
+          }),
+        },
+      ],
+    };
+  }
+
+  // candlestick 차트의 경우 OHLC 데이터 처리
+  if (chartType === "candlestick" && data.ohlc && Array.isArray(data.ohlc)) {
+    const ohlc = data.ohlc;
+
+    processedData = {
+      labels: ohlc.map(candle => candle.date || candle.time),
+      datasets: [
+        {
+          label: "Price",
+          data: ohlc.map(candle => ({
+            x: candle.date || candle.time,
+            y: [candle.open, candle.high, candle.low, candle.close],
+          })),
+          borderColor: ohlc.map(candle =>
+            candle.close > candle.open ? "#10B981" : "#EF4444"
+          ),
+          backgroundColor: ohlc.map(candle =>
+            candle.close > candle.open ? "#10B98140" : "#EF444440"
+          ),
+        },
+      ],
+    };
   }
 
   return processedData;
@@ -959,7 +1585,9 @@ export function ChartComponent({ chartConfig }) {
         <small style={{ color: "#92400E", fontSize: "12px" }}>
           지원 타입: line, bar, pie, doughnut, radar, polarArea, scatter,
           bubble, area, column, horizontalBar, stacked, funnel, waterfall,
-          gauge, timeseries, timeline
+          gauge, timeseries, timeline, gantt, mixed, combo, multiline,
+          groupedbar, stackedarea, heatmap, treemap, sankey, candlestick,
+          violin, boxplot
         </small>
       </div>
     );

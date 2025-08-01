@@ -281,7 +281,9 @@ def vector_db_search(query: str, top_k = 10) -> str:
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
     """
     config = RAGConfig()
+    print("1")
     config.OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+    print("1")
     search_engine = MultiIndexRAGSearchEngine(openai_api_key=config.OPENAI_API_KEY, config=config)
 
     print(f"\n>> Vector DB 검색 시작: {query}")

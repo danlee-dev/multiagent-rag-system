@@ -136,7 +136,7 @@ class RAGWorkflow:
             self.check_info_sufficient,
             {"sufficient": "context_integration", "insufficient": "planning"},
         )
-        
+
         self.graph.add_edge("context_integration", "report_generation")
         self.graph.add_edge("report_generation", END)
 
@@ -349,7 +349,7 @@ class RAGWorkflow:
 
         print(">>> CONTEXT INTEGRATION 완료")
         return state
-    
+
 
     def _enhance_search_results_with_sources(self, results: List[SearchResult], source_type: str):
         """검색 결과에 출처 정보 강화"""
@@ -507,7 +507,7 @@ class RAGWorkflow:
         # 최종 출처 정보를 step_results에 저장 (프론트엔드에서 사용)
         if source_collection_data:
             state.add_step_result("final_sources", source_collection_data)
-            
+
         print(">>> STREAMING REPORT GENERATION 완료")
         return state
 

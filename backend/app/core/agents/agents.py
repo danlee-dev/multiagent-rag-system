@@ -7,7 +7,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, AsyncGenerator, Dict, List, Optional, Set
+from typing import Any, AsyncGenerator, Dict, List, Optional, Set, Literal
 
 # 서드파티 라이브러리
 import requests
@@ -19,10 +19,9 @@ from langchain.prompts import PromptTemplate
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
-from langchain_core.pydantic_v1 import BaseModel as LangchainBaseModel
+from pydantic import BaseModel, Field
 
 from typing import Dict, Optional, Literal
-from pydantic import Field
 
 # 로컬 imports
 from ...core.config.report_config import TeamType, ReportType, Language
@@ -141,16 +140,16 @@ class DataExtractor:
 
 
 # ==============================================================================
-# ⭐️ Pydantic 모델 정의: 안정적인 구조화를 위해 클래스 외부에 정의
+# Pydantic 모델 정의: 안정적인 구조화를 위해 클래스 외부에 정의
 # ==============================================================================
-class ResourceRequirements(LangchainBaseModel):
+class ResourceRequirements(BaseModel):
     """실행 계획에 필요한 리소스 요구사항을 정의합니다."""
     search_needed: bool = Field(description="정보 검색이 필요한지 여부")
     react_needed: bool = Field(description="자체 추론 루프(Tool Calling)가 필요한지 여부")
     multi_agent_needed: bool = Field(description="다중 에이전트 협업이 필요한지 여부")
     estimated_time: Literal['fast', 'medium', 'slow', 'very_slow'] = Field(description="예상 소요 시간")
 
-class ComplexityAnalysis(LangchainBaseModel):
+class ComplexityAnalysis(BaseModel):
     """사용자 질문의 복잡도 분석 결과를 담는 데이터 구조입니다."""
     complexity_level: Literal['SIMPLE', 'MEDIUM', 'COMPLEX', 'SUPER_COMPLEX'] = Field(description="분석된 복잡도 수준")
     execution_strategy: Literal['direct_answer', 'basic_search', 'full_react', 'multi_agent'] = Field(description="복잡도에 따른 실행 전략")
@@ -158,7 +157,7 @@ class ComplexityAnalysis(LangchainBaseModel):
     resource_requirements: ResourceRequirements = Field(description="필요한 리소스 요구사항")
     expected_output_type: Literal['simple_text', 'analysis', 'report', 'comprehensive_strategy'] = Field(description="예상되는 결과물 유형")
 
-class DecomposedQuery(LangchainBaseModel):
+class DecomposedQuery(BaseModel):
     """사용자의 복잡한 질문을 해결 가능한 여러 개의 하위 질문으로 분해한 결과입니다."""
     sub_queries: List[str] = Field(
         description="분해된 2~5개의 간단하고 명확하며 독립적으로 검색 가능한 하위 질문 목록"
@@ -166,188 +165,220 @@ class DecomposedQuery(LangchainBaseModel):
 
 class PlanningAgent:
     """
-    4단계 복잡도 분류 및 쿼리 분해를 지원하는 향상된 계획 수립 에이전트.
-    Tool Calling을 사용하여 안정적으로 분석 결과를 구조화합니다.
-    - SIMPLE: 직접 답변 가능
-    - MEDIUM: 기본 검색 + 간단 분석
-    - COMPLEX: 자체 Reasoning Loop 활용
-    - SUPER_COMPLEX: 다중 에이전트 협업
+    섹션 기반 보고서 계획 수립 에이전트.
+    질문을 분석하여 필요한 섹션을 나누고, 각 섹션별로 필요한 정보 수집 쿼리를 생성합니다.
     """
 
     def __init__(self):
-        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-        # ⭐️ 복잡도 분석용 LLM과 쿼리 분해용 LLM을 별도로 초기화
-        self.structured_llm = self.chat.with_structured_output(ComplexityAnalysis)
-        self.decomposer_llm = self.chat.with_structured_output(DecomposedQuery)
+        self.chat = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
         self.agent_type = AgentType.PLANNING
 
     async def plan(self, state: StreamingAgentState) -> StreamingAgentState:
-        """질문을 분석하고, 필요 시 분해하여 최적의 실행 계획 수립"""
-        print(">> PLANNING 단계 시작 (복잡도 분석 및 쿼리 분해)")
+        """질문을 분석하여 섹션 기반 계획을 수립하고 정보 수집 쿼리를 생성"""
+        print(">> PLANNING 단계 시작 (섹션 분할 및 쿼리 생성)")
         query = state.original_query
         print(f"- 원본 쿼리: {query}")
 
-        # 이전 단계 피드백 수집
-        feedback_context = self._collect_feedback(state)
-        if feedback_context:
-            print(f"- 피드백 반영: {feedback_context}")
+        # 1. 보고서 섹션 계획 수립
+        print('- 의도 분석 시작...')
+        intent = await self._analyze_intent(query)
+        print(f"- 분석된 의도: {intent}")
+        query = f"원본 쿼리: {query}\n사용자 의도 분석 결과: {intent}"  # 의도를 쿼리에 추가
+        print("- 섹션 계획 수립 시작...")
+        section_plan = await self._create_section_plan(query)
+        print(f"- 섹션 계획: {section_plan}")
 
-        # ⭐️ Tool Calling을 사용하는 수정된 분석 함수를 호출합니다.
-        complexity_analysis_model = await self._analyze_query_complexity_with_tool_calling(
-            query, feedback_context
-        )
-        # ⭐️ Pydantic 모델을 나중 단계에서 사용하기 편한 딕셔너리 형태로 변환합니다.
-        complexity_analysis = complexity_analysis_model.dict()
-        
-        print(f"- 복잡도 분석 결과: {complexity_analysis}")
+        # 2. 섹션별 정보 수집 쿼리 생성
+        sub_queries = []
+        sections = section_plan.get('sections', [])
 
-        # 복잡도와 전략 값을 소문자로 변환
-        complexity_mapping = {
-            "SIMPLE": "simple",
-            "MEDIUM": "medium",
-            "COMPLEX": "complex",
-            "SUPER_COMPLEX": "super_complex",
-            "simple": "simple",
-            "medium": "medium",
-            "complex": "complex",
-            "super_complex": "super_complex",
-        }
+        if not sections:  # 섹션이 없으면 단순 질문으로 처리
+            print("- 간단한 질문으로 판단, 원본 쿼리만 사용")
+            sub_queries = [query]
+        else:
+            print("- 섹션별 정보 수집 쿼리 생성 시작...")
+            for i, section in enumerate(sections):
+                section_name = section.get('name', f'섹션 {i+1}')
+                section_queries = await self._generate_section_queries(query, section)
+                print(f"  * {section_name}: {len(section_queries)}개 쿼리 생성")
+                sub_queries.extend(section_queries)
 
-        raw_complexity = complexity_analysis.get("complexity_level", "MEDIUM")
-        # ⭐️ Pydantic 모델이 정확한 값을 보장하므로 strategy_mapping이 더 이상 필요 없습니다.
-        mapped_strategy = complexity_analysis.get("execution_strategy", "basic_search")
-        mapped_complexity = complexity_mapping.get(raw_complexity, "medium")
+        print(f"- 총 {len(sub_queries)}개의 정보 수집 쿼리 생성 완료")
 
-        sub_queries = [query]  # 기본값은 원본 쿼리
-        # ⭐️ 복잡도가 'complex' 또는 'super_complex'일 경우에만 쿼리 분해 실행
-        if mapped_complexity in ["complex", "super_complex"]:
-            print("- 복잡한 질문 감지, 쿼리 분해 시작...")
-            try:
-                decomposed_model = await self._decompose_query(query)
-                # 분해된 질문이 1개이거나, 원본과 너무 유사하면 원본 쿼리 사용
-                if len(decomposed_model.sub_queries) > 1:
-                    sub_queries = decomposed_model.sub_queries
-                print(f"- 분해된 하위 질문: {sub_queries}")
-            except Exception as e:
-                print(f"- 쿼리 분해 실패, 원본 쿼리 사용: {e}")
-
-        execution_plan = f"'{query}'에 대한 분석 계획 수립. 총 {len(sub_queries)}개의 하위 작업으로 분할. 실행 전략: {mapped_strategy}"
-
+        # 3. 상태 업데이트
         state.query_plan = QueryPlan(
             original_query=query,
-            sub_queries=sub_queries, # ⭐️ 분해된 하위 쿼리 리스트를 저장
-            estimated_complexity=mapped_complexity,
-            execution_strategy=mapped_strategy,
-            resource_requirements=complexity_analysis.get("resource_requirements", {}),
+            sub_queries=sub_queries,
+            estimated_complexity="adaptive",  # 섹션 기반으로 적응적 처리
+            execution_strategy="section_based",
+            resource_requirements={
+                "sections": sections,
+                "total_queries": len(sub_queries),
+                "report_structure": section_plan
+            },
         )
 
         state.planning_complete = True
-        print(f">> PLANNING 단계 완료 - 복잡도: {mapped_complexity}")
+        print(f">> PLANNING 단계 완료 - {len(sections)}개 섹션, {len(sub_queries)}개 쿼리")
         return state
 
-    def _collect_feedback(self, state: StreamingAgentState) -> Optional[str]:
-        """이전 단계의 피드백을 수집 (Critic2 관련 로직 제거)"""
-        if state.critic1_result and state.critic1_result.status == "insufficient":
-            return f"초기 수집 피드백: {state.critic1_result.suggestion}"
-        return None
+    async def _create_section_plan(self, query: str) -> Dict:
+        """질문을 분석하여 보고서에 필요한 섹션을 계획"""
+        prompt = f"""당신은 비즈니스 보고서 구조 설계 전문가입니다.
+사용자의 질문을 분석하여 완성도 높은 보고서를 작성하기 위해 필요한 섹션들을 계획해주세요.
 
-    # ⭐️ 쿼리 분해를 위한 전용 함수
-    async def _decompose_query(self, query: str) -> DecomposedQuery:
-        """복잡한 질문을 간단한 하위 질문 여러 개로 분해합니다 (Tool Calling 방식)."""
-        prompt = f"""당신은 사용자의 복잡하고 모호한 질문을 명확하고 독립적으로 검색 가능한 여러 개의 하위 질문으로 분해하는 전문가입니다.
-
-        ## 원본 질문
-        "{query}"
-
-        ## 작업 지침
-        1. 원본 질문의 핵심 의도를 파악하세요.
-        2. 질문을 2~5개의 더 작고 구체적인 하위 질문으로 나누세요.
-        3. 각 하위 질문은 독립적으로 검색하거나 도구를 통해 답변할 수 있어야 합니다.
-        4. 원래 질문의 모든 측면이 하위 질문에 포함되도록 하세요.
-
-        ## 예시
-        - 원본: "서울의 사과와 부산의 배 가격을 비교하고, 최근 관련 뉴스를 찾아줘."
-        - 분해 결과: ["서울 지역의 최근 사과 가격 정보 찾아줘", "부산 지역의 최근 배 가격 정보 찾아줘", "최근 사과와 배 가격 관련 뉴스 기사 3개 찾아줘"]
-        
-        - 원본: "기후 변화가 국내 쌀 생산량에 미치는 영향과 정부의 대응 정책을 분석해줘."
-        - 분해 결과: ["최근 5년간 국내 기후 변화 데이터 요약해줘", "기후 변화와 국내 쌀 생산량의 상관관계에 대한 자료 찾아줘", "기후 변화 관련 대한민국 정부의 농업 정책 문서를 찾아줘"]
-        """
-        try:
-            decomposed_result = await self.decomposer_llm.ainvoke(prompt)
-            return decomposed_result
-        except Exception as e:
-            print(f"- 쿼리 분해 중 오류 발생: {e}")
-            return DecomposedQuery(sub_queries=[query])
-
-    async def _analyze_query_complexity_with_tool_calling(
-        self, query: str, feedback: Optional[str] = None
-    ) -> ComplexityAnalysis:
-        """질문을 4단계 복잡도로 분석 (Tool Calling 방식)"""
-        feedback_section = ""
-        if feedback:
-            feedback_section = f"""
-## 이전 시도 피드백
-{feedback}
-위 피드백을 고려하여 분석해주세요."""
-
-        # ⭐️ LLM이 JSON 구조 대신 분석에만 집중하도록 프롬프트를 간소화
-        prompt = f"""당신은 세계 최고 수준의 AI 시스템 아키텍트입니다. 사용자의 질문을 4단계 복잡도로 정확히 분류하고, 그에 맞는 실행 전략과 필요 리소스를 판단해야 합니다.
-
-{feedback_section}
-
-## 분석 대상 질문
+## 원본 질문
 "{query}"
 
-## 4단계 복잡도 분류 기준
+## 섹션 계획 원칙
+1. **유연성**: 질문의 복잡도와 범위에 따라 자연스럽게 섹션 수를 결정하고, 섹션이 필요하지 않을 수도 있음
+2. **간단한 질문**: 특별한 섹션 구분이 필요 없으면 섹션 없음으로 처리
+3. **복잡한 질문**: 논리적이고 체계적인 섹션으로 구성
+4. **실용성**: 각 섹션이 명확한 목적과 가치를 가져야 함
+5. **차별화**: 각 섹션은 독립적이고 중복되지 않도록 구성
 
-### SIMPLE (직접 답변)
-- **특징**: 기본 정의, 간단한 계산 등 추가적인 정보 검색이나 깊은 분석이 필요 없는 경우입니다.
-- **답변 형태**: 1~2개의 문장으로 즉시 답변이 가능합니다.
-- **예시**: "아마란스가 뭐야?", "100 더하기 200은?"
-- **실행 전략**: "direct_answer"
+## 질문 유형별 가이드
 
-### MEDIUM (기본 검색 + 간단 분석)
-- **특징**: 최신 정보나 두세 가지 사실을 비교하는 질문입니다. 1~2개의 신뢰할 수 있는 소스에서 정보를 찾아 종합하고 요약해야 합니다.
-- **답변 형태**: 몇 개의 단락으로 구성된 정보성 답변입니다.
-- **예시**: "오늘 전국 사과 평균 도매 시세는?", "퀴노아와 렌틸콩의 영양성분 차이점 알려줘."
-- **실행 전략**: "basic_search"
+### 단순 정보 요청 (섹션 불필요)
+- 예: "오늘 사과 가격은?", "김치의 영양성분은?"
+- 처리: 섹션 없음, 직접 답변
 
-### COMPLEX (자체 추론 루프)
-- **특징**: 여러 단계의 추론과 다양한 소스(DB, 웹 등)의 정보를 종합적으로 분석해야 하는 질문입니다. 전략적 사고와 깊은 맥락 이해가 필요합니다.
-- **답변 형태**: 특정 주제에 대한 상세 분석 보고서 형식입니다.
-- **예시**: "최근 이상 기후가 국내 쌀 생산량 및 가격에 미친 영향에 대한 분석 보고서를 작성해줘.", "MZ세대를 타겟으로 한 새로운 대체 우유 마케팅 전략을 수립해줘."
-- **실행 전략**: "full_react"
+### 분석 요청 (2-4개 섹션)
+- 예: "프리미엄 소스 시장 현황 분석해줘"
+- 섹션 예시: 시장 규모, 주요 업체, 소비 트렌드, 향후 전망
 
-### SUPER_COMPLEX (다중 에이전트 협업)
-- **특징**: 경제, 사회, 기술 등 여러 영역에 걸친 매우 복잡하고 종합적인 분석이 필요합니다. 장기적인 계획이나 다각적인 전략 수립을 요구합니다.
-- **답변 형태**: 여러 전문가의 관점이 포함된 종합 전략 보고서입니다.
-- **예시**: "국내 농산물 유통 구조를 개선하기 위한 5년 장기 디지털 전환(DX) 전략을 수립해줘.", "기후 변화에 대응하기 위한 한국의 지속 가능한 미래 식량 안보 전략 보고서."
-- **실행 전략**: "multi_agent"
+### 전략/계획 요청 (3-6개 섹션)
+- 예: "대체육 시장 진출 전략 수립해줘"
+- 섹션 예시: 시장 현황, 경쟁사 분석, 소비자 인사이트, 진출 전략, 위험 요인
 
-위 기준에 따라 질문을 신중하게 분석하고 가장 적절한 복잡도 수준과 실행 전략을 결정하세요.
+### 종합 분석 요청 (4-8개 섹션)
+- 예: "글로벌 발효식품 시장 종합 분석과 한국 기업 해외 진출 전략"
+- 섹션 예시: 글로벌 시장 현황, 지역별 분석, 규제 환경, 경쟁 구도, 소비 트렌드, 진출 전략, 위험 관리
+
+## 응답 형식
+다음 JSON 형식으로만 응답하세요:
+
+```json
+{{
+  "report_type": "simple|analysis|strategy|comprehensive",
+  "sections": [
+    {{
+      "name": "섹션 이름",
+      "purpose": "이 섹션의 목적과 다룰 내용",
+      "key_questions": ["이 섹션에서 답해야 할 핵심 질문들"]
+    }},
+    ...
+  ],
+  "reasoning": "이렇게 섹션을 나눈 이유"
+}}
+```
+
+**중요**:
+- 간단한 질문(섹션이 필요 없다면)이면 sections를 빈 배열 []로 설정
+- 각 섹션은 명확한 목적과 차별화된 내용을 가져야 함
+- 불필요한 섹션 생성 금지, 자연스럽고 논리적인 구성만 허용
 """
-        try:
-            analysis_result = await self.structured_llm.ainvoke(prompt)
-            return analysis_result
-        except Exception as e:
-            print(f"복잡도 분석 및 구조화 오류: {e}")
-            return ComplexityAnalysis(
-                complexity_level="MEDIUM",
-                execution_strategy="basic_search",
-                reasoning="분석 중 오류 발생으로 기본값 적용",
-                resource_requirements=ResourceRequirements(
-                    search_needed=True,
-                    react_needed=False,
-                    multi_agent_needed=False,
-                    estimated_time="medium",
-                ),
-                expected_output_type="analysis",
-            )
 
-    async def _create_execution_plan_by_complexity(self, query: str, complexity_analysis: Dict, feedback: Optional[str] = None) -> str:
-        """실행 계획 생성을 단순화된 문자열 반환으로 통일합니다."""
-        strategy = complexity_analysis.get('execution_strategy', 'unknown')
-        return f"'{query}'에 대한 분석 계획 수립 완료. 결정된 실행 전략: {strategy}"
+        try:
+            response = await self.chat.ainvoke(prompt)
+            import json
+
+            # JSON 추출
+            content = response.content
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            json_str = content[start:end]
+
+            section_plan = json.loads(json_str)
+            return section_plan
+
+        except Exception as e:
+            print(f"섹션 계획 생성 실패: {e}")
+            return {"report_type": "simple", "sections": [], "reasoning": "분석 실패로 단순 처리"}
+
+    async def _intention_analysis(self, query: str) -> Dict:
+        """질문을 분석하여 사용자의 의도 파악"""
+        prompt = f"""당신은 비즈니스 질문 분석 전문가입니다.
+        사용자의 질문의도를 파악하여, 보고서 섹션 계획 수립에 도움이 될 수 있는 정보를 제공해주세요.
+"""
+
+        try:
+            response = await self.chat.ainvoke(prompt)
+            return response.content
+
+        except Exception as e:
+            print(f"의도 분석 실패: {e}")
+            return ""
+
+    async def _generate_section_queries(self, original_query: str, section: Dict) -> List[str]:
+        """특정 섹션에 필요한 정보 수집 쿼리들을 생성"""
+        section_name = section.get('name', '섹션')
+        section_purpose = section.get('purpose', '정보 수집')
+        key_questions = section.get('key_questions', [])
+
+        prompt = f"""당신은 정보 검색 쿼리 생성 전문가입니다.
+주어진 섹션에 필요한 구체적이고 검색 가능한 쿼리들을 생성해주세요.
+
+## 원본 질문
+"{original_query}"
+
+## 대상 섹션
+- **섹션명**: {section_name}
+- **목적**: {section_purpose}
+- **핵심 질문들**: {key_questions}
+
+## 쿼리 생성 원칙
+1. **구체성**: 각 쿼리는 독립적으로 검색 가능해야 함
+2. **적절성**: 섹션 목적에 맞는 정보만 수집
+3. **효율성**: 꼭 필요한 정보만, 중복 최소화
+4. **유연성**: 섹션의 복잡도에 따라 1-5개 정도의 쿼리 생성
+
+## 생성 가이드
+- **간단한 섹션**: 1-2개의 핵심 쿼리
+- **표준 섹션**: 2-3개의 상세 쿼리
+- **복잡한 섹션**: 3-5개의 세분화된 쿼리
+- **원본 쿼리 맥락 유지**: 연도, 지역, 제품군 등 핵심 맥락을 모든 쿼리에 포함
+
+## 응답 형식
+Python 리스트 형태로만 응답하세요:
+
+```
+[
+"구체적인 검색 쿼리 1",
+"구체적인 검색 쿼리 2",
+"구체적인 검색 쿼리 3"
+]
+```
+
+**주의사항**:
+- 다른 설명 없이 순수 리스트만 반환
+- 각 쿼리는 명확하고 검색 가능한 형태
+- 원본 질문의 핵심 맥락(시기, 대상, 범위 등) 반드시 포함
+"""
+
+        try:
+            response = await self.chat.ainvoke(prompt)
+            content = response.content
+
+            # 리스트 추출
+            start = content.find('[')
+            end = content.rfind(']') + 1
+            list_str = content[start:end]
+
+            import ast
+            queries = ast.literal_eval(list_str)
+
+            # 빈 쿼리나 너무 짧은 쿼리 필터링
+            valid_queries = [q for q in queries if isinstance(q, str) and len(q.strip()) > 10]
+
+            return valid_queries # 최대 5개로 제한
+
+        except Exception as e:
+            print(f"섹션 쿼리 생성 실패 ({section_name}): {e}")
+            # fallback: 섹션명을 기반으로 기본 쿼리 생성
+            return [f"{original_query} {section_name} 관련 정보"]
+
+
 
 # ==============================================================================
 # Tool Calling 기반의 새로운 Reasoning 에이전트
@@ -356,7 +387,7 @@ class ToolCallingAgent:
     """
     LangChain의 Tool Calling 기능을 사용하여 ReAct Loop를 직접 구현한 에이전트.
     LLM이 직접 Tool을 선택하고, 구조화된 응답을 받아 처리합니다.
-    ⭐️ 자동 재시도 및 첫 턴 결과 검증 로직 존재
+    ⭐️ 자동 재시도, 다단계 검증, 쿼리 동적 변환 로직 탑재, 도구 병렬 실행, 반복 방지
     """
     def __init__(self, llm, tools: List[Any]):
         self.llm = llm
@@ -365,14 +396,58 @@ class ToolCallingAgent:
         self.tool_mapping = {tool.name: tool for tool in tools}
         self.current_date_str = datetime.now().strftime("%Y년 %m월 %d일")
 
-    async def _verify_tool_result(self, query: str, tool_name: str, tool_args: dict, observation: str) -> bool:
+    # ⭐️ GraphDB 검색을 위한 쿼리 분해 메소드
+    async def _decompose_for_graphdb(self, sub_query: str) -> str:
+        """주어진 쿼리에서 GraphDB 검색에 용이한 핵심 키워드를 2~3개 추출합니다."""
+        print(f"---> GraphDB용 키워드 추출 시작: {sub_query}")
+        prompt = f"""
+        사용자의 질문에서 그래프 데이터베이스(GraphDB) 검색에 가장 효과적인 핵심 키워드를 2~3개 추출해줘.
+        추출된 키워드들은 쉼표(,)로 구분해서 간결하게 답변해줘.
+
+        예시:
+        - 질문: "제주도산 감귤의 원산지 정보 알려줄래?"
+        - 답변: 제주도, 감귤, 원산지
+
+        질문: "{sub_query}"
+        답변:
         """
-        ⭐️ 도구 실행 결과가 사용자의 원래 질문 의도에 부합하는지 LLM을 통해 검증합니다.
+        response = await self.llm.ainvoke(prompt)
+        keywords = response.content.strip()
+        print(f"---> 추출된 GraphDB 키워드: {keywords}")
+        return keywords
+
+    # ⭐️ VectorDB 검색을 위한 쿼리 변환 메소드
+    async def _transform_for_vectordb(self, sub_query: str) -> str:
+        """주어진 쿼리를 벡터 검색에 더 유리하도록 의미적으로 풍부하게 재작성합니다."""
+        print(f"---> VectorDB용 쿼리 변환 시작: {sub_query}")
+        prompt = f"""
+        당신은 벡터 검색을 위한 쿼리 확장 전문가입니다.
+        사용자의 원본 질문을 분석하여, 지식 베이스에서 관련 문서를 더 잘 찾을 수 있도록 의미가 풍부하고 상세한 문장으로 재작성해주세요.
+        동의어, 관련 개념을 포함하여 완전한 질문 형태로 만들어주세요.
+
+        예시:
+        - 원본: "사과 재배 시 병충해 예방"
+        - 변환: "사과 과수원 운영 시 주로 발생하는 병충해 종류와 그에 대한 유기농 및 화학적 예방 방법과 관리 지침에 대한 상세 정보"
+
+        - 원본: "스마트팜 기술 동향"
+        - 변환: "최신 스마트팜 기술 트렌드, 사물인터넷(IoT) 센서, 자동화 시스템, 데이터 분석 기반의 정밀 농업 기술 적용 사례 및 전망"
+
+        원본 질문: "{sub_query}"
+        변환된 질문:
+        """
+        response = await self.llm.ainvoke(prompt)
+        transformed_query = response.content.strip()
+        print(f"---> 변환된 VectorDB 쿼리: {transformed_query}")
+        return transformed_query
+
+    async def _verify_tool_output(self, query: str, tool_name: str, tool_args: dict, observation: str) -> bool:
+        """
+        ⭐️ 도구 실행 결과의 유효성과 관련성을 모두 LLM을 통해 검증합니다.
         """
         print(f"---> 결과 검증 시작: {tool_name}")
-        
+
         verification_prompt = f"""당신은 AI 에이전트의 행동을 감독하는 엄격한 품질 관리자입니다.
-        
+
         사용자의 원본 질문과, 이 질문을 해결하기 위해 에이전트가 사용한 도구 및 그 결과를 보고 결과가 적절한지 평가해주세요.
 
         - **원본 질문**: "{query}"
@@ -382,32 +457,98 @@ class ToolCallingAgent:
 
         [평가 기준]
         1. **적절성**: 이 도구와 결과가 원본 질문에 대한 답변을 찾는 데 정말로 도움이 됩니까?
-        2. **유효성**: 결과가 "오류"나 "결과 없음" 같은 무의미한 내용은 아닙니까?
+        2. **유효성**: 결과가 명백한 "오류" 메시지이거나, 내용이 완전히 비어있거나, "결과 없음" 같은 무의미한 내용은 아닙니까?
+
+        위 두 기준을 **모두 만족해야 'YES'**입니다. 하나라도 만족하지 못하면 'NO'입니다.
 
         "YES" 또는 "NO"로만 답변해주세요.
-        - **YES**: 결과가 질문과 관련이 있고 유용할 때.
-        - **NO**: 결과가 질문과 전혀 관련이 없거나, 오류 메시지이거나, "결과 없음"일 때.
-        
+        - **YES**: 결과가 유효하고, 질문과 관련이 있을 때.
+        - **NO**: 결과가 유효하지 않거나, 질문과 전혀 관련이 없을 때.
+
         판단 (YES/NO):
         """
-        
+
         response = await self.llm.ainvoke(verification_prompt)
         decision = "yes" in response.content.lower()
         print(f"---> 검증 결과: {'통과' if decision else '실패'}")
         return decision
-    
+
+    # ⭐️ 단일 도구 호출의 전체 로직을 담당하는 helper 메소드
+    async def _execute_single_tool_call(self, tool_call: dict, query_for_verification: str, is_first_turn: bool, call_history: Set) -> ToolMessage:
+        """단일 도구 호출을 처리하고, 반복을 방지하며, 결과를 종합적으로 검증합니다."""
+        tool_name = tool_call["name"]
+        tool_args = tool_call["args"]
+        tool_function = self.tool_mapping.get(tool_name)
+
+        if not tool_function:
+            return ToolMessage(content=f"오류: '{tool_name}'이라는 이름의 도구를 찾을 수 없습니다.", tool_call_id=tool_call["id"])
+
+        # 반복 작업 방지 로직
+        call_signature = (tool_name, frozenset(tool_args.items()))
+        if call_signature in call_history:
+            print(f"!! 반복 작업 감지, 실행 건너뛰기: {call_signature}")
+            return ToolMessage(
+                content="오류: 이전과 동일한 작업을 반복하고 있습니다. 다른 도구를 사용하거나 다른 방식으로 접근해주세요.",
+                tool_call_id=tool_call["id"]
+            )
+        call_history.add(call_signature)
+
+        # 도구별 쿼리 동적 변환 로직
+        try:
+            original_sub_query = tool_args.get("query", "")
+            if original_sub_query:
+                if tool_name == "graph_db_search":
+                    tool_args["query"] = await self._decompose_for_graphdb(original_sub_query)
+                elif tool_name == "vector_db_search":
+                    tool_args["query"] = await self._transform_for_vectordb(original_sub_query)
+        except Exception as e:
+            print(f"!! 쿼리 변환 중 오류 발생: {e}")
+
+        # 자동 재시도 로직
+        observation = None
+        retry_attempts = 2
+        for attempt in range(retry_attempts):
+            try:
+                print(f"Executing Tool: {tool_name} with args: {tool_args} (Attempt {attempt + 1}/{retry_attempts})")
+                observation = tool_function.invoke(tool_args)
+                break
+            except Exception as e:
+                observation = f"Tool '{tool_name}' 실행 오류: {e}"
+                if attempt < retry_attempts - 1:
+                    await asyncio.sleep(1)
+
+        # 첫 턴에만 모든 도구에 대해 종합 검증 수행
+        is_valid_and_relevant = True
+        if is_first_turn:
+            is_valid_and_relevant = await self._verify_tool_output(query_for_verification, tool_name, tool_args, str(observation))
+
+        if is_valid_and_relevant:
+            return ToolMessage(content=str(observation), tool_call_id=tool_call["id"])
+        else:
+            # 검증 실패 시, VectorDB는 특별 처리
+            if tool_name == "vector_db_search":
+                print(f"!! VectorDB 결과가 무관하거나 유효하지 않아 폐기합니다.")
+                feedback_content = "관련성 없는 문서가 검색되어 결과를 폐기했습니다. 다른 방법을 시도해주세요."
+            else:
+                feedback_content = f"'{tool_name}' 도구의 결과가 유효하지 않거나 질문과 관련이 없습니다. 다른 도구나 다른 접근 방식을 시도해주세요."
+
+            return ToolMessage(content=feedback_content, tool_call_id=tool_call["id"])
+
+
     async def run(self, query: str) -> SearchResult:
         """Tool Calling을 사용한 Reasoning Loop를 실행합니다."""
-        print("\n>> Tool Calling Reasoning Loop 시작 (재시도/검증 기능 탑재)")
-        
-        system_prompt = f"""당신은 농수산물 경제 연구소의 수석 분석가입니다. 
+        print("\n>> Tool Calling Reasoning Loop 시작 (병렬 실행, 반복 방지, 종합 검증 탑재)")
+
+        system_prompt = f"""당신은 농수산물 경제 연구소의 수석 분석가입니다.
 오늘 날짜: {self.current_date_str}
 사용자의 질문에 답하기 위해 주어진 도구를 체계적으로 사용하여 포괄적이고 데이터 기반의 답변을 찾아야 합니다.
 
 **[업무 가이드라인]**
-1. **숫자 데이터 우선**: 사용자의 질문에 '가격', '시세', '영양성분', '칼로리' 등 구체적인 수치를 묻는 키워드가 포함되어 있다면, **반드시 `rdb_search` 도구를 가장 먼저 사용**하여 내부 데이터베이스의 정확한 정보를 확인해야 합니다.
-2. **내부 검색 후 외부 검색**: `rdb_search`나 `vector_db_search` 같은 내부 도구를 사용했는데 결과가 충분하지 않거나, 사용자가 '최신', '최근', '트렌드'를 물어본 경우에만 **그 다음 단계로 `debug_web_search`를 사용**하여 외부 정보를 보충하세요.
-3. **URL 검증 필수**: 웹 페이지의 상세 내용을 가져오는 `scrape_and_extract_content` 도구는, 반드시 `debug_web_search`를 통해 유효한 URL을 먼저 확보한 후에만 사용해야 합니다. 절대 URL 없이 이 도구를 호출하지 마세요.
+1.  **RDB 사용**: 정확한 **수치 데이터**(가격, 시세, 영양성분, 품종, 칼로리)가 필요할 때는 **반드시 `rdb_search`를 최우선으로 사용**해야 합니다.
+2.  **GraphDB 사용**: 농산물의 **원산지** 정보를 파악해야 할 때는 **반드시 `graph_db_search`를 최우선으로 사용**해야 합니다.
+3.  **VectorDB 사용**: 시장 분석 보고서, 정책 문서 등 **설명적이고 긴 텍스트**에서 관련 문맥을 찾아야 할 때는 `vector_db_search`를 사용하세요.
+4.  **Web Search 사용**: 내부 데이터베이스 검색 결과가 불충분하거나, 사용자가 '최신', '최근', '트렌드'와 같이 **실시간 정보**를 물어볼 때만 `debug_web_search`를 사용해 외부 정보를 보충하세요.
+5.  **Scraping 사용**: `debug_web_search`를 통해 유효한 URL을 확보한 후에만 `scrape_and_extract_content`를 사용하세요. URL 없이 절대 호출하지 마세요.
 
 필요한 모든 정보를 찾았다고 판단되면, 더 이상 도구를 사용하지 말고 최종 답변을 자연스러운 문장으로 작성하세요."""
 
@@ -417,58 +558,35 @@ class ToolCallingAgent:
         ]
         max_turns = 5
 
+        # 반복 작업을 감지하기 위한 호출 기록 세트
+        call_history = set()
+
         for i in range(max_turns):
             print(f"--- Turn {i+1}/{max_turns} ---")
 
             ai_response = await self.llm_with_tools.ainvoke(history)
             history.append(ai_response)
+            print(ai_response)
 
             if not ai_response.tool_calls:
-                print(">> LLM이 Tool 사용 대신 최종 답변을 결정했습니다.")
+                print(">> 수집된 정보를 바탕으로 최종 답변 생성을 시작합니다.")
                 break
 
             print(f"LLM wants to use {len(ai_response.tool_calls)} tool(s): {[tc['name'] for tc in ai_response.tool_calls]}")
-            
-            tool_messages = []
-            for tool_call in ai_response.tool_calls:
-                tool_name = tool_call["name"]
-                tool_args = tool_call["args"]
-                tool_function = self.tool_mapping.get(tool_name)
-                
-                if not tool_function:
-                    tool_messages.append(ToolMessage(content=f"오류: '{tool_name}'이라는 이름의 도구를 찾을 수 없습니다.", tool_call_id=tool_call["id"]))
-                    continue
 
-                observation = None
-                # ⭐️ 1. 명시적인 자동 재시도 로직 추가 (최대 2회)
-                retry_attempts = 2
-                for attempt in range(retry_attempts):
-                    try:
-                        print(f"Executing Tool: {tool_name} (Attempt {attempt + 1}/{retry_attempts})")
-                        observation = tool_function.invoke(tool_args)
-                        break  # 성공 시 재시도 루프 탈출
-                    except Exception as e:
-                        print(f"Tool execution attempt {attempt + 1} failed: {e}")
-                        observation = f"Tool '{tool_name}' 실행 오류: {e}"
-                        if attempt < retry_attempts - 1:
-                            await asyncio.sleep(1) # 잠시 후 재시도
-                
-                # ⭐️ 2&3. 첫 번째 Turn일 때만 결과 검증을 수행
-                is_valid = True # 기본값은 True로 설정
-                if i == 0: 
-                    is_valid = await self._verify_tool_result(query, tool_name, tool_args, str(observation))
+            # 병렬 도구 실행 로직
+            is_first_turn = (i == 0)
+            tasks = [
+                self._execute_single_tool_call(tool_call, query, is_first_turn, call_history)
+                for tool_call in ai_response.tool_calls
+            ]
 
-                if is_valid:
-                    tool_messages.append(ToolMessage(content=str(observation), tool_call_id=tool_call["id"]))
-                else:
-                    # 검증 실패 시 LLM에게 명확한 피드백을 주어 다른 행동을 유도
-                    feedback_content = f"'{tool_name}' 도구의 결과가 원본 질문과 관련이 없거나 유효하지 않습니다. 다른 도구나 다른 접근 방식을 시도해주세요. (실패한 도구의 실행 결과: {str(observation)[:200]}...)"
-                    tool_messages.append(ToolMessage(content=feedback_content, tool_call_id=tool_call["id"]))
+            tool_messages = await asyncio.gather(*tasks)
 
             history.extend(tool_messages)
 
         final_answer = history[-1].content if isinstance(history[-1], AIMessage) else "답변을 생성하지 못했습니다."
-        
+
         return SearchResult(
             source="tool_calling_agent",
             content=final_answer,
@@ -478,10 +596,11 @@ class ToolCallingAgent:
         )
 
 
+
 # ==============================================================================
 # ⭐️ Pydantic 모델 정의: 안정적인 구조화를 위해 클래스 외부에 정의
 # ==============================================================================
-class SearchSourceDecision(LangchainBaseModel):
+class SearchSourceDecision(BaseModel):
     """어떤 데이터 소스를 검색할지에 대한 결정 구조"""
     vector_db: bool = Field(description="일반적인 문서, 가이드, 설명서(농업 기술, 재배법 등) 검색 필요 여부")
     rdb: bool = Field(description="정확한 수치 데이터(가격, 영양성분, 생산량 등) 검색 필요 여부")
@@ -498,7 +617,7 @@ class RetrieverAgent:
 
     def __init__(self):
         """
-        ⭐️ 부품 교체: 기존 ReAct Executor 대신 ToolCallingAgent를 생성합니다.
+        ⭐️ 기존 ReAct Executor 대신 ToolCallingAgent를 생성합니다.
         """
         # 사용 가능한 도구들
         self.available_tools = [
@@ -517,7 +636,7 @@ class RetrieverAgent:
         self.current_date_str = self.current_date.strftime("%Y년 %m월 %d일")
         self.current_year = self.current_date.year
 
-        # ⭐️ ToolCallingAgent 초기화
+        # ToolCallingAgent 초기화
         self.tool_calling_agent = ToolCallingAgent(llm=self.llm, tools=self.available_tools)
         self.source_determiner_llm = self.llm.with_structured_output(SearchSourceDecision)
 
@@ -526,7 +645,7 @@ class RetrieverAgent:
 
     async def search(self, state: StreamingAgentState) -> StreamingAgentState:
         """
-        ⭐️ 호출 방식 변경: 복잡도에 따라 적절한 실행 함수를 호출합니다.
+        호출 방식 변경: 복잡도에 따라 적절한 실행 함수를 호출합니다.
         """
         print(">> 통합 RETRIEVER 시작")
 
@@ -553,7 +672,7 @@ class RetrieverAgent:
             return await self._execute_basic_parallel_search(state, original_query)
 
         elif execution_strategy == ExecutionStrategy.FULL_REACT:
-            # ⭐️ "COMPLEX" 전략일 때, 새로운 reasoning loop 함수를 호출하도록 변경
+            # "COMPLEX" 전략일 때, 새로운 reasoning loop 함수를 호출하도록 변경
             print("- COMPLEX: Tool Calling Agent 실행")
             return await self._execute_reasoning_loop(state, original_query)
 
@@ -569,55 +688,226 @@ class RetrieverAgent:
         self, state: StreamingAgentState, query: str
     ) -> StreamingAgentState:
         """
-        ⭐️ 실행 함수 교체: ToolCallingAgent를 실행하는 새로운 함수입니다.
+        섹션 기반 정보 수집: Planning에서 생성한 섹션별로 쿼리를 병렬 처리하고 결과를 수집합니다.
         """
-        print("\n>> Custom Reasoning Agent 단독 실행 (분해된 쿼리 처리")
+        print("\n>> 섹션 기반 정보 수집 시작 (병렬 처리)")
+
+        # Planning에서 생성한 섹션 정보 가져오기
+        sections = state.query_plan.resource_requirements.get("sections", [])
         sub_queries = state.query_plan.sub_queries
-        
-        # 각 하위 쿼리에 대한 결과를 저장할 리스트
-        all_reasoning_contents = []
+        report_structure = state.query_plan.resource_requirements.get("report_structure", {})
+
+        print(f"- 총 {len(sections)}개 섹션, {len(sub_queries)}개 쿼리 처리 예정")
+
+        # 섹션이 없으면 단순 처리
+        if not sections:
+            print("- 섹션 없음: 단순 질문으로 처리")
+            return await self._process_simple_queries(state, query, sub_queries)
+
+        # 전체 처리 시작 시간
+        total_start_time = time.time()
+
+        # 섹션별 처리 태스크 생성
+        section_tasks = []
+        for section_idx, section in enumerate(sections):
+            section_name = section.get("name", f"섹션 {section_idx + 1}")
+            section_purpose = section.get("purpose", "정보 수집")
+
+            # 이 섹션에 해당하는 쿼리들 찾기 (간단한 방식: 순서대로 배분)
+            queries_per_section = len(sub_queries) // len(sections) if len(sections) > 0 else 1
+            start_idx = section_idx * queries_per_section
+            end_idx = start_idx + queries_per_section
+
+            # 마지막 섹션은 남은 모든 쿼리를 처리
+            if section_idx == len(sections) - 1:
+                end_idx = len(sub_queries)
+
+            section_queries = sub_queries[start_idx:end_idx]
+
+            print(f"- 섹션 '{section_name}' 준비: {len(section_queries)}개 쿼리")
+
+            # 섹션 처리 태스크 생성
+            task = self._process_single_section(
+                section_name, section_purpose, section_queries, section_idx
+            )
+            section_tasks.append(task)
+
+        # 모든 섹션 동시 처리
+        print(f">> {len(section_tasks)}개 섹션 병렬 처리 시작")
+        section_results_list = await asyncio.gather(*section_tasks, return_exceptions=True)
+
+        total_execution_time = time.time() - total_start_time
+
+        # 결과 정리 및 오류 처리
+        section_results = {}
+        for idx, result in enumerate(section_results_list):
+            if isinstance(result, Exception):
+                section_name = sections[idx].get("name", f"섹션 {idx + 1}")
+                print(f"   ✗ 섹션 '{section_name}' 처리 실패: {result}")
+                section_results[section_name] = {
+                    "purpose": sections[idx].get("purpose", "정보 수집"),
+                    "queries": [],
+                    "content": [{"query": "오류", "result": f"섹션 처리 실패: {str(result)}", "relevance_score": 0.1}],
+                    "execution_time": 0,
+                    "total_queries": 0,
+                    "successful_queries": 0,
+                    "error": str(result)
+                }
+            else:
+                section_results.update(result)
+
+        # 각 섹션별로 SearchResult 생성 (Context Integrator가 섹션별로 처리할 수 있도록)
+        for section_name, section_data in section_results.items():
+            # 오류가 있는 섹션은 건너뛰기
+            if "error" in section_data:
+                continue
+
+            # 섹션 내 모든 결과를 하나의 content로 통합
+            combined_content = f"## {section_name}\n\n"
+            combined_content += f"**목적**: {section_data['purpose']}\n\n"
+
+            for content_item in section_data['content']:
+                combined_content += f"### 질문: {content_item['query']}\n"
+                combined_content += f"{content_item['result']}\n\n"
+
+            # 섹션별 SearchResult 생성
+            section_search_result = SearchResult(
+                source=f"section_{section_name}",
+                content=combined_content,
+                relevance_score=0.9,
+                metadata={
+                    "section_name": section_name,
+                    "section_purpose": section_data['purpose'],
+                    "total_queries": section_data['total_queries'],
+                    "successful_queries": section_data['successful_queries'],
+                    "execution_time": section_data['execution_time'],
+                    "section_type": "structured_section"
+                },
+                search_query=query
+            )
+
+            state.add_multi_source_result(section_search_result)
+            print(f"   섹션 '{section_name}' 결과 저장 완료")
+
+        # 전체 결과 요약
+        state.add_step_result("section_based_reasoning", {
+            "total_sections": len(sections),
+            "total_queries": len(sub_queries),
+            "total_execution_time": total_execution_time,
+            "section_results": section_results,
+            "report_structure": report_structure,
+            "parallel_processing": True
+        })
+
+        print(f"\n>> 섹션 기반 정보 수집 완료 (병렬 처리)")
+        print(f"   - 처리된 섹션: {len(sections)}개")
+        print(f"   - 처리된 쿼리: {len(sub_queries)}개")
+        print(f"   - 총 소요 시간: {total_execution_time:.2f}초")
+
+        return state
+
+    async def _process_single_section(self, section_name: str, section_purpose: str,
+                                    section_queries: List[str], section_idx: int) -> dict:
+        """
+        단일 섹션을 처리하는 메소드 (병렬 처리용)
+        """
+        print(f"\n>> 섹션 '{section_name}' 처리 시작 (병렬)")
+        print(f"   목적: {section_purpose}")
+        print(f"   처리할 쿼리 {len(section_queries)}개: {section_queries}")
+
+        section_content = []
+        section_start_time = time.time()
+
+        # 섹션 내 쿼리들을 순차 처리 (향후 이 부분도 병렬 처리 가능)
+        for query_idx, section_query in enumerate(section_queries):
+            print(f"     섹션 '{section_name}' - 쿼리 {query_idx + 1}/{len(section_queries)}: '{section_query}'")
+            try:
+                # ToolCallingAgent로 쿼리 처리
+                reasoning_result = await self.tool_calling_agent.run(section_query)
+
+                if reasoning_result and reasoning_result.content:
+                    section_content.append({
+                        "query": section_query,
+                        "result": reasoning_result.content,
+                        "relevance_score": getattr(reasoning_result, 'relevance_score', 0.8)
+                    })
+                    print(f"     ✓ 섹션 '{section_name}' - 쿼리 처리 완료")
+                else:
+                    print(f"     ✗ 섹션 '{section_name}' - 쿼리 처리 결과 없음")
+
+            except Exception as e:
+                print(f"     ✗ 섹션 '{section_name}' - 쿼리 처리 실패: {e}")
+                section_content.append({
+                    "query": section_query,
+                    "result": f"오류 발생: {str(e)}",
+                    "relevance_score": 0.1
+                })
+
+        section_execution_time = time.time() - section_start_time
+
+        # 섹션 결과 반환
+        section_result = {
+            section_name: {
+                "purpose": section_purpose,
+                "queries": section_queries,
+                "content": section_content,
+                "execution_time": section_execution_time,
+                "total_queries": len(section_queries),
+                "successful_queries": len([c for c in section_content if c.get("relevance_score", 0) > 0.5])
+            }
+        }
+
+        print(f"   섹션 '{section_name}' 완료: {section_execution_time:.2f}초")
+        return section_result
+
+    async def _process_simple_queries(self, state: StreamingAgentState, query: str, sub_queries: List[str]) -> StreamingAgentState:
+        """간단한 질문 처리 (섹션이 없는 경우)"""
+        print(">> 단순 쿼리 처리 모드")
+
+        all_contents = []
         total_execution_time = 0
-        
+
         for i, sub_query in enumerate(sub_queries):
-            print(f"\n>> 하위 질문 {i+1}/{len(sub_queries)} 처리 시작: \"{sub_query}\"")
+            print(f"   쿼리 {i+1}/{len(sub_queries)}: '{sub_query}'")
             try:
                 start_time = time.time()
-                # 각 하위 쿼리에 대해 ToolCallingAgent 실행
                 reasoning_result = await self.tool_calling_agent.run(sub_query)
                 execution_time = time.time() - start_time
                 total_execution_time += execution_time
-                print(f"- 하위 질문 처리 완료: {execution_time:.2f}초")
 
                 if reasoning_result and reasoning_result.content:
-                    # 결과 내용에 어떤 하위 질문에 대한 답변인지 명시하여 추가
-                    result_text = f"### 하위 질문 '{sub_query}'에 대한 분석 결과:\n{reasoning_result.content}"
-                    all_reasoning_contents.append(result_text)
-                
+                    all_contents.append(f"### {sub_query}\n{reasoning_result.content}")
+                    print(f"   ✓ 처리 완료: {execution_time:.2f}초")
+
             except Exception as e:
-                print(f"- 하위 질문 '{sub_query}' 처리 중 실패: {e}")
-                all_reasoning_contents.append(f"### 하위 질문 '{sub_query}' 처리 중 오류 발생:\n{e}")
+                print(f"   ✗ 처리 실패: {e}")
+                all_contents.append(f"### {sub_query}\n오류 발생: {str(e)}")
 
-        # ⭐️ 모든 하위 질문의 결과를 하나의 컨텐츠로 통합
-        final_combined_content = "\n\n---\n\n".join(all_reasoning_contents)
+        # 단순 통합 결과 생성
+        final_content = "\n\n---\n\n".join(all_contents)
 
-        # 통합된 결과를 하나의 SearchResult로 만들어 state에 추가
-        final_search_result = SearchResult(
-            source="reasoning_aggregator",
-            content=final_combined_content,
-            relevance_score=0.95,
-            metadata={"total_sub_queries": len(sub_queries)},
-            search_query=query, # 원본 쿼리를 저장
+        simple_search_result = SearchResult(
+            source="simple_reasoning",
+            content=final_content,
+            relevance_score=0.85,
+            metadata={
+                "total_queries": len(sub_queries),
+                "execution_time": total_execution_time,
+                "processing_type": "simple"
+            },
+            search_query=query
         )
-        state.add_multi_source_result(final_search_result)
-        
-        state.add_step_result("custom_reasoning_search", {
-            "execution_time": total_execution_time,
-            "total_results": 1 # 최종적으로는 하나의 통합된 결과
+
+        state.add_multi_source_result(simple_search_result)
+
+        state.add_step_result("simple_reasoning", {
+            "total_queries": len(sub_queries),
+            "execution_time": total_execution_time
         })
-        print(f"- 모든 하위 질문 처리 및 결과 통합 완료. 총 소요 시간: {total_execution_time:.2f}초")
-        
+
+        print(f">> 단순 쿼리 처리 완료: {total_execution_time:.2f}초")
         return state
-    
+
     async def _determine_search_sources(self, query: str) -> Dict[str, bool]:
         """
         ⭐️ LLM이 쿼리를 분석해서 어떤 DB를 검색할지 결정 (Tool Calling 방식)
@@ -704,6 +994,7 @@ class RetrieverAgent:
                 analysis_result = await self._simple_llm_analysis(
                     query, state.multi_source_results_stream
                 )
+                print(f"- LLM 분석 결과: {analysis_result}")
                 if analysis_result:
                     state.add_multi_source_result(analysis_result)
                     total_results += 1
@@ -1452,9 +1743,18 @@ class ContextIntegratorAgent:
         self.chat = ChatOpenAI(model="gpt-4o", temperature=0.1)
         self.agent_type = AgentType.CONTEXT_INTEGRATOR
 
+# ContextIntegratorAgent
+import re
+from typing import Dict, List, Any
+
+class ContextIntegratorAgent:
+    def __init__(self):
+        self.chat = ChatOpenAI(model="gpt-4o", temperature=0.1)
+        self.agent_type = AgentType.CONTEXT_INTEGRATOR
+
     async def integrate(self, state: StreamingAgentState) -> StreamingAgentState:
-        """수집된 모든 정보를 분석하고 정제하여 최종 답변의 '핵심 초안'을 생성합니다."""
-        print(">> CONTEXT_INTEGRATOR 시작 (핵심 초안 생성)")
+        """수집된 모든 정보를 정확하게 통합하여 보고서 생성을 위한 구조화된 컨텍스트를 생성합니다."""
+        print(">> CONTEXT_INTEGRATOR 시작 (데이터 통합 및 구조화)")
 
         all_results = state.graph_results_stream + state.multi_source_results_stream
 
@@ -1463,337 +1763,183 @@ class ContextIntegratorAgent:
             state.integrated_context = "검색된 정보가 없어 답변을 생성할 수 없습니다."
             return state
 
-        print(f"- 총 {len(all_results)}개 검색 결과를 바탕으로 핵심 초안 작성 시작")
+        print(f"- 총 {len(all_results)}개 검색 결과를 분석 및 통합")
 
-        # 수치 데이터 사전 추출
-        extracted_metrics = self._extract_numerical_data(all_results)
-        print(f"- 추출된 수치 데이터: {len(extracted_metrics)}개")
+        # 수집된 데이터를 소스별로 정리
+        organized_data = self._organize_data_by_source(all_results)
 
-        # LLM에 전달할 종합적인 컨텍스트를 생성합니다.
-        comprehensive_context = self._prepare_context_for_synthesis(all_results)
-
-        # LLM을 사용하여 정제된 초안을 생성합니다.
-        synthesized_draft = await self._synthesize_draft(
+        # CoT 기반으로 구조화된 컨텍스트 생성
+        integrated_context = await self._create_structured_context(
             state.original_query,
-            comprehensive_context,
-            extracted_metrics
+            organized_data
         )
 
-        # 생성된 초안을 state에 저장합니다.
-        state.integrated_context = synthesized_draft
-
-        print(f"\n- 핵심 초안\n{synthesized_draft[:]}")
-        print(f"\n- 핵심 초안 생성 완료 (길이: {len(synthesized_draft)}자)")
-        print("\n>> CONTEXT_INTEGRATOR 완료")
+        state.integrated_context = integrated_context
+        print(f"- 구조화된 컨텍스트 생성 완료 (길이: {len(integrated_context)}자)")
+        print(all_results[0].content)
+        print(">> CONTEXT_INTEGRATOR 완료")
         return state
 
-    def _extract_numerical_data(self, all_results: list) -> Dict[str, List[Dict]]:
-        """모든 검색 결과에서 수치 데이터를 사전 추출"""
-        print("\n>> 수치 데이터 사전 추출 시작")
-
-        extracted_metrics = {
-            'percentages': [],
-            'amounts': [],
-            'years': [],
-            'rankings': [],
-            'growth_rates': [],
-            'market_sizes': [],
-            'age_groups': [],
-            'other_numbers': []
+    def _organize_data_by_source(self, all_results: list) -> Dict[str, List[str]]:
+        """검색 결과를 소스별로 정리"""
+        organized = {
+            'vector_db': [],
+            'graph_db': [],
+            'rdb': [],
+            'web_search': [],
+            'web_scrape': [],
+            'react_agent': [],
+            'other': []
         }
 
         for result in all_results:
+            source = getattr(result, 'source', 'other').lower()
             content = getattr(result, 'content', '')
-            source = getattr(result, 'source', 'unknown')
 
             if not content.strip():
                 continue
 
-            print(f"- {source}에서 수치 추출 중...")
+            # 소스 매핑
+            if source in ['vector_db', 'vector']:
+                organized['vector_db'].append(content)
+            elif source == 'graph_db':
+                organized['graph_db'].append(content)
+            elif source in ['rdb', 'postgresql']:
+                organized['rdb'].append(content)
+            elif source in ['web_search_summary', 'debug_web_search']:
+                organized['web_search'].append(content)
+            elif source == 'web_scrape':
+                organized['web_scrape'].append(content)
+            elif source == 'react_agent':
+                organized['react_agent'].append(content)
+            else:
+                organized['other'].append(content)
 
-            # 퍼센트 추출
-            percentages = re.findall(r'(\d+(?:\.\d+)?)\s*%', content)
-            for pct in percentages:
-                extracted_metrics['percentages'].append({
-                    'value': float(pct),
-                    'source': source,
-                    'context': self._get_context_around_number(content, f"{pct}%")
-                })
+        return organized
 
-            # 금액/규모 추출 (조, 억, 만원 등)
-            amounts = re.findall(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s*(조|억|만원|원|달러|USD)', content)
-            for amount, unit in amounts:
-                extracted_metrics['amounts'].append({
-                    'value': amount.replace(',', ''),
-                    'unit': unit,
-                    'source': source,
-                    'context': self._get_context_around_number(content, f"{amount}{unit}")
-                })
+    async def _create_structured_context(self, original_query: str, organized_data: Dict[str, List[str]]) -> str:
+        """CoT 기반으로 구조화된 컨텍스트 생성"""
 
-            # 연도 추출
-            years = re.findall(r'(20\d{2})년?', content)
-            for year in set(years):  # 중복 제거
-                extracted_metrics['years'].append({
-                    'value': int(year),
-                    'source': source,
-                    'context': self._get_context_around_number(content, f"{year}년")
-                })
+        # 실제 데이터가 있는 소스만 포함
+        available_sources = {k: v for k, v in organized_data.items() if v}
 
-            # 연령대 추출
-            age_groups = re.findall(r'(\d+)대', content)
-            for age in set(age_groups):
-                extracted_metrics['age_groups'].append({
-                    'value': int(age),
-                    'source': source,
-                    'context': self._get_context_around_number(content, f"{age}대")
-                })
+        if not available_sources:
+            return "수집된 데이터가 없습니다."
 
-            # 성장률 추출
-            growth_rates = re.findall(r'(\d+(?:\.\d+)?)\s*%\s*(?:성장|증가|상승)', content)
-            for rate in growth_rates:
-                extracted_metrics['growth_rates'].append({
-                    'value': float(rate),
-                    'source': source,
-                    'context': self._get_context_around_number(content, f"{rate}%")
-                })
+        # 데이터 요약 생성
+        data_summary = []
+        for source, contents in available_sources.items():
+            source_summary = f"**{source.upper()}** ({len(contents)}건):"
+            for i, content in enumerate(contents[:2], 1):  # 각 소스당 최대 2건만
+                # 내용을 적절히 요약
+                summary = content[:300] + "..." if len(content) > 300 else content
+                source_summary += f"\n- 결과 {i}: {summary}"
+            data_summary.append(source_summary)
 
-            # 기타 중요한 숫자들 추출
-            other_numbers = re.findall(r'(\d+(?:,\d{3})*(?:\.\d+)?)', content)
-            for num in other_numbers[:5]:  # 너무 많으면 상위 5개만
-                if len(num.replace(',', '')) >= 2:  # 2자리 이상 숫자만
-                    extracted_metrics['other_numbers'].append({
-                        'value': num.replace(',', ''),
-                        'source': source,
-                        'context': self._get_context_around_number(content, num)
-                    })
+        combined_data = "\n\n".join(data_summary)
 
-        # 추출 결과 요약 출력
-        total_extracted = sum(len(v) for v in extracted_metrics.values())
-        print(f"- 총 추출된 수치: {total_extracted}개")
-        for key, values in extracted_metrics.items():
-            if values:
-                print(f"  - {key}: {len(values)}개")
+        system_prompt = """
+당신은 데이터 분석 전문가이자 보고서 설계자입니다. 수집된 데이터를 바탕으로 사용자 질문에 대한 정확하고 구조화된 컨텍스트를 생성하되, 각 데이터를 어떤 섹션에서 어떻게 활용할지 구체적으로 명시해야 합니다.
 
-        return extracted_metrics
+**핵심 원칙:**
+1. **정확성 우선**: 제공된 데이터에 없는 내용은 절대 추가하지 마세요
+2. **수치 정확성**: 모든 숫자, 퍼센트, 금액 등은 원본 그대로 사용
+3. **데이터 활용 계획**: 각 데이터를 어떤 섹션에서 어떻게 사용할지 명시
+4. **차트 설계**: 구체적인 수치가 있을 때만 고급 차트 설계 제안
+- 단순 수치 → bar, column, horizontalbar
+- 비율/퍼센트 → pie, doughnut, donut
+- 시계열 → line, area, timeseries
+- 트렌드 → line, area (변동성에 따라)
+- 다중 시리즈 → groupedbar, stacked, combo
+- 성능 지표 → radar
+- 분포 → scatter, bubble
+- 복합 데이터 → mixed, combo
+- 특수 형태 → funnel, waterfall, gauge, heatmap
 
-    def _get_context_around_number(self, text: str, number_str: str, window: int = 50) -> str:
-        """숫자 주변의 맥락 텍스트를 추출"""
-        try:
-            index = text.find(number_str)
-            if index == -1:
-                return ""
+**작업 과정 (Chain of Thought):**
+1. 사용자 질문 분석 → 어떤 정보가 필요한가?
+2. 수집된 데이터 검토 → 어떤 데이터가 실제로 있는가?
+3. 섹션 구조 설계 → 질문에 답하기 위해 어떤 섹션들이 필요한가?
+4. 데이터 매핑 → 각 데이터를 어떤 섹션에서 어떻게 활용할 것인가?
+5. 차트 설계 → 어떤 수치 데이터를 어떤 고급 차트로 시각화할 것인가?
+   - 데이터 특성 분석: 범위, 분포, 변동성, 음수 포함 여부
+   - 최적 차트 타입 선택: 단순형/복합형/특수형
+   - 색상 팔레트 선택: modern/corporate/vibrant/warm/pastel/gradient
+   - 인터랙션 고려: 다중 축, 스택, 그룹화
 
-            start = max(0, index - window)
-            end = min(len(text), index + len(number_str) + window)
-            context = text[start:end].strip()
+**출력 형식:**
+# 보고서 구조 설계 및 데이터 활용 계획
 
-            # 너무 짧거나 긴 맥락은 제외
-            if len(context) < 10:
-                return ""
+## 1. 예상 섹션 구조
+[질문에 답하기 위해 필요한 섹션들을 순서대로 나열]
 
-            return context
-        except:
-            return ""
+## 2. 섹션별 데이터 활용 계획
+### 섹션 A: [섹션명]
+**목적:** [이 섹션에서 답하고자 하는 구체적 질문]
+**활용 데이터:**
+- [출처: XX] 구체적 데이터 내용 → 이 섹션에서 어떻게 활용할지
+- [출처: XX] 구체적 수치 (예: 35.2%) → 어떤 맥락에서 사용할지
 
-    def _prepare_context_for_synthesis(self, all_results: list) -> str:
-        """분석 및 합성을 위해 모든 수집된 데이터를 단일 문자열로 준비합니다."""
+### 섹션 B: [섹션명]
+**목적:** [이 섹션에서 답하고자 하는 구체적 질문]
+**활용 데이터:**
+- [출처: XX] 구체적 데이터 내용 → 이 섹션에서 어떻게 활용할지
 
-        source_contents = {
-            'vector_db': [], 'graph_db': [], 'rdb': [], 'web_search_summary': [],
-            'web_scrape': [], 'react_agent': [], 'llm_analysis': [],
-            'strategic_synthesis': [], 'final_validation': [], 'other': []
-        }
+## 3. 고급 차트 설계 계획
+### 차트 1: [차트 제목]
+**데이터 출처:** [출처: XX]
+**구체적 수치:**
+- 항목A: XX (정확한 수치와 단위)
+- 항목B: XX (정확한 수치와 단위)
+**차트 타입:** bar/line/pie/doughnut/radar/scatter/combo/stacked/waterfall/heatmap
+**색상 팔레트:** modern/corporate/vibrant/warm/pastel/gradient
+**데이터 특성:**
+- 데이터 개수: X개
+- 값 범위: 최소 XX ~ 최대 XX
+- 특이사항: [음수 포함/이상치/변동성 등]
+**활용 섹션:** [어느 섹션에서 사용할지]
+**시각화 목적:** [이 차트로 무엇을 보여줄 것인가]
 
-        # 결과를 소스별로 분류
-        for result in all_results:
-            source = getattr(result, 'source', 'other')
-            content = getattr(result, 'content', '')
-            source_key = self._map_source_key(source)
-            if content.strip():
-                source_contents[source_key].append(content)
-
-        # 마크다운 형식으로 변환 (더 상세하게)
-        markdown_parts = ["# 수집된 원본 데이터 상세 분석"]
-        source_display_names = {
-            'vector_db': 'Vector Database (문서 검색)',
-            'graph_db': 'Graph Database (관계 분석)',
-            'rdb': 'PostgreSQL Database (구조적 데이터)',
-            'web_search_summary': 'Web Search Summary (최신 정보)',
-            'web_scrape': 'Web Scrape Results (웹 컨텐츠)',
-            'react_agent': 'ReAct Agent Analysis (추론 분석)',
-            'llm_analysis': 'LLM Analysis (심층 분석)',
-            'strategic_synthesis': 'Strategic Synthesis (전략적 종합)',
-            'final_validation': 'Final Validation (최종 검증)',
-            'other': 'Other Sources (기타 출처)'
-        }
-
-        for source_key, contents in source_contents.items():
-            if contents:
-                display_name = source_display_names.get(source_key, source_key.title())
-                markdown_parts.append(f"## {display_name}")
-
-                # 각 소스의 내용을 더 상세하게 정리
-                for i, content in enumerate(contents, 1):
-                    # 내용을 적당한 길이로 자르기 (너무 길면)
-                    if len(content) > 500:
-                        content = content[:500] + "..."
-
-                    markdown_parts.append(f"### {i}번째 결과:")
-                    markdown_parts.append(content.strip())
-                    markdown_parts.append("")
-
-        return "\n".join(markdown_parts)
-
-    def _map_source_key(self, source: str) -> str:
-        """다양한 소스 문자열을 표준화된 키로 매핑합니다."""
-        source = source.lower()
-        if source in ['vector_db', 'vector']: return 'vector_db'
-        if source == 'graph_db': return 'graph_db'
-        if source in ['rdb', 'postgresql']: return 'rdb'
-        if source in ['web_search_summary', 'debug_web_search']: return 'web_search_summary'
-        if source == 'web_scrape': return 'web_scrape'
-        if source == 'react_agent': return 'react_agent'
-        if source == 'llm_analysis': return 'llm_analysis'
-        if source == 'strategic_synthesis': return 'strategic_synthesis'
-        if source == 'final_validation': return 'final_validation'
-        return 'other'
-
-    async def _synthesize_draft(self, original_query: str, context: str, extracted_metrics: Dict) -> str:
-        """LLM을 사용하여 제공된 컨텍스트를 바탕으로 초안을 정제하고 종합합니다."""
-
-        SYSTEM_PROMPT = """
-당신은 수석 데이터 분석가이자 보고서 설계 전문가입니다. 당신의 임무는 수집된 원본 데이터와 추출된 수치 정보를 바탕으로, 최종 보고서 작성을 위한 완벽하고 구체적인 '보고서 설계도(Blueprint)'를 만드는 것입니다.
-
-**[핵심 원칙]**
-1. **구체적인 수치 활용 필수**: 제공된 "추출된 수치 데이터"를 반드시 각 섹션에 구체적으로 포함해야 합니다.
-2. **출처 명시 의무**: 모든 데이터 포인트에 정확한 출처를 표기합니다.
-3. **차트 생성 지원**: "주요 수치 데이터 종합" 섹션에는 차트로 표현할 수 있는 구체적인 숫자들을 반드시 포함합니다.
-
-**[작업 지침]**
-
-1. **보고서 구조 설계**: "사용자 원본 질문"을 분석하여 최종 보고서에 필요한 섹션들의 구조를 설계합니다.
-
-2. **데이터 매핑 및 정제**: 각 섹션별로 "수집된 원본 데이터"에서 어떤 내용을 사용할지 명시해야 합니다.
-   - **출처 명시**: 각 데이터 포인트 앞에 `[출처: Vector DB]`, `[출처: PostgreSQL]` 와 같이 반드시 출처를 표기합니다.
-   - **구체적인 수치 포함**: 퍼센트, 금액, 연도, 연령대, 성장률 등 모든 구체적인 숫자를 빠뜨리지 말고 포함합니다.
-   - **수치와 맥락 연결**: 각 숫자가 무엇을 의미하는지 명확하게 설명합니다.
-
-3. **차트 데이터 준비**: 마지막 섹션에서 차트로 표현할 수 있는 모든 정량적 데이터를 체계적으로 정리합니다.
-   - 카테고리별 분류 (연령대별, 시간별, 항목별 등)
-   - 비교 가능한 수치들 그룹화
-   - 차트 타입 제안 (bar, line, pie 등)
-
-**[출력 형식]**
-
-# 최종 보고서 설계도 (Report Blueprint)
-
-## 1. 섹션: [구체적인 섹션 제목]
-### 1.1. 핵심 메시지:
-- [구체적인 수치를 포함한 핵심 인사이트]
-### 1.2. 활용할 데이터 포인트:
-- [출처: XX] 구체적인 수치와 그 의미 (예: 20대 소비자 비중 35.2%)
-- [출처: XX] 구체적인 수치와 그 의미 (예: 2023년 시장 규모 1,250억원)
-- [출처: XX] 구체적인 수치와 그 의미
-
-## 주요 수치 데이터 종합 (Key Metrics for Charts)
-### 차트 1: 연령대별 분포
-- 20대: XX%
-- 30대: XX%
-- 40대: XX%
-- 차트 타입 제안: bar
-
-### 차트 2: 시간별 트렌드
-- 2021년: XX
-- 2022년: XX
-- 2023년: XX
-- 차트 타입 제안: line
-
-### 차트 3: 카테고리별 비교
-- 항목A: XX
-- 항목B: XX
-- 항목C: XX
-- 차트 타입 제안: pie
+## 4. 핵심 인사이트 및 메시지
+[각 섹션에서 전달하고자 하는 핵심 메시지들]
 """
 
-        # 추출된 수치 데이터를 텍스트로 변환
-        metrics_summary = self._format_extracted_metrics(extracted_metrics)
+        human_prompt = f"""
+**사용자 질문:** {original_query}
 
-        HUMAN_PROMPT_TEMPLATE = """
-**사용자 원본 질문:**
-{query}
+**수집된 데이터:**
+{combined_data}
 
----
+위 데이터를 바탕으로 다음을 수행해주세요:
 
-**추출된 수치 데이터:**
-{metrics}
+1. **질문 분석**: 사용자가 궁금해하는 것이 정확히 무엇인지 파악
+2. **데이터 검토**: 수집된 데이터 중에서 실제로 사용 가능한 것들 식별
+3. **섹션 설계**: 질문에 체계적으로 답하기 위한 섹션 구조 설계
+4. **데이터 매핑**: 각 섹션에서 어떤 데이터를 어떻게 활용할지 구체적 계획
+5. **차트 설계**: 수치 데이터가 있다면 어떤 고급 차트로 시각화할지 계획
+   - 데이터 특성에 맞는 최적 차트 타입 선택
+   - 복잡한 데이터는 복합 차트(combo, mixed) 고려
+   - 많은 카테고리는 horizontalbar, 적은 카테고리는 column
+   - 시계열은 area/timeseries, 분포는 scatter/bubble
+   - 성능 지표는 radar, 비율은 doughnut/pie
+   - 색상 팔레트와 인터랙션 요소도 함께 계획
 
----
-
-**수집된 원본 데이터:**
-{context}
-
----
-위의 정보들을 바탕으로, 구체적인 수치를 포함한 상세한 '보고서 설계도'를 작성해주십시오.
-반드시 추출된 수치 데이터를 각 섹션에 구체적으로 활용하고, 차트 생성이 가능하도록 정량적 데이터를 체계적으로 정리해주세요.
+**중요**:
+- 제공된 데이터에 없는 내용은 절대 추가하지 마세요
+- 모든 수치는 정확히 그대로 인용하세요
+- 각 데이터의 출처를 명확히 표기하세요
+- 어떤 섹션에서 어떻게 사용할지 구체적으로 설명하세요
 """
-
-        prompt = HUMAN_PROMPT_TEMPLATE.format(
-            query=original_query,
-            context=context,
-            metrics=metrics_summary
-        )
-
-        print("\n- LLM을 통해 컨텍스트 정제 및 종합 시작...")
-        print(f"- 추출된 수치 데이터 요약: {metrics_summary[:200]}..." if len(metrics_summary) > 200 else f"- 추출된 수치 데이터: {metrics_summary}")
 
         messages = [
-            ("system", SYSTEM_PROMPT),
-            ("human", prompt)
+            ("system", system_prompt),
+            ("human", human_prompt)
         ]
 
+        print("- CoT 기반 컨텍스트 구조화 진행...")
         response = await self.chat.ainvoke(messages)
-        result = response.content.strip()
-        print(f"- LLM 응답 길이: {len(result)}자")
 
-        # 응답의 일부만 출력 (너무 길면)
-        preview = result[:300] + "..." if len(result) > 300 else result
-        print(f"- LLM 응답 미리보기: {preview}")
-
-        return result
-
-    def _format_extracted_metrics(self, extracted_metrics: Dict) -> str:
-        """추출된 수치 데이터를 LLM이 이해하기 쉬운 형태로 포맷팅"""
-        if not any(extracted_metrics.values()):
-            return "추출된 구체적인 수치 데이터가 없습니다."
-
-        formatted_parts = []
-
-        if extracted_metrics['percentages']:
-            formatted_parts.append("**퍼센트 데이터:**")
-            for item in extracted_metrics['percentages'][:5]:  # 상위 5개만
-                formatted_parts.append(f"- {item['value']}% [출처: {item['source']}] - {item['context'][:100]}...")
-
-        if extracted_metrics['amounts']:
-            formatted_parts.append("\n**금액/규모 데이터:**")
-            for item in extracted_metrics['amounts'][:5]:
-                formatted_parts.append(f"- {item['value']}{item['unit']} [출처: {item['source']}] - {item['context'][:100]}...")
-
-        if extracted_metrics['age_groups']:
-            formatted_parts.append("\n**연령대 데이터:**")
-            for item in extracted_metrics['age_groups'][:5]:
-                formatted_parts.append(f"- {item['value']}대 [출처: {item['source']}] - {item['context'][:100]}...")
-
-        if extracted_metrics['growth_rates']:
-            formatted_parts.append("\n**성장률 데이터:**")
-            for item in extracted_metrics['growth_rates'][:5]:
-                formatted_parts.append(f"- {item['value']}% 성장 [출처: {item['source']}] - {item['context'][:100]}...")
-
-        if extracted_metrics['years']:
-            formatted_parts.append("\n**연도 데이터:**")
-            unique_years = list(set(item['value'] for item in extracted_metrics['years']))
-            formatted_parts.append(f"- 관련 연도: {', '.join(map(str, sorted(unique_years)))}")
-
-        return "\n".join(formatted_parts) if formatted_parts else "구체적인 수치 데이터를 찾을 수 없습니다."
+        return response.content.strip()
 
 
 # 리팩토링 관련 임포트(참고용)
@@ -2101,21 +2247,20 @@ class ReportGeneratorAgent:
         return "\n".join(formatted_parts) if formatted_parts else ""
 
     async def _create_data_driven_charts(self, extracted_data: Dict, query: str) -> List[Dict]:
-        """실제 데이터 기반 차트 생성 - 데이터 검증 로직 강화"""
+        """실제 데이터 기반 차트 생성 - 복잡한 차트 타입 지원"""
         charts = []
 
-        print(f"\n>> 차트 생성 시작")
+        print(f"\n>> 고급 차트 생성 시작")
         print(f"- 추출된 데이터: {extracted_data}")
 
         if not extracted_data:
             print("- 추출된 데이터 없음, 빈 차트 리스트 반환")
             return charts
 
-        # 1. 퍼센트 데이터 -> 파이 차트
+        # 1. 퍼센트 데이터 -> 다양한 원형 차트
         percentages = extracted_data.get('percentages', [])
         if len(percentages) >= 2:
             print(f"- 퍼센트 데이터 발견: {len(percentages)}개")
-            # 데이터 검증
             valid_percentages = [
                 p for p in percentages
                 if isinstance(p.get('value'), (int, float)) and 0 <= p.get('value') <= 100
@@ -2125,16 +2270,20 @@ class ReportGeneratorAgent:
                 labels = []
                 values = []
 
-                for p in valid_percentages[:5]:
+                for p in valid_percentages[:6]:  # 더 많은 데이터 지원
                     context = p.get('context', '항목')
                     if len(context) > 20:
                         context = context[:20] + "..."
                     labels.append(context)
                     values.append(float(p['value']))
 
+                # 데이터가 많으면 doughnut, 적으면 pie
+                chart_type = "doughnut" if len(values) > 4 else "pie"
+
                 chart = {
-                    "title": f"{query[:30]}... 비율 분석 (실제 데이터)",
-                    "type": "pie",
+                    "title": f"{query[:30]}... 비율 분석",
+                    "type": chart_type,
+                    "palette": "modern",
                     "data": {
                         "labels": labels,
                         "datasets": [{"label": "비율 (%)", "data": values}]
@@ -2143,13 +2292,12 @@ class ReportGeneratorAgent:
                     "data_type": "real"
                 }
                 charts.append(chart)
-                print(f"- 파이 차트 생성 완료: {chart['title']}")
+                print(f"- {chart_type.upper()} 차트 생성: {chart['title']}")
 
-        # 2. 일반 수치 데이터 -> 바 차트
+        # 2. 수치 데이터 -> 다양한 바 차트 및 복합 차트
         numbers = extracted_data.get('extracted_numbers', [])
         if len(numbers) >= 2:
             print(f"- 수치 데이터 발견: {len(numbers)}개")
-            # 데이터 검증
             valid_numbers = [
                 n for n in numbers
                 if isinstance(n.get('value'), (int, float))
@@ -2160,7 +2308,7 @@ class ReportGeneratorAgent:
                 values = []
                 units = []
 
-                for n in valid_numbers[:5]:
+                for n in valid_numbers[:8]:  # 더 많은 데이터 지원
                     context = n.get('context', '항목')
                     if len(context) > 15:
                         context = context[:15] + "..."
@@ -2168,12 +2316,23 @@ class ReportGeneratorAgent:
                     values.append(float(n['value']))
                     units.append(n.get('unit', ''))
 
-                # 단위 통일 (첫 번째 단위 사용)
                 primary_unit = units[0] if units[0] else '단위'
 
+                # 데이터 특성에 따라 차트 타입 선택
+                if len(values) > 6:
+                    chart_type = "horizontalbar"  # 많은 데이터는 가로 바
+                    palette = "corporate"
+                elif any(v < 0 for v in values):  # 음수 포함시
+                    chart_type = "waterfall"
+                    palette = "warm"
+                else:
+                    chart_type = "bar"
+                    palette = "modern"
+
                 chart = {
-                    "title": f"{query[:30]}... 주요 수치 (실제 데이터)",
-                    "type": "bar",
+                    "title": f"{query[:30]}... 주요 수치",
+                    "type": chart_type,
+                    "palette": palette,
                     "data": {
                         "labels": labels,
                         "datasets": [{"label": f"수치 ({primary_unit})", "data": values}]
@@ -2182,31 +2341,45 @@ class ReportGeneratorAgent:
                     "data_type": "real"
                 }
                 charts.append(chart)
-                print(f"- 바 차트 생성 완료: {chart['title']}")
+                print(f"- {chart_type.upper()} 차트 생성: {chart['title']}")
 
-        # 3. 트렌드 데이터 -> 라인 차트
+        # 3. 트렌드 데이터 -> 고급 시계열 차트
         trends = extracted_data.get('trends', [])
-        if len(trends) >= 2:
+        if len(trends) >= 3:  # 최소 3개 이상의 트렌드 데이터
             print(f"- 트렌드 데이터 발견: {len(trends)}개")
 
             labels = []
             values = []
 
-            for t in trends[:6]:
+            for t in trends[:10]:  # 더 많은 트렌드 데이터 지원
                 period = t.get('period', '기간')
                 labels.append(period)
 
-                # 변화율 추출
                 change_str = str(t.get('change', '0'))
                 import re
                 numbers = re.findall(r'-?\d+\.?\d*', change_str)
                 change_value = float(numbers[0]) if numbers else 0
                 values.append(change_value)
 
-            if len(values) >= 2:
+            if len(values) >= 3:
+                # 변화 패턴에 따라 차트 타입 선택
+                has_negative = any(v < 0 for v in values)
+                variance = max(values) - min(values)
+
+                if variance > 50:  # 변동성이 큰 경우
+                    chart_type = "area"
+                    palette = "vibrant"
+                elif has_negative:  # 음수 포함
+                    chart_type = "line"
+                    palette = "warm"
+                else:
+                    chart_type = "timeseries"
+                    palette = "modern"
+
                 chart = {
-                    "title": f"{query[:30]}... 시간별 변화 추이 (실제 데이터)",
-                    "type": "line",
+                    "title": f"{query[:30]}... 시간별 변화 추이",
+                    "type": chart_type,
+                    "palette": palette,
                     "data": {
                         "labels": labels,
                         "datasets": [{"label": "변화율 (%)", "data": values}]
@@ -2215,9 +2388,151 @@ class ReportGeneratorAgent:
                     "data_type": "real"
                 }
                 charts.append(chart)
-                print(f"- 라인 차트 생성 완료: {chart['title']}")
+                print(f"- {chart_type.upper()} 차트 생성: {chart['title']}")
 
-        print(f"- 총 {len(charts)}개 차트 생성 완료")
+        # 4. 카테고리별 데이터 -> 그룹화된 차트
+        categories = extracted_data.get('categories', [])
+        if len(categories) >= 3:
+            print(f"- 카테고리 데이터 발견: {len(categories)}개")
+
+            # 카테고리 데이터가 여러 시리즈를 가지는지 확인
+            multi_series = any(isinstance(cat.get('values'), list) for cat in categories)
+
+            if multi_series:
+                # 다중 시리즈 데이터 -> 스택 차트 또는 그룹 바 차트
+                labels = []
+                series_data = {}
+
+                for cat in categories[:6]:
+                    labels.append(cat.get('name', '카테고리'))
+                    values = cat.get('values', [])
+                    for i, value in enumerate(values[:3]):  # 최대 3개 시리즈
+                        series_name = f"시리즈 {i+1}"
+                        if series_name not in series_data:
+                            series_data[series_name] = []
+                        series_data[series_name].append(value)
+
+                datasets = []
+                for series_name, data in series_data.items():
+                    datasets.append({"label": series_name, "data": data})
+
+                chart = {
+                    "title": f"{query[:30]}... 카테고리별 비교",
+                    "type": "groupedbar",
+                    "palette": "corporate",
+                    "data": {
+                        "labels": labels,
+                        "datasets": datasets
+                    },
+                    "source": "실제 추출 데이터",
+                    "data_type": "real"
+                }
+                charts.append(chart)
+                print(f"- GROUPEDBAR 차트 생성: {chart['title']}")
+
+        # 5. 성능 지표 데이터 -> 레이더 차트
+        metrics = extracted_data.get('metrics', [])
+        if len(metrics) >= 3:
+            print(f"- 성능 지표 발견: {len(metrics)}개")
+
+            labels = []
+            values = []
+
+            for m in metrics[:8]:  # 레이더 차트는 최대 8개 축
+                labels.append(m.get('name', '지표'))
+                score = m.get('score', m.get('value', 50))
+                values.append(float(score))
+
+            chart = {
+                "title": f"{query[:30]}... 성능 지표 분석",
+                "type": "radar",
+                "palette": "vibrant",
+                "data": {
+                    "labels": labels,
+                    "datasets": [{"label": "성능 점수", "data": values}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            }
+            charts.append(chart)
+            print(f"- RADAR 차트 생성: {chart['title']}")
+
+        # 6. 좌표 데이터 -> 스캐터/버블 차트
+        points = extracted_data.get('coordinates', [])
+        if len(points) >= 4:
+            print(f"- 좌표 데이터 발견: {len(points)}개")
+
+            scatter_data = []
+            for p in points[:20]:  # 최대 20개 포인트
+                x = p.get('x', 0)
+                y = p.get('y', 0)
+                size = p.get('size', 10)
+                scatter_data.append({"x": x, "y": y, "r": size})
+
+            chart_type = "bubble" if any(p.get('r', 10) != 10 for p in scatter_data) else "scatter"
+
+            chart = {
+                "title": f"{query[:30]}... 분포 분석",
+                "type": chart_type,
+                "palette": "gradient",
+                "data": {
+                    "datasets": [{"label": "데이터 포인트", "data": scatter_data}]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            }
+            charts.append(chart)
+            print(f"- {chart_type.upper()} 차트 생성: {chart['title']}")
+
+        # 7. 복합 데이터 -> 콤보 차트
+        if len(numbers) >= 2 and len(trends) >= 2:
+            print("- 복합 데이터 발견, 콤보 차트 생성")
+
+            # 수치 데이터와 트렌드 데이터 결합
+            combo_labels = []
+            bar_data = []
+            line_data = []
+
+            # 라벨 통합 (최대 6개)
+            for i in range(min(6, min(len(numbers), len(trends)))):
+                combo_labels.append(f"항목 {i+1}")
+                bar_data.append(float(numbers[i].get('value', 0)))
+
+                # 트렌드에서 변화율 추출
+                change_str = str(trends[i].get('change', '0'))
+                import re
+                change_numbers = re.findall(r'-?\d+\.?\d*', change_str)
+                change_value = float(change_numbers[0]) if change_numbers else 0
+                line_data.append(change_value)
+
+            chart = {
+                "title": f"{query[:30]}... 복합 분석",
+                "type": "combo",
+                "palette": "corporate",
+                "data": {
+                    "labels": combo_labels,
+                    "datasets": [
+                        {
+                            "type": "bar",
+                            "label": "수치 데이터",
+                            "data": bar_data,
+                            "yAxisID": "y"
+                        },
+                        {
+                            "type": "line",
+                            "label": "변화율 (%)",
+                            "data": line_data,
+                            "yAxisID": "y1"
+                        }
+                    ]
+                },
+                "source": "실제 추출 데이터",
+                "data_type": "real"
+            }
+            charts.append(chart)
+            print(f"- COMBO 차트 생성: {chart['title']}")
+
+        print(f"- 총 {len(charts)}개 고급 차트 생성 완료")
         return charts
 
     def _validate_chart_data(self, chart: Dict) -> bool:
