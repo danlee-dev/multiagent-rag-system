@@ -287,9 +287,10 @@ IMPROVED_REACT_PROMPT = PromptTemplate.from_template(IMPROVED_REACT_PROMPT_TEMPL
 class ProcessorAgent:
     """데이터 가공 전담 Agent - 다양한 처리 작업을 수행"""
 
-    def __init__(self, model_pro: str = "gemini-2.5-pro", model_flash: str = "gemini-2.5-flash", temperature: float = 0.2):
+    def __init__(self, model_pro: str = "gemini-2.5-pro", model_flash: str = "gemini-2.5-flash", temperature: float = 0.2, use_react: bool = False):
         self.llm_pro = ChatGoogleGenerativeAI(model=model_pro, temperature=temperature)
         self.llm_flash = ChatGoogleGenerativeAI(model=model_flash, temperature=0)
+        self.use_react = use_react  # ReAct 사용 여부 제어 - 기본값을 False로 변경
 
         # 처리 타입과 해당 메서드를 매핑
         self.processor_mapping = {
@@ -543,7 +544,14 @@ class ProcessorAgent:
             }
 
     async def _generate_report(self, data: Any, query: str) -> str:
-        """ReAct Agent를 사용하여 실시간 스트리밍이 가능한 최종 보고서를 생성합니다."""
+        """보고서 생성 - ReAct 사용 옵션에 따라 처리 방식 결정"""
+
+        # ReAct 사용이 비활성화된 경우 직접 폴백 사용
+        if not self.use_react:
+            print("  - ReAct 비활성화됨, 직접 LLM 보고서 생성...")
+            context = str(data) if not isinstance(data, str) else data
+            return await self._fallback_report_generation(context, query)
+
         print("  - ReAct Agent를 사용한 실시간 보고서 생성 시작...")
 
         try:
@@ -556,40 +564,79 @@ class ProcessorAgent:
             # ReAct Agent 도구들 정의
             tools = [debug_web_search, vector_db_search, graph_db_search, rdb_search, scrape_and_extract_content]
 
+            # 더 안정적인 LLM 설정 (온도 낮춤)
+            stable_llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.1,  # 온도를 낮춰서 더 예측 가능한 출력
+                max_output_tokens=2000
+            )
+
             # ReAct Agent 생성 - hub에서 기본 프롬프트 사용
             react_prompt = hub.pull("hwchase17/react")
             react_agent = create_react_agent(
-                llm=self.llm_pro,
+                llm=stable_llm,
                 tools=tools,
                 prompt=react_prompt
             )
 
-            # Agent Executor 생성 (early_stopping_method 제거)
+            # Agent Executor 생성 - 파싱 오류 처리 강화
             agent_executor = AgentExecutor(
                 agent=react_agent,
                 tools=tools,
                 verbose=True,
-                handle_parsing_errors=True,
-                max_iterations=5,  # 반복 횟수 제한
-                return_intermediate_steps=True  # 중간 단계 반환
+                handle_parsing_errors=True,  # 간단하게 True로 설정
+                max_iterations=2,  # 반복 횟수를 더 줄임
+                return_intermediate_steps=False,  # 중간 단계 반환 비활성화
+                max_execution_time=15.0  # 실행 시간 제한을 더 짧게
             )
 
             try:
-                # ReAct Agent 실행
+                # 매우 간단하고 직접적인 입력으로 ReAct Agent 실행
+                # 컨텍스트를 포함하여 도구 사용 필요성을 최소화
+                context_summary = context[:1000] if len(context) > 1000 else context
+                
+                enhanced_query = f"""
+주어진 컨텍스트만 사용하여 질문에 답변하세요. 추가 도구는 꼭 필요한 경우에만 사용하세요.
+
+컨텍스트: {context_summary}
+
+질문: {query}
+
+가능하면 주어진 컨텍스트만으로 답변을 완성하세요.
+"""
+
                 result = await agent_executor.ainvoke({
-                    "input": query,
-                    "context": context
+                    "input": enhanced_query
                 })
 
                 # 최종 답변 반환
-                final_answer = result.get("output", "보고서 생성에 실패했습니다.")
-                print("  - ReAct Agent 보고서 생성 완료")
-                return final_answer
+                final_answer = result.get("output", "")
+                if final_answer and len(final_answer.strip()) > 10:
+                    print("  - ReAct Agent 보고서 생성 완료")
+                    return final_answer
+                else:
+                    print("  - ReAct Agent 출력이 부족함, 폴백 사용")
+                    return await self._fallback_report_generation(context, query)
 
             except Exception as e:
-                print(f"  - ReAct Agent 실행 오류: {e}")
-                # 폴백: 기본 LLM으로 보고서 생성
-                return await self._fallback_report_generation(context, query)
+                error_message = str(e)
+                print(f"  - ReAct Agent 실행 오류: {error_message}")
+
+                # 다양한 ReAct 오류 타입에 따른 처리
+                error_keywords = [
+                    "Invalid Format", "Missing 'Action:'", "iteration limit", 
+                    "time limit", "파싱 오류", "Expecting value", 
+                    "Agent stopped", "JSON decode", "Action Input"
+                ]
+                
+                if any(keyword in error_message for keyword in error_keywords):
+                    print(f"  - ReAct 관련 오류 감지: {error_message[:100]}...")
+                    print("  - 폴백 보고서 생성으로 전환")
+                    return await self._fallback_report_generation(context, query)
+                else:
+                    # 다른 오류도 폴백으로 처리
+                    print("  - 기타 오류, 폴백 사용")
+                    return await self._fallback_report_generation(context, query)
 
         except Exception as e:
             print(f"  - ReAct Agent 초기화 오류: {e}")
@@ -599,29 +646,58 @@ class ProcessorAgent:
         """ReAct 실패시 폴백 보고서 생성"""
         print("  - 폴백 보고서 생성 시작...")
 
-        fallback_prompt = f"""
-        사용자 요청: "{query}"
-        현재 날짜: 2025년 8월
+        try:
+            # 안정적인 LLM으로 폴백 보고서 생성
+            fallback_llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+                max_output_tokens=3000
+            )
 
-        다음 정보를 바탕으로 전문적이고 포괄적인 보고서를 작성하세요:
+            fallback_prompt = f"""
+당신은 전문적인 시장 분석가입니다. 다음 정보를 바탕으로 간결하고 유용한 보고서를 작성하세요.
 
-        {context[:8000]}
+사용자 질문: "{query}"
+현재 날짜: 2025년 8월
 
-        보고서 구성:
-        # 1. 요약 (Executive Summary)
-        # 2. 시장 현황 분석
-        # 3. 소비자 분석
-        # 4. 추천 사항
-        # 5. 전략 제안
-        # 6. 결론
+수집된 데이터:
+{context[:6000]}
 
-        **중요:**
-        - 2024-2025년 최신 정보를 우선 활용
-        - 구체적인 데이터와 수치 포함
-        - 실행 가능한 전략 제시
-        - 마크다운 형식으로 작성
-        """
+다음 구조로 보고서를 작성하세요:
 
-        response = await self.llm_pro.ainvoke(fallback_prompt)
-        print("  - 폴백 보고서 생성 완료")
-        return response.content
+## 주요 발견사항
+[핵심 내용 3-4개 항목으로 정리]
+
+## 상세 분석
+[구체적인 데이터와 분석 내용]
+
+## 실행 가능한 제안
+[2-3개의 구체적인 제안사항]
+
+**주의사항:**
+- 마크다운 형식 사용
+- 구체적인 수치나 데이터가 있다면 반드시 포함
+- 실용적이고 행동 가능한 내용 위주
+- 2000자 이내로 간결하게 작성
+"""
+
+            response = await fallback_llm.ainvoke(fallback_prompt)
+            result = response.content if hasattr(response, 'content') else str(response)
+
+            print("  - 폴백 보고서 생성 완료")
+            return result
+
+        except Exception as e:
+            print(f"  - 폴백 보고서 생성 실패: {e}")
+            # 최종 폴백: 간단한 요약
+            return f"""
+# 질문에 대한 답변
+
+**질문:** {query}
+
+**수집된 정보 요약:**
+{context[:1000]}
+
+**참고:** 상세한 분석을 위해 시스템 오류로 인해 간단한 요약만 제공됩니다.
+더 자세한 정보가 필요하시면 다시 문의해 주세요.
+"""

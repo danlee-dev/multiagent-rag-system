@@ -68,7 +68,11 @@ class RAGWorkflow:
         self.triage_agent = TriageAgent()
         self.orchestrator_agent = OrchestratorAgent()
         self.data_gatherer_agent = DataGathererAgent()
-        self.processor_agent = ProcessorAgent()
+        
+        # 환경 변수에서 ReAct 사용 여부 확인
+        use_react = os.getenv('USE_REACT_AGENT', 'false').lower() == 'true'
+        self.processor_agent = ProcessorAgent(use_react=use_react)
+        
         self.simple_answerer_agent = SimpleAnswererAgent()
         self.workflow = self._create_workflow()
         print(">> 최종 아키텍처 RAG 워크플로우 초기화 완료")

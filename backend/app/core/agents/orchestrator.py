@@ -94,7 +94,11 @@ class OrchestratorAgent:
 
         # Worker agents 초기화
         self.data_gatherer = DataGathererAgent()
-        self.processor = ProcessorAgent()
+
+        # 환경 변수에서 ReAct 사용 여부 확인
+        import os
+        use_react = os.getenv('USE_REACT_AGENT', 'ture').lower() == 'true'
+        self.processor = ProcessorAgent(use_react=use_react)
 
     async def generate_plan(self, state: StreamingAgentState) -> StreamingAgentState:
         """실행 계획 수립 - 쿼리 복잡도에 따른 적응적 계획"""
@@ -175,7 +179,7 @@ class OrchestratorAgent:
         {{
             "step_id": 1,
             "description": "내부 DB 검색",
-            "agent": "DataGathererAgent", 
+            "agent": "DataGathererAgent",
             "inputs": {{"tool": "vector_db_search", "query": "..."}}
         }},
         {{
