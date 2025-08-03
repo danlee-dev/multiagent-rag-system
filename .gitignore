@@ -137,7 +137,6 @@ vector_store/
 *.joblib
 *.model
 *.bin
-models/
 checkpoints/
 
 # LangChain cache
