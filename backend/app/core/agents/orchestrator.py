@@ -97,56 +97,103 @@ class OrchestratorAgent:
         self.processor = ProcessorAgent()
 
     async def generate_plan(self, state: StreamingAgentState) -> StreamingAgentState:
-        """실행 계획 수립"""
+        """실행 계획 수립 - 쿼리 복잡도에 따른 적응적 계획"""
         print(f"\n>> Orchestrator: 실행 계획 수립")
 
         query = state["original_query"]
         feedback = state.get('replan_feedback', '피드백 없음')
 
         planning_prompt = f"""
-사용자 요청에 대한 구체적이고 실행 가능한 계획을 수립하세요:
+사용자 요청에 대한 최적화된 실행 계획을 수립하세요:
 
 요청: {query}
+현재 날짜: 2025년 8월
 
 이전 피드백: {feedback}
 
 사용 가능한 도구들:
-**tool - DataGathererAgent용:**
-- web_search: 웹에서 최신 정보 검색
+**DataGathererAgent 도구:**
+- web_search: 웹에서 최신 정보 검색 (2024-2025 최신 데이터 우선)
 - vector_db_search: 내부 벡터 DB 검색
 - graph_db_search: 그래프 DB 관계 검색
 - rdb_search: 관계형 DB 데이터 검색
-- scrape_content: 특정 웹페이지 스크래핑
 
-**processor_type - ProcessorAgent용:**
-- evaluate_criticism: 정보 충분성 평가
-- integrate_context: 다중 소스 정보 통합
+**ProcessorAgent 처리:**
+- integrate_context: 다중 소스 정보 통합 (여러 데이터 소스가 있을 때만)
 - generate_report: 최종 보고서 생성
 - create_charts: 데이터 시각화 차트 생성
 
-다음 형태로 구체적인 실행 계획을 JSON으로 생성하세요:
+**계획 수립 원칙:**
+
+1. **단순 웹 검색 요청** (예: "최근 트렌드 조사해줘", "~에 대해 알려줘")
+   → 2단계: web_search → generate_report
+
+2. **복잡한 분석 요청** (예: "비교 분석", "통합 보고서", "시각화 포함")
+   → 3-5단계: 데이터 수집 → 통합/분석 → 시각화/보고서
+
+3. **다중 소스 필요 시에만** integrate_context 사용
+
+쿼리 복잡도에 맞는 **최소한의 효율적인** 실행 계획을 JSON으로 생성하세요:
+
+**단순 검색 예시:**
 {{
-    "title": "보고서/분석 제목",
-    "reasoning": "이 계획을 선택한 이유와 접근 방식",
+    "title": "보고서 제목",
+    "reasoning": "단순 웹 검색으로 충분한 요청이므로 2단계 계획",
     "steps": [
         {{
             "step_id": 0,
-            "description": "단계에 대한 구체적 설명",
-            "agent": "DataGathererAgent" 또는 "ProcessorAgent",
+            "description": "웹에서 최신 정보 검색",
+            "agent": "DataGathererAgent",
             "inputs": {{
-                "tool": "사용할 도구명" (DataGatherer인 경우),
-                "query": "구체적인 검색 쿼리" (DataGatherer인 경우),
-                "processor_type": "처리 타입" (Processor인 경우),
-                "source_steps": [의존하는 이전 단계 ID들] (Processor인 경우)
+                "tool": "web_search",
+                "query": "구체적인 검색 쿼리 2024 2025 최신"
+            }}
+        }},
+        {{
+            "step_id": 1,
+            "description": "검색 결과 기반 보고서 생성",
+            "agent": "ProcessorAgent",
+            "inputs": {{
+                "processor_type": "generate_report",
+                "source_steps": [0]
             }}
         }}
     ]
 }}
 
-예시 (스마트팜 관련 요청):
-- 웹에서 최신 트렌드 검색 → 내부 DB에서 성공 사례 검색 → 정보 통합 → 최종 보고서 생성
-- 각 단계는 명확한 목적과 구체적인 쿼리를 가져야 함
-- step_id는 0부터 시작하는 순차적 번호
+**복잡 분석 예시:**
+{{
+    "title": "종합 분석 보고서",
+    "reasoning": "다중 소스 통합 및 시각화가 필요한 복잡한 요청",
+    "steps": [
+        {{
+            "step_id": 0,
+            "description": "웹 검색",
+            "agent": "DataGathererAgent",
+            "inputs": {{"tool": "web_search", "query": "..."}}
+        }},
+        {{
+            "step_id": 1,
+            "description": "내부 DB 검색",
+            "agent": "DataGathererAgent", 
+            "inputs": {{"tool": "vector_db_search", "query": "..."}}
+        }},
+        {{
+            "step_id": 2,
+            "description": "정보 통합",
+            "agent": "ProcessorAgent",
+            "inputs": {{"processor_type": "integrate_context", "source_steps": [0, 1]}}
+        }},
+        {{
+            "step_id": 3,
+            "description": "최종 보고서 생성",
+            "agent": "ProcessorAgent",
+            "inputs": {{"processor_type": "generate_report", "source_steps": [2]}}
+        }}
+    ]
+}}
+
+**중요:** 요청의 실제 복잡도를 정확히 분석하여 꼭 필요한 단계만 포함하세요!
 """
         try:
             response = await self.llm.ainvoke(planning_prompt)
@@ -167,8 +214,31 @@ class OrchestratorAgent:
                 if "steps" not in plan:
                     plan["steps"] = []
 
+                # 단계 수 제한 (성능 최적화)
+                if len(plan["steps"]) > 6:
+                    plan["steps"] = plan["steps"][:6]
+                    plan["reasoning"] += " (성능 최적화를 위해 6단계로 제한)"
+
                 print(f"  계획 생성 완료: {plan['title']}")
                 print(f"  단계 수: {len(plan['steps'])}")
+
+                # 상세 계획 디버깅 출력
+                print(f"\n>> 계획 상세 정보:")
+                print(f"  제목: {plan['title']}")
+                print(f"  근거: {plan['reasoning']}")
+                print(f"  전체 단계:")
+                for step in plan['steps']:
+                    print(f"    단계 {step['step_id']}: {step['description']}")
+                    print(f"      에이전트: {step['agent']}")
+                    if 'tool' in step['inputs']:
+                        print(f"      도구: {step['inputs']['tool']}")
+                        print(f"      쿼리: {step['inputs']['query']}")
+                    elif 'processor_type' in step['inputs']:
+                        print(f"      처리타입: {step['inputs']['processor_type']}")
+                        if 'source_steps' in step['inputs']:
+                            print(f"      소스단계: {step['inputs']['source_steps']}")
+
+                print(f"  계획 생성 응답: {plan}")
                 sys.stdout.flush()
 
                 state["plan"] = plan
@@ -180,40 +250,50 @@ class OrchestratorAgent:
             print(f"계획 생성 실패, 기본 계획 사용: {e}")
             sys.stdout.flush()
 
-            # 기본 계획 생성
+            # 간소화된 기본 계획 생성 (단순 웹 검색 → 보고서)
             default_plan = {
                 "title": f"{query} 기본 분석",
-                "reasoning": "계획 생성 실패로 기본 워크플로우 사용",
+                "reasoning": "계획 생성 실패로 기본 2단계 워크플로우 사용",
                 "steps": [
                     {
                         "step_id": 0,
-                        "description": "웹에서 관련 정보 검색",
+                        "description": "웹에서 최신 정보 검색",
                         "agent": "DataGathererAgent",
                         "inputs": {
                             "tool": "web_search",
-                            "query": query
+                            "query": f"{query} 2024 2025 최신 현황"
                         }
                     },
                     {
                         "step_id": 1,
-                        "description": "검색 결과 통합 및 요약",
-                        "agent": "ProcessorAgent",
-                        "inputs": {
-                            "processor_type": "summarize_and_integrate",
-                            "source_steps": [0]
-                        }
-                    },
-                    {
-                        "step_id": 2,
-                        "description": "최종 보고서 생성",
+                        "description": "검색 결과 기반 보고서 생성",
                         "agent": "ProcessorAgent",
                         "inputs": {
                             "processor_type": "generate_report",
-                            "source_steps": [1]
+                            "source_steps": [0]
                         }
                     }
                 ]
             }
+
+            # 기본 계획 디버깅 출력
+            print(f"\n>> 기본 계획 상세 정보:")
+            print(f"  제목: {default_plan['title']}")
+            print(f"  근거: {default_plan['reasoning']}")
+            print(f"  전체 단계:")
+            for step in default_plan['steps']:
+                print(f"    단계 {step['step_id']}: {step['description']}")
+                print(f"      에이전트: {step['agent']}")
+                if 'tool' in step['inputs']:
+                    print(f"      도구: {step['inputs']['tool']}")
+                    print(f"      쿼리: {step['inputs']['query']}")
+                elif 'processor_type' in step['inputs']:
+                    print(f"      처리타입: {step['inputs']['processor_type']}")
+                    if 'source_steps' in step['inputs']:
+                        print(f"      소스단계: {step['inputs']['source_steps']}")
+
+            print(f"  기본 계획 전체: {default_plan}")
+            sys.stdout.flush()
 
             state["plan"] = default_plan
             return state

@@ -145,6 +145,7 @@ export default function Home() {
       charts: [],
       timestamp: new Date().toISOString(),
       isStreaming: true,
+      sources: null, // 출처 정보 초기화
     };
 
     setCurrentConversation((prev) => [...prev, assistantMessage]);
@@ -172,6 +173,7 @@ export default function Home() {
       let finalCharts = [];
       let currentStep = 0;
       let totalSteps = 0;
+      let finalSources = null; // 최종 출처 정보 저장
 
       while (true) {
         const { done, value } = await reader.read();
@@ -201,16 +203,16 @@ export default function Home() {
                   break;
 
                 case "plan":
-                  totalSteps = data.total_steps;
+                  totalSteps = data.total_steps || data.plan?.steps?.length || 0;
                   setStatusMessage(`실행 계획: ${totalSteps}개 단계`);
-                  console.log("실행 계획:", data.steps);
+                  console.log("실행 계획:", data.plan);
                   break;
 
                 case "step_start":
                   currentStep = data.step;
 
                   // Claude 스타일 도구 사용 상태 표시
-                  let statusText = `단계 ${data.step}/${data.total}: ${data.description}`;
+                  let statusText = `단계 ${data.step}/${totalSteps}: ${data.description}`;
                   if (data.tool && data.query) {
                     if (data.status === "searching") {
                       statusText = `🔍 ${data.tool}로 검색 중: "${data.query}"`;
@@ -234,11 +236,17 @@ export default function Home() {
 
                   setCurrentSearchResults(prev => [...prev, searchResultData]);
 
-                  // 출처 패널용 데이터도 업데이트
-                  const searchSources = {
+                  // 자동으로 검색 결과 펼치기 (최신 검색만)
+                  setSearchResultsVisible(prev => ({
+                    ...prev,
+                    [`${data.step}-latest`]: true
+                  }));
+
+                  // 임시 출처 데이터 업데이트 (실시간 표시용)
+                  const tempSources = {
                     total_count: data.results.length,
                     sources: data.results.map((result, index) => ({
-                      id: `search_${data.step}_${index}`,
+                      id: `temp_${data.step}_${index}`,
                       title: result.title,
                       content: result.content_preview,
                       url: result.url,
@@ -248,7 +256,7 @@ export default function Home() {
                     }))
                   };
 
-                  setSourcesData(searchSources);
+                  setSourcesData(tempSources);
                   break;
 
                 case "section_start":
@@ -313,9 +321,16 @@ export default function Home() {
                   break;
 
                 case "complete":
-                case "final_complete":
+                  // 완료시 최종 출처 정보 저장
+                  if (data.sources) {
+                    finalSources = data.sources;
+                  }
                   setStatusMessage("완료");
-                  // 스트리밍 완료 - 최종 메시지 업데이트
+                  break;
+
+                case "final_complete":
+                  setStatusMessage("");
+                  // 스트리밍 완료 - 최종 메시지 업데이트 (출처 정보 보존)
                   setCurrentConversation((prev) => {
                     const newConversation = prev.map((msg) =>
                       msg.id === assistantMessage.id
@@ -324,7 +339,7 @@ export default function Home() {
                             content: finalContent,
                             charts: finalCharts,
                             isStreaming: false,
-                            sources: msg.sources || null,
+                            sources: finalSources, // 최종 출처 정보 저장
                           }
                         : msg
                     );
@@ -349,11 +364,12 @@ export default function Home() {
                   });
 
                   setIsStreaming(false);
-                  setStatusMessage("");
+                  // 검색 결과는 유지하되, 스트리밍 완료 표시
+                  console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   return;
 
                 case "error":
-                  setStatusMessage(`오류: ${data.content}`);
+                  setStatusMessage(`오류: ${data.message}`);
                   setIsStreaming(false);
                   return;
               }
@@ -586,20 +602,17 @@ export default function Home() {
                   <div className="message-content">
                     {renderMessageContent(message)}
 
-                    {/* 출처 보기 버튼 - 간단하고 깔끔하게 */}
+                    {/* 출처 보기 버튼 - 완료된 메시지에만 표시 */}
                     {message.type === "assistant" && !message.isStreaming && (
                       <div className="message-actions">
-                        {/* 디버깅용 */}
-                        {/* <div style={{fontSize: '12px', color: '#666', marginBottom: '8px'}}>
-                          Debug: sources={message.sources ? JSON.stringify(message.sources.total_count) : 'null'}
-                        </div> */}
-
                         {message.sources && message.sources.total_count > 0 && (
                           <button
                             className="sources-simple-btn"
                             onClick={() => {
                               setSourcesData(message.sources);
-                              toggleSourcesPanel();
+                              if (!sourcesPanelVisible) {
+                                toggleSourcesPanel();
+                              }
                             }}
                           >
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -615,6 +628,7 @@ export default function Home() {
                 </div>
               ))}
 
+              {/* 스트리밍 중일 때만 검색 결과와 상태 표시 */}
               {isStreaming && (
                 <div className="streaming-status">
                   <div className="status-content">
