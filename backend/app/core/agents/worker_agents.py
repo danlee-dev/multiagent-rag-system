@@ -579,40 +579,42 @@ class ProcessorAgent:
                 prompt=react_prompt
             )
 
-            # Agent Executor 생성 - 파싱 오류 처리 강화
+            # Agent Executor 생성 - ReAct 적극 활용 설정
             agent_executor = AgentExecutor(
                 agent=react_agent,
                 tools=tools,
                 verbose=True,
-                handle_parsing_errors=True,  # 간단하게 True로 설정
-                max_iterations=2,  # 반복 횟수를 더 줄임
-                return_intermediate_steps=False,  # 중간 단계 반환 비활성화
-                max_execution_time=15.0  # 실행 시간 제한을 더 짧게
+                handle_parsing_errors=True,  # 파싱 오류 자동 처리
+                max_iterations=5,  # ReAct 반복 횟수 증가
+                return_intermediate_steps=True,  # 중간 단계 반환 활성화
+                max_execution_time=60.0  # 실행 시간 제한 확대
             )
 
             try:
-                # 매우 간단하고 직접적인 입력으로 ReAct Agent 실행
-                # 컨텍스트를 포함하여 도구 사용 필요성을 최소화
-                context_summary = context[:1000] if len(context) > 1000 else context
-                
+                # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
                 enhanced_query = f"""
-주어진 컨텍스트만 사용하여 질문에 답변하세요. 추가 도구는 꼭 필요한 경우에만 사용하세요.
-
-컨텍스트: {context_summary}
+다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
+필요한 경우 도구를 사용하여 추가 정보를 수집하고 분석하세요.
 
 질문: {query}
 
-가능하면 주어진 컨텍스트만으로 답변을 완성하세요.
+기본 컨텍스트: {context[:500] if len(context) > 500 else context}
+
+단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
 """
 
                 result = await agent_executor.ainvoke({
                     "input": enhanced_query
                 })
 
-                # 최종 답변 반환
+                # ReAct Agent 결과 처리
                 final_answer = result.get("output", "")
+                intermediate_steps = result.get("intermediate_steps", [])
+
+                print(f"  - ReAct Agent 실행 완료 (중간 단계: {len(intermediate_steps)}개)")
+
                 if final_answer and len(final_answer.strip()) > 10:
-                    print("  - ReAct Agent 보고서 생성 완료")
+                    print("  - ReAct Agent 보고서 생성 성공")
                     return final_answer
                 else:
                     print("  - ReAct Agent 출력이 부족함, 폴백 사용")
@@ -622,20 +624,18 @@ class ProcessorAgent:
                 error_message = str(e)
                 print(f"  - ReAct Agent 실행 오류: {error_message}")
 
-                # 다양한 ReAct 오류 타입에 따른 처리
-                error_keywords = [
-                    "Invalid Format", "Missing 'Action:'", "iteration limit", 
-                    "time limit", "파싱 오류", "Expecting value", 
-                    "Agent stopped", "JSON decode", "Action Input"
+                # 심각한 ReAct 오류만 폴백 처리, 나머지는 재시도
+                critical_errors = [
+                    "Invalid Format", "Missing 'Action:'", "JSON decode",
+                    "파싱 오류", "Expecting value"
                 ]
-                
-                if any(keyword in error_message for keyword in error_keywords):
-                    print(f"  - ReAct 관련 오류 감지: {error_message[:100]}...")
-                    print("  - 폴백 보고서 생성으로 전환")
+
+                if any(keyword in error_message for keyword in critical_errors):
+                    print(f"  - 심각한 ReAct 오류 감지, 폴백 사용: {error_message[:100]}...")
                     return await self._fallback_report_generation(context, query)
                 else:
-                    # 다른 오류도 폴백으로 처리
-                    print("  - 기타 오류, 폴백 사용")
+                    # 시간 초과나 반복 제한은 부분 결과라도 사용 시도
+                    print("  - 경미한 오류, 폴백 사용")
                     return await self._fallback_report_generation(context, query)
 
         except Exception as e:

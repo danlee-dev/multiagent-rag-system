@@ -214,21 +214,30 @@ class RAGWorkflow:
 
                 # Executor가 한 단계를 끝냈을 때
                 elif node_name == "executor":
+                    current_step_index = outputs.get("current_step_index", 0)
                     last_result = outputs.get("step_results", [])[-1] if outputs.get("step_results") else None
 
                     if last_result:
-                        # 최종 보고서 생성 결과 처리 (문자열)
-                        if isinstance(last_result, str):
-                            yield json.dumps({"type": "content", "chunk": last_result})
-
-                        # DataGatherer의 결과(SearchResult)를 스트리밍
-                        elif isinstance(last_result, list) and all(isinstance(item, SearchResult) for item in last_result):
-                            results_for_ui = [res.model_dump() for res in last_result]
-                            yield json.dumps({"type": "search_results", "results": results_for_ui})
-
-                        # 기타 결과 (딕셔너리 등)
-                        elif isinstance(last_result, dict):
-                            yield json.dumps({"type": "result", "data": last_result})
+                        # 계획에서 현재 단계 정보 가져오기
+                        plan = outputs.get("plan") or event["data"].get("input", {}).get("plan", {})
+                        steps = plan.get("steps", [])
+                        current_step = current_step_index - 1  # 방금 완료된 단계
+                        
+                        # context integration 단계는 프론트엔드로 전송하지 않음 (중간 처리 결과)
+                        if (current_step >= 0 and current_step < len(steps) and 
+                            steps[current_step].get("inputs", {}).get("processor_type") in ["integrate_context", "summarize_and_integrate"]):
+                            print(f"- Context integration 결과 생략 (백엔드에서만 처리)")
+                            sys.stdout.flush()
+                        else:
+                            # 다른 모든 결과는 프론트엔드로 전송
+                            if isinstance(last_result, str):
+                                yield json.dumps({"type": "content", "chunk": last_result})
+                            elif isinstance(last_result, list) and all(hasattr(item, 'source') for item in last_result):
+                                # SearchResult 리스트인 경우
+                                results_for_ui = [item.model_dump() if hasattr(item, 'model_dump') else item.__dict__ for item in last_result]
+                                yield json.dumps({"type": "search_results", "results": results_for_ui})
+                            elif isinstance(last_result, dict):
+                                yield json.dumps({"type": "result", "data": last_result})
 
         yield json.dumps({"type": "complete", "message": "모든 작업이 완료되었습니다."})
 

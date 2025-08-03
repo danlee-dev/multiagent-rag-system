@@ -271,6 +271,7 @@ export default function Home() {
                   break;
 
                 case "content":
+                  // 최종 보고서 및 기타 컨텐츠 표시 (context integration 제외)
                   finalContent += data.chunk;
                   setCurrentConversation((prev) =>
                     prev.map((msg) =>
@@ -364,7 +365,6 @@ export default function Home() {
                   });
 
                   setIsStreaming(false);
-                  // 검색 결과는 유지하되, 스트리밍 완료 표시
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   return;
 
@@ -372,6 +372,15 @@ export default function Home() {
                   setStatusMessage(`오류: ${data.message}`);
                   setIsStreaming(false);
                   return;
+
+                case "result":
+                  // 기타 결과 데이터는 로그로만 출력 (context integration 결과 제외)
+                  console.log("처리 결과:", data.data);
+                  break;
+
+                default:
+                  console.log("알 수 없는 이벤트 타입:", data.type, data);
+                  break;
               }
             } catch (parseError) {
               console.error("JSON 파싱 오류:", parseError);
