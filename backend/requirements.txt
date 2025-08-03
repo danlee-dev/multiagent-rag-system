@@ -13,3 +13,4 @@ playwright
 pypdf
 numpy
 elasticsearch==8.18.1
+sentence-transformers

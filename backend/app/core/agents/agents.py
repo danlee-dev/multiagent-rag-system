@@ -180,10 +180,6 @@ class PlanningAgent:
         print(f"- 원본 쿼리: {query}")
 
         # 1. 보고서 섹션 계획 수립
-        print('- 의도 분석 시작...')
-        intent = await self._analyze_intent(query)
-        print(f"- 분석된 의도: {intent}")
-        query = f"원본 쿼리: {query}\n사용자 의도 분석 결과: {intent}"  # 의도를 쿼리에 추가
         print("- 섹션 계획 수립 시작...")
         section_plan = await self._create_section_plan(query)
         print(f"- 섹션 계획: {section_plan}")
@@ -635,6 +631,12 @@ class RetrieverAgent:
         self.current_date = datetime.now()
         self.current_date_str = self.current_date.strftime("%Y년 %m월 %d일")
         self.current_year = self.current_date.year
+
+        # vector_db 속성 추가 (기본값으로 True 설정)
+        self.vector_db = True
+        self.rdb = True
+        self.graph_db = True
+        self.web_search = True
 
         # ToolCallingAgent 초기화
         self.tool_calling_agent = ToolCallingAgent(llm=self.llm, tools=self.available_tools)

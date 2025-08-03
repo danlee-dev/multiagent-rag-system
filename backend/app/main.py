@@ -517,9 +517,6 @@ class RAGWorkflow:
     ) -> StreamingAgentState:
         """MEDIUM 복잡도용 간단한 컨텍스트 통합 (스트리밍 지원)"""
         all_results = state.multi_source_results_stream
-        if not all_results:
-            state.integrated_context = "검색된 정보가 없어 기본 답변을 제공합니다."
-            return state
 
 
         context_summary = ""
@@ -566,9 +563,6 @@ class RAGWorkflow:
     async def _simple_integration_streaming(self, state: StreamingAgentState):
         """MEDIUM 복잡도용 실시간 스트리밍 통합"""
         all_results = state.multi_source_results_stream
-        if not all_results:
-            yield "검색된 정보가 없어 기본 답변을 제공합니다."
-            return
 
         # 간단한 요약 및 통합
         context_summary = ""
