@@ -321,6 +321,222 @@ class ProcessorAgent:
             print(f"- {error_message}")
             return {"error": error_message}
 
+    async def process_streaming(self, processor_type: str, data: Any, original_query: str):
+        """스트리밍 지원 처리 메서드"""
+        print(f"\n>> Processor 스트리밍 실행: {processor_type}")
+        sys.stdout.flush()
+
+        if processor_type == "generate_report":
+            # 보고서 생성은 스트리밍으로 처리
+            async for chunk in self._generate_report_streaming(data, original_query):
+                yield chunk
+        else:
+            # 다른 처리는 기존 방식으로 실행 후 결과 반환
+            result = await self.process(processor_type, data, original_query)
+            yield str(result)
+
+    async def _generate_report_streaming(self, data: Any, query: str):
+        """보고서 생성 - 스트리밍 버전"""
+        # ReAct 사용이 비활성화된 경우 직접 폴백 사용
+        if not self.use_react:
+            print("  - ReAct 비활성화됨, 직접 LLM 보고서 생성...")
+            context = str(data) if not isinstance(data, str) else data
+            async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                yield chunk
+            return
+
+        print("  - ReAct Agent를 사용한 실시간 보고서 생성 시작...")
+
+        try:
+            # 데이터를 문자열로 변환
+            if isinstance(data, list):
+                context = "\n".join([str(item) for item in data])
+            else:
+                context = str(data)
+
+            # ReAct Agent 도구들 정의
+            tools = [debug_web_search, vector_db_search, graph_db_search, rdb_search, scrape_and_extract_content]
+
+            # 더 안정적인 LLM 설정 (온도 낮춤)
+            stable_llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.1,  # 온도를 낮춰서 더 예측 가능한 출력
+                max_output_tokens=2000
+            )
+
+            # ReAct Agent 생성 - hub에서 기본 프롬프트 사용
+            react_prompt = hub.pull("hwchase17/react")
+            react_agent = create_react_agent(
+                llm=stable_llm,
+                tools=tools,
+                prompt=react_prompt
+            )
+
+            # Agent Executor 생성 - ReAct 적극 활용 설정
+            agent_executor = AgentExecutor(
+                agent=react_agent,
+                tools=tools,
+                verbose=True,
+                handle_parsing_errors=True,  # 파싱 오류 자동 처리
+                max_iterations=5,  # ReAct 반복 횟수 증가
+                return_intermediate_steps=True,  # 중간 단계 반환 활성화
+                max_execution_time=60.0  # 실행 시간 제한 확대
+            )
+
+            try:
+                async for chunk in self._react_agent_streaming_chunks(agent_executor, context, query):
+                    yield chunk
+
+            except Exception as e:
+                error_message = str(e)
+                print(f"  - ReAct Agent 실행 오류: {error_message}")
+
+                # 심각한 ReAct 오류만 폴백 처리, 나머지는 재시도
+                critical_errors = [
+                    "Invalid Format", "Missing 'Action:'", "JSON decode",
+                    "파싱 오류", "Expecting value"
+                ]
+
+                if any(keyword in error_message for keyword in critical_errors):
+                    print(f"  - 심각한 ReAct 오류 감지, 폴백 사용: {error_message[:100]}...")
+                    async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                        yield chunk
+                else:
+                    # 시간 초과나 반복 제한은 부분 결과라도 사용 시도
+                    print("  - 경미한 오류, 폴백 사용")
+                    async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                        yield chunk
+
+        except Exception as e:
+            print(f"  - ReAct Agent 초기화 오류: {e}")
+            context = str(data) if not isinstance(data, str) else data
+            async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                yield chunk
+
+    async def _react_agent_streaming_chunks(self, agent_executor: AgentExecutor, context: str, query: str):
+        """ReAct Agent를 스트리밍으로 실행하여 청크 단위로 전송"""
+        print("  - ReAct Agent 스트리밍 실행 시작...")
+        
+        # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
+        enhanced_query = f"""
+다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
+필요한 경우 도구를 사용하여 추가 정보를 수집하고 분석하세요.
+
+질문: {query}
+
+기본 컨텍스트: {context[:500] if len(context) > 500 else context}
+
+단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
+"""
+
+        try:
+            # ReAct Agent를 astream_events로 실행하여 스트리밍 처리
+            final_output = ""
+            agent_completed = False
+            
+            async for event in agent_executor.astream_events(
+                {"input": enhanced_query}, 
+                version="v1"
+            ):
+                kind = event["event"]
+                
+                # LLM의 실제 출력을 캐치하여 실시간 전송
+                if kind == "on_llm_stream" and event["name"] == "ChatGoogleGenerativeAI":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, 'content') and chunk.content:
+                        final_output += chunk.content
+                        yield chunk.content
+                
+                # Agent의 최종 답변 확인
+                elif kind == "on_chain_end" and event["name"] == "AgentExecutor":
+                    agent_completed = True
+                    output = event["data"].get("output", {})
+                    if isinstance(output, dict) and "output" in output:
+                        agent_answer = output["output"]
+                        # 아직 전송되지 않은 부분이 있다면 전송
+                        if agent_answer and len(agent_answer) > len(final_output):
+                            remaining = agent_answer[len(final_output):]
+                            final_output += remaining
+                            yield remaining
+
+            # ReAct Agent가 정상 완료된 경우, 결과의 길이와 상관없이 성공으로 처리
+            if agent_completed:
+                print(f"\n  - ReAct Agent 성공적으로 완료 (출력 길이: {len(final_output)}자)")
+                # 출력이 매우 짧거나 비어있는 경우에만 경고 표시 (하지만 폴백 사용하지 않음)
+                if len(final_output.strip()) < 5:
+                    print("  - 경고: ReAct Agent 출력이 매우 짧습니다 (하지만 결과를 신뢰합니다)")
+            else:
+                # Agent가 완료되지 않은 경우에만 폴백 사용
+                print("  - ReAct Agent가 완료되지 않음, 폴백 사용")
+                async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                    yield chunk
+
+        except Exception as e:
+            print(f"  - ReAct Agent 스트리밍 오류: {e}")
+            async for chunk in self._fallback_report_generation_streaming_chunks(context, query):
+                yield chunk
+
+    async def _fallback_report_generation_streaming_chunks(self, context: str, query: str):
+        """폴백 보고서 생성 - 스트리밍 청크 버전"""
+        print("  - 폴백 보고서 스트리밍 생성 시작...")
+
+        try:
+            # 안정적인 LLM으로 폴백 보고서 생성
+            fallback_llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                temperature=0.3,
+                max_output_tokens=3000
+            )
+
+            fallback_prompt = f"""
+당신은 전문적인 시장 분석가입니다. 다음 정보를 바탕으로 간결하고 유용한 보고서를 작성하세요.
+
+사용자 질문: "{query}"
+현재 날짜: 2025년 8월
+
+수집된 데이터:
+{context[:6000]}
+
+다음 구조로 보고서를 작성하세요:
+
+## 주요 발견사항
+[핵심 내용 3-4개 항목으로 정리]
+
+## 상세 분석
+[구체적인 데이터와 분석 내용]
+
+## 실행 가능한 제안
+[2-3개의 구체적인 제안사항]
+
+**주의사항:**
+- 마크다운 형식 사용
+- 구체적인 수치나 데이터가 있다면 반드시 포함
+- 실용적이고 행동 가능한 내용 위주
+- 2000자 이내로 간결하게 작성
+"""
+
+            async for chunk in fallback_llm.astream(fallback_prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    yield chunk.content
+
+            print(f"\n  - 폴백 보고서 스트리밍 완료")
+
+        except Exception as e:
+            print(f"  - 폴백 보고서 스트리밍 실패: {e}")
+            # 최종 폴백: 간단한 요약을 한 번에 전송
+            fallback_text = f"""
+# 질문에 대한 답변
+
+**질문:** {query}
+
+**수집된 정보 요약:**
+{context[:1000]}
+
+**참고:** 상세한 분석을 위해 시스템 오류로 인해 간단한 요약만 제공됩니다.
+더 자세한 정보가 필요하시면 다시 문의해 주세요.
+"""
+            yield fallback_text
+
     async def _summarize_and_integrate(self, data: Any, query: str) -> str:
         """여러 검색 결과를 통합하고 요약합니다."""
         print("  - 데이터 통합 및 요약 작업 수행...")
@@ -550,7 +766,7 @@ class ProcessorAgent:
         if not self.use_react:
             print("  - ReAct 비활성화됨, 직접 LLM 보고서 생성...")
             context = str(data) if not isinstance(data, str) else data
-            return await self._fallback_report_generation(context, query)
+            return await self._fallback_report_generation_streaming(context, query)
 
         print("  - ReAct Agent를 사용한 실시간 보고서 생성 시작...")
 
@@ -591,34 +807,8 @@ class ProcessorAgent:
             )
 
             try:
-                # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
-                enhanced_query = f"""
-다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
-필요한 경우 도구를 사용하여 추가 정보를 수집하고 분석하세요.
-
-질문: {query}
-
-기본 컨텍스트: {context[:500] if len(context) > 500 else context}
-
-단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
-"""
-
-                result = await agent_executor.ainvoke({
-                    "input": enhanced_query
-                })
-
-                # ReAct Agent 결과 처리
-                final_answer = result.get("output", "")
-                intermediate_steps = result.get("intermediate_steps", [])
-
-                print(f"  - ReAct Agent 실행 완료 (중간 단계: {len(intermediate_steps)}개)")
-
-                if final_answer and len(final_answer.strip()) > 10:
-                    print("  - ReAct Agent 보고서 생성 성공")
-                    return final_answer
-                else:
-                    print("  - ReAct Agent 출력이 부족함, 폴백 사용")
-                    return await self._fallback_report_generation(context, query)
+                # ReAct Agent 실행을 스트리밍으로 처리
+                return await self._react_agent_streaming(agent_executor, context, query)
 
             except Exception as e:
                 error_message = str(e)
@@ -632,19 +822,76 @@ class ProcessorAgent:
 
                 if any(keyword in error_message for keyword in critical_errors):
                     print(f"  - 심각한 ReAct 오류 감지, 폴백 사용: {error_message[:100]}...")
-                    return await self._fallback_report_generation(context, query)
+                    return await self._fallback_report_generation_streaming(context, query)
                 else:
                     # 시간 초과나 반복 제한은 부분 결과라도 사용 시도
                     print("  - 경미한 오류, 폴백 사용")
-                    return await self._fallback_report_generation(context, query)
+                    return await self._fallback_report_generation_streaming(context, query)
 
         except Exception as e:
             print(f"  - ReAct Agent 초기화 오류: {e}")
-            return await self._fallback_report_generation(context, query)
+            context = str(data) if not isinstance(data, str) else data
+            return await self._fallback_report_generation_streaming(context, query)
 
-    async def _fallback_report_generation(self, context: str, query: str) -> str:
-        """ReAct 실패시 폴백 보고서 생성"""
-        print("  - 폴백 보고서 생성 시작...")
+    async def _react_agent_streaming(self, agent_executor: AgentExecutor, context: str, query: str) -> str:
+        """ReAct Agent를 스트리밍으로 실행"""
+        print("  - ReAct Agent 스트리밍 실행 시작...")
+        
+        # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
+        enhanced_query = f"""
+다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
+필요한 경우 도구를 사용하여 추가 정보를 수집하고 분석하세요.
+
+질문: {query}
+
+기본 컨텍스트: {context[:500] if len(context) > 500 else context}
+
+단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
+"""
+
+        try:
+            # ReAct Agent를 astream_events로 실행하여 스트리밍 처리
+            full_response = ""
+            agent_completed = False
+            
+            async for event in agent_executor.astream_events(
+                {"input": enhanced_query}, 
+                version="v1"
+            ):
+                kind = event["event"]
+                
+                # LLM의 실제 출력을 캐치
+                if kind == "on_llm_stream" and event["name"] == "ChatGoogleGenerativeAI":
+                    chunk = event["data"]["chunk"]
+                    if hasattr(chunk, 'content') and chunk.content:
+                        full_response += chunk.content
+                        print(chunk.content, end="", flush=True)
+                
+                # Agent의 최종 답변을 확인
+                elif kind == "on_chain_end" and event["name"] == "AgentExecutor":
+                    agent_completed = True
+                    final_output = event["data"].get("output", {})
+                    if isinstance(final_output, dict) and "output" in final_output:
+                        agent_answer = final_output["output"]
+                        if agent_answer and len(agent_answer.strip()) > len(full_response.strip()):
+                            full_response = agent_answer
+
+            # ReAct Agent가 정상 완료되었다면 결과를 신뢰
+            if agent_completed:
+                print(f"\n  - ReAct Agent 성공적으로 완료 (출력 길이: {len(full_response)}자)")
+                return full_response
+            else:
+                # Agent가 완료되지 않은 경우에만 폴백 사용
+                print("  - ReAct Agent가 완료되지 않음, 폴백 사용")
+                return await self._fallback_report_generation_streaming(context, query)
+
+        except Exception as e:
+            print(f"  - ReAct Agent 스트리밍 오류: {e}")
+            return await self._fallback_report_generation_streaming(context, query)
+
+    async def _fallback_report_generation_streaming(self, context: str, query: str) -> str:
+        """폴백 보고서 생성 - 스트리밍 버전"""
+        print("  - 폴백 보고서 스트리밍 생성 시작...")
 
         try:
             # 안정적인 LLM으로 폴백 보고서 생성
@@ -681,14 +928,17 @@ class ProcessorAgent:
 - 2000자 이내로 간결하게 작성
 """
 
-            response = await fallback_llm.ainvoke(fallback_prompt)
-            result = response.content if hasattr(response, 'content') else str(response)
+            full_response = ""
+            async for chunk in fallback_llm.astream(fallback_prompt):
+                if hasattr(chunk, 'content') and chunk.content:
+                    full_response += chunk.content
+                    print(chunk.content, end="", flush=True)
 
-            print("  - 폴백 보고서 생성 완료")
-            return result
+            print(f"\n  - 폴백 보고서 스트리밍 완료 (길이: {len(full_response)}자)")
+            return full_response
 
         except Exception as e:
-            print(f"  - 폴백 보고서 생성 실패: {e}")
+            print(f"  - 폴백 보고서 스트리밍 실패: {e}")
             # 최종 폴백: 간단한 요약
             return f"""
 # 질문에 대한 답변
@@ -701,3 +951,5 @@ class ProcessorAgent:
 **참고:** 상세한 분석을 위해 시스템 오류로 인해 간단한 요약만 제공됩니다.
 더 자세한 정보가 필요하시면 다시 문의해 주세요.
 """
+
+

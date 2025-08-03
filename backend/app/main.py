@@ -155,9 +155,13 @@ class RAGWorkflow:
             data = [state["step_results"][i] for i in source_steps if i < len(state["step_results"])]
             data = data[0] if len(data) == 1 else data
 
-            result = self.processor_agent.process(processor_type, data, state['original_query'])
-            if asyncio.iscoroutine(result):
-                result = await result
+            # generate_report는 stream_workflow_events에서 실시간 처리하므로 placeholder만 반환
+            if processor_type == "generate_report":
+                result = "REPORT_STREAMING_PLACEHOLDER"
+            else:
+                result = self.processor_agent.process(processor_type, data, state['original_query'])
+                if asyncio.iscoroutine(result):
+                    result = await result
 
         step_results = state.get("step_results", [])
         step_results.append(result)
@@ -228,6 +232,18 @@ class RAGWorkflow:
                             steps[current_step].get("inputs", {}).get("processor_type") in ["integrate_context", "summarize_and_integrate"]):
                             print(f"- Context integration 결과 생략 (백엔드에서만 처리)")
                             sys.stdout.flush()
+                        # generate_report 단계는 실시간 스트리밍으로 처리
+                        elif (current_step >= 0 and current_step < len(steps) and 
+                              steps[current_step].get("inputs", {}).get("processor_type") == "generate_report"):
+                            # 보고서 생성을 실시간 스트리밍으로 재실행
+                            source_steps = steps[current_step].get("inputs", {}).get("source_steps", [])
+                            step_results = outputs.get("step_results", [])
+                            data = [step_results[i] for i in source_steps if i < len(step_results)]
+                            data = data[0] if len(data) == 1 else data
+                            
+                            # 실시간 스트리밍 처리
+                            async for chunk in self.processor_agent.process_streaming("generate_report", data, outputs.get("original_query", "")):
+                                yield json.dumps({"type": "content", "chunk": chunk})
                         else:
                             # 다른 모든 결과는 프론트엔드로 전송
                             if isinstance(last_result, str):
