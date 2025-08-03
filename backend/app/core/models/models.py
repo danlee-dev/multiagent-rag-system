@@ -37,14 +37,32 @@ class ExpertiseLevel(str, Enum):
     EXPERT = "expert"
 
 class SearchResult(BaseModel):
-    """검색 결과 표준 형태"""
-    source: str  # 데이터 소스 이름(graph_db, vector_db, memory, ...)
+    """검색 결과 표준 형태 - Claude 스타일 UI를 위한 확장된 정보"""
+    source: str  # 데이터 소스 이름(graph_db, vector_db, memory, web_search, ...)
     content: str  # 검색 결과 내용
-    relevance_score: float = Field(ge=0.0, le=1.0)  # 검색 결과의 관련도
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     search_query: str = ""  # 검색한 쿼리 그 자체
-    memory_type: Optional[MemoryType] = None  # 메모리 기반 검색일 경우
+
+    # Claude 스타일 UI를 위한 추가 필드들
+    title: str = Field(default="", description="문서 제목 또는 결과 제목")
+    url: Optional[str] = Field(default=None, description="원본 URL")
+    relevance_score: float = Field(default=0.7, description="관련성 점수")
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    # 메타데이터는 호환성을 위해 유지
+    @property
+    def metadata(self) -> Dict[str, Any]:
+        """호환성을 위한 metadata 프로퍼티"""
+        return {
+            "title": self.title,
+            "url": self.url,
+            "document_type": self.document_type,
+            "relevance_score": self.relevance_score,
+            "timestamp": self.timestamp,
+            "document_id": self.document_id,
+            "chunk_index": self.chunk_index,
+            "similarity_score": self.similarity_score
+        }
 
 class CriticResult(BaseModel):
     # 'pass' 또는 'fail'로 더 명확하게
@@ -96,6 +114,10 @@ class StreamingAgentState(TypedDict):
 
     # 최종 결과
     final_answer: Optional[str]
+
+    # 추가 필드들
+    session_id: str
+    metadata: Dict[str, Any]
 
 class ChartData(BaseModel):
     """차트 데이터"""

@@ -1,5 +1,9 @@
 FROM python:3.10-slim
 
+# 환경 변수 설정 - 출력 버퍼링 비활성화
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONIOENCODING=utf-8
+
 # PostgreSQL 클라이언트 및 개발 라이브러리 설치
 RUN apt-get update && apt-get install -y \
     libpq-dev \
@@ -19,4 +23,4 @@ COPY .env* ./
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

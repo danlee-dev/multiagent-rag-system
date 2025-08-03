@@ -1,4 +1,5 @@
 import os
+from typing import List
 import requests
 import json
 import asyncio
@@ -277,102 +278,84 @@ def rdb_search(query: str) -> str:
 
 
 @tool
-def vector_db_search(query: str, top_k = 10) -> str:
+def vector_db_search(query: str, top_k = 10) -> List:
     """
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
     """
-    config = RAGConfig()
-    print("1")
-    config.OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-    print("1")
-    search_engine = MultiIndexRAGSearchEngine(openai_api_key=config.OPENAI_API_KEY, config=config)
+    try:
+        config = RAGConfig()
+        print(">> Vector DB 검색 초기화 중...")
 
-    print(f"\n>> Vector DB 검색 시작: {query}")
-    results = search_engine.advanced_rag_search(query)
-    top_results = results.get('results', [])[:top_k]
+        # Google API Key 사용 (OpenAI가 아님)
+        google_api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+        if not google_api_key:
+            print("- Google API Key가 없어 Mock DB로 대체")
+            # Mock DB 사용
+            mock_db = create_mock_vector_db()
+            results = mock_db.similarity_search(query, k=top_k)
+            formatted_results = []
+            for i, doc in enumerate(results):
+                formatted_results.append({
+                    "content": doc.page_content,
+                    "title": f"Mock Document {i+1}",
+                    "document_id": f"mock_{i+1}",
+                    "similarity_score": 0.8 - (i * 0.1),
+                    "metadata": doc.metadata
+                })
+            return formatted_results
 
-    print(f"- 검색된 문서 수: {len(top_results)}개")
+        search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config)
 
-    if not top_results:
-        print(">> Vector DB 검색 완료: 관련 문서 없음")
-        return f"'{query}'에 대한 관련 문서를 찾을 수 없습니다."
+        print(f"\n>> Vector DB 검색 시작: {query}")
+        results = search_engine.advanced_rag_search(query)
+        top_results = results.get('results', [])[:top_k]
 
-    # ReAct가 판단하기 쉬운 핵심 정보만 추출
-    processed_docs = []
-    for i, doc in enumerate(top_results):
-        # 핵심 필드 추출
-        title = doc.get('name', doc.get('title', 'N/A'))
-        content = doc.get('page_content', doc.get('content', ''))
-        metadata = doc.get('meta_data', doc.get('metadata', {}))
+        print(f"- 검색된 문서 수: {len(top_results)}개")
 
-        # 문서 제목과 출처 정보
-        doc_title = metadata.get('document_title', title)
-        source_info = metadata.get('document_file_path', metadata.get('source', 'N/A'))
-        page_num = metadata.get('page_number', [])
-        if isinstance(page_num, list) and page_num:
-            page_info = f"p.{page_num[0]}" if len(page_num) == 1 else f"p.{page_num[0]}-{page_num[-1]}"
-        else:
-            page_info = ""
+        if not top_results:
+            print(">> Vector DB 검색 완료: 관련 문서 없음")
+            return []
 
-        # 인덱스 정보
-        index_name = doc.get('_index', 'unknown')
+        # ReAct가 판단하기 쉬운 핵심 정보만 추출
+        processed_docs = []
+        for i, doc in enumerate(top_results):
+            # 핵심 필드 추출
+            title = doc.get('name', doc.get('title', f'Document {i+1}'))
+            content = doc.get('page_content', doc.get('content', ''))
+            metadata = doc.get('meta_data', doc.get('metadata', {}))
+            similarity = doc.get('score', doc.get('similarity_score', 0.7))
 
-        # 유사도 점수
-        similarity = doc.get('score', doc.get('rerank_score', doc.get('similarity_score', 0)))
-        if similarity > 1:  # rerank_score는 보통 1보다 큰 값
-            similarity = min(similarity / 4, 1.0)  # 0-1 범위로 정규화
+            formatted_result = {
+                "content": content,
+                "title": title,
+                "document_id": f"doc_{i+1}",
+                "similarity_score": similarity,
+                "metadata": metadata
+            }
+            processed_docs.append(formatted_result)
 
-        # 내용 요약 (너무 길면 자름)
-        content_summary = content[:400] if content else "내용 없음"
+        return processed_docs
 
-        processed_doc = {
-            'rank': i + 1,
-            'title': title,
-            'document_title': doc_title,
-            'content_preview': content_summary,
-            'source_file': source_info.split('/')[-1] if source_info != 'N/A' else 'N/A',
-            'page_info': page_info,
-            'index': index_name,
-            'relevance_score': round(similarity, 3),
-            'content_length': len(content)
-        }
-        processed_docs.append(processed_doc)
-
-    # ReAct가 이해하기 쉬운 형태로 요약
-    summary = f"Vector DB 검색 완료 - '{query}' 관련 {len(processed_docs)}개 문서 발견\n\n"
-    summary += "=== 검색 결과 요약 ===\n"
-
-    for doc in processed_docs:
-        summary += f"[{doc['rank']}] {doc['title']}\n"
-        summary += f"  - 문서: {doc['document_title']}\n"
-        summary += f"  - 출처: {doc['source_file']}"
-        if doc['page_info']:
-            summary += f" ({doc['page_info']})"
-        summary += f"\n  - 관련도: {doc['relevance_score']:.3f}\n"
-        summary += f"  - 인덱스: {doc['index']}\n"
-        summary += f"  - 내용: {doc['content_preview'][:]}...\n\n"
-
-    # 검색 품질 평가 정보 추가
-    high_relevance_count = len([d for d in processed_docs if d['relevance_score'] > 0.7])
-    medium_relevance_count = len([d for d in processed_docs if 0.5 <= d['relevance_score'] <= 0.7])
-
-    summary += "=== 검색 품질 평가 ===\n"
-    summary += f"- 고관련도 문서 (0.7+): {high_relevance_count}개\n"
-    summary += f"- 중관련도 문서 (0.5-0.7): {medium_relevance_count}개\n"
-    summary += f"- 평균 관련도: {sum(d['relevance_score'] for d in processed_docs) / len(processed_docs):.3f}\n"
-
-    if high_relevance_count >= 3:
-        summary += "✓ 충분한 고품질 문서 확보됨\n"
-    elif high_relevance_count + medium_relevance_count >= 5:
-        summary += "△ 적당한 품질의 문서 확보됨\n"
-    else:
-        summary += "⚠ 관련도가 낮은 문서가 많음 - 검색어 조정 필요\n"
-
-    print(f">> Vector DB 검색 완료: {len(processed_docs)}개 문서, 평균 관련도 {sum(d['relevance_score'] for d in processed_docs) / len(processed_docs):.3f}")
-
-    print(f"=== 검색 결과 ===\n{summary}")
-
-    return summary
+    except Exception as e:
+        print(f"Vector DB 검색 오류: {e}")
+        # 오류 발생 시 Mock DB로 fallback
+        try:
+            print("- Mock DB로 fallback 실행")
+            mock_db = create_mock_vector_db()
+            results = mock_db.similarity_search(query, k=top_k)
+            formatted_results = []
+            for i, doc in enumerate(results):
+                formatted_results.append({
+                    "content": doc.page_content,
+                    "title": f"Mock Document {i+1}",
+                    "document_id": f"mock_{i+1}",
+                    "similarity_score": 0.8 - (i * 0.1),
+                    "metadata": doc.metadata
+                })
+            return formatted_results
+        except Exception as fallback_error:
+            print(f"Mock DB fallback도 실패: {fallback_error}")
+            return []
 
 
 @tool

@@ -1,40 +1,29 @@
 from .core.models.models import (
-    AgentType,
-    MessageType,
+    AgentRole,
     DatabaseType,
     StreamingAgentState,
-    AgentMessage,
     SearchResult,
-    QueryPlan,
     CriticResult,
 )
 
-from .core.agents.agents import (
-    PlanningAgent,
-    RetrieverAgent,
-    CriticAgent1,
-    ContextIntegratorAgent,
-    ReportGeneratorAgent,
-    SimpleAnswererAgent,
-)
+# 새로운 모듈화된 agent 시스템
+from .core.agents.orchestrator import TriageAgent, OrchestratorAgent
+from .core.agents.worker_agents import DataGathererAgent, ProcessorAgent
+from .core.agents.conversational_agent import SimpleAnswererAgent
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 __author__ = "이성민"
 
 
 __all__ = [
-    "AgentType",
-    "MessageType",
+    "AgentRole",
     "DatabaseType",
     "StreamingAgentState",
-    "AgentMessage",
     "SearchResult",
-    "QueryPlan",
     "CriticResult",
-    "PlanningAgent",
-    "RetrieverAgent",
-    "CriticAgent1",
-    "ContextIntegratorAgent",
-    "ReportGeneratorAgent",
+    "TriageAgent",
+    "OrchestratorAgent",
+    "DataGathererAgent",
+    "ProcessorAgent",
     "SimpleAnswererAgent",
 ]

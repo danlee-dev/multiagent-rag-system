@@ -166,7 +166,7 @@ class PostgreSQLRAG:
 
         # 1. LLM을 통해 사용자 의도를 구조화된 정보(params)로 변환합니다.
         params = self._extract_search_params(query)
-        
+
         results = {
             'query': query,
             'extracted_params': params,
@@ -181,7 +181,7 @@ class PostgreSQLRAG:
         # 2. 오직 search_type에 따라 어떤 정보를 검색할지 결정합니다.
         #   - 'general' 타입은 관련된 모든 정보를 검색합니다.
         #   - 특정 타입('price', 'nutrition' 등)은 해당 정보만 정확히 검색합니다.
-        
+
         if search_type in ['price', 'general']:
             print(">> 가격 정보 검색 수행")
             results['price_data'] = self.search_price_data(params)
@@ -226,7 +226,7 @@ class PostgreSQLRAG:
         if not items:
             print(">> 검색할 품목이 없어서 영양소 검색 건너뜀")
             return []
-        
+
         # foods 테이블을 중심으로 5개의 영양소 테이블을 LEFT JOIN하는 새로운 쿼리
         base_query = """
         SELECT
@@ -375,8 +375,8 @@ class PostgreSQLRAG:
             fa."트랜스 올레산(18:1(n-9)t) (mg/100g)" as "trans_oleic_acid_18_1_n9t_mg",
             fa."트랜스 리놀레산(18:2t) (mg/100g)" as "trans_linoleic_acid_18_2t_mg",
             fa."트랜스 리놀렌산(18:3t) (mg/100g)" as "trans_linolenic_acid_18_3t_mg",
-            
-            
+
+
         FROM foods f
         LEFT JOIN proximates p ON f.id = p.food_id
         LEFT JOIN minerals m ON f.id = m.food_id
@@ -394,7 +394,7 @@ class PostgreSQLRAG:
             item_conditions = " OR ".join(['f."식품명" ILIKE %s' for item in items])
             where_conditions.append(f"({item_conditions})")
             query_params.extend([f"%{item}%" for item in items])
-        
+
         if where_conditions:
             base_query += " AND " + " AND ".join(where_conditions)
 
