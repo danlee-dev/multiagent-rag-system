@@ -981,11 +981,23 @@ class RAGWorkflow:
                         additional_context=last_state.get("additional_context", ""),
                     )
 
-                    medium_answer = ""
-                    async for chunk in self._simple_integration_streaming(state_obj):
-                        medium_answer += chunk
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'content': chunk})}\n\n"
-                        await asyncio.sleep(0.01)
+                    # 항상 실시간 스트리밍으로 답변 생성
+                    final_answer = last_state.get("final_answer", "")
+                    if final_answer and len(final_answer) > 100:
+                        print(f"- report_generation 결과를 실시간 스트리밍으로 전송 ({len(final_answer)}자)")
+                        # 실제 타이핑 효과를 위해 문자 단위로 스트리밍
+                        medium_answer = ""
+                        for char in final_answer:
+                            medium_answer += char
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'content': char})}\n\n"
+                            await asyncio.sleep(0.02)  # 타이핑 속도 조절
+                    else:
+                        print("- 간단한 통합 답변 생성")
+                        medium_answer = ""
+                        async for chunk in self._simple_integration_streaming(state_obj):
+                            medium_answer += chunk
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'content': chunk})}\n\n"
+                            await asyncio.sleep(0.01)
 
                     yield f"data: {json.dumps({'type': 'complete', 'final_answer': medium_answer, 'conversation_id': conversation_id})}\n\n"
 
