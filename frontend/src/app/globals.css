@@ -974,7 +974,8 @@ button:focus-visible,
       */
 
 .claude-search-results {
-  margin-top: 16px;
+  margin: 16px auto; /* 가운데 정렬을 위해 auto 추가 */
+  max-width: 600px; /* 컴팩트한 너비로 제한 */
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid var(--border-light);
@@ -993,7 +994,7 @@ button:focus-visible,
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 14px; /* 패딩을 줄여서 더 컴팩트하게 */
   cursor: pointer;
   background: rgba(255, 255, 255, 0.01);
   transition: background-color 0.2s;
@@ -1005,9 +1006,10 @@ button:focus-visible,
 
 .search-info {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  flex-direction: row; /* 세로에서 가로로 변경 */
+  gap: 8px; /* 간격 조정 */
   flex: 1;
+  align-items: center; /* 중앙 정렬 */
 }
 
 .search-tool {
@@ -1017,15 +1019,23 @@ button:focus-visible,
 }
 
 .search-query {
-  font-size: 13px;
-  color: var(--text-primary);
+  font-size: 12px; /* 폰트 크기 줄임 */
+  color: var(--text-secondary); /* 색상을 조금 더 연하게 */
   font-style: italic;
-  opacity: 0.9;
+  opacity: 0.8; /* 투명도 조정 */
+  max-width: 300px; /* 최대 너비 제한 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .result-count {
   font-size: 11px;
   color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.05); /* 배경 추가 */
+  padding: 2px 6px; /* 패딩 추가 */
+  border-radius: 12px; /* 둥근 모서리 */
+  white-space: nowrap;
 }
 
 .toggle-icon {

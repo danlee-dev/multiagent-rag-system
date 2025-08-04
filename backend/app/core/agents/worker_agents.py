@@ -416,7 +416,7 @@ class ProcessorAgent:
     async def _react_agent_streaming_chunks(self, agent_executor: AgentExecutor, context: str, query: str):
         """ReAct Agent를 스트리밍으로 실행하여 청크 단위로 전송"""
         print("  - ReAct Agent 스트리밍 실행 시작...")
-        
+
         # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
         enhanced_query = f"""
 다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
@@ -433,20 +433,20 @@ class ProcessorAgent:
             # ReAct Agent를 astream_events로 실행하여 스트리밍 처리
             final_output = ""
             agent_completed = False
-            
+
             async for event in agent_executor.astream_events(
-                {"input": enhanced_query}, 
+                {"input": enhanced_query},
                 version="v1"
             ):
                 kind = event["event"]
-                
+
                 # LLM의 실제 출력을 캐치하여 실시간 전송
                 if kind == "on_llm_stream" and event["name"] == "ChatGoogleGenerativeAI":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, 'content') and chunk.content:
                         final_output += chunk.content
                         yield chunk.content
-                
+
                 # Agent의 최종 답변 확인
                 elif kind == "on_chain_end" and event["name"] == "AgentExecutor":
                     agent_completed = True
@@ -523,8 +523,27 @@ class ProcessorAgent:
 
         except Exception as e:
             print(f"  - 폴백 보고서 스트리밍 실패: {e}")
-            # 최종 폴백: 간단한 요약을 한 번에 전송
-            fallback_text = f"""
+
+            # API 할당량 초과 등의 경우 수집된 데이터만으로 간단한 요약 제공
+            error_type = str(e)
+            if "quota" in error_type.lower() or "429" in error_type:
+                yield "\n\n# API 할당량 초과로 인한 간단 요약\n\n"
+                yield f"**질문:** {query}\n\n"
+                yield "**수집된 정보 요약:**\n"
+
+                # 수집된 컨텍스트에서 핵심 정보 추출
+                context_lines = context.split('\n')[:20]  # 처음 20줄만
+                for i, line in enumerate(context_lines):
+                    if line.strip() and len(line.strip()) > 10:
+                        yield f"- {line.strip()}\n"
+                        if i >= 10:  # 최대 10개 항목만
+                            break
+
+                yield "\n**참고:** API 할당량 제한으로 상세한 분석 대신 수집된 데이터의 요약만 제공됩니다.\n"
+                yield "더 자세한 분석을 원하시면 잠시 후 다시 시도해 주세요."
+            else:
+                # 다른 오류의 경우 기본 메시지
+                yield f"""
 # 질문에 대한 답변
 
 **질문:** {query}
@@ -532,10 +551,9 @@ class ProcessorAgent:
 **수집된 정보 요약:**
 {context[:1000]}
 
-**참고:** 상세한 분석을 위해 시스템 오류로 인해 간단한 요약만 제공됩니다.
+**참고:** 시스템 오류로 인해 간단한 요약만 제공됩니다.
 더 자세한 정보가 필요하시면 다시 문의해 주세요.
 """
-            yield fallback_text
 
     async def _summarize_and_integrate(self, data: Any, query: str) -> str:
         """여러 검색 결과를 통합하고 요약합니다."""
@@ -803,7 +821,6 @@ class ProcessorAgent:
                 handle_parsing_errors=True,  # 파싱 오류 자동 처리
                 max_iterations=5,  # ReAct 반복 횟수 증가
                 return_intermediate_steps=True,  # 중간 단계 반환 활성화
-                max_execution_time=60.0  # 실행 시간 제한 확대
             )
 
             try:
@@ -836,7 +853,7 @@ class ProcessorAgent:
     async def _react_agent_streaming(self, agent_executor: AgentExecutor, context: str, query: str) -> str:
         """ReAct Agent를 스트리밍으로 실행"""
         print("  - ReAct Agent 스트리밍 실행 시작...")
-        
+
         # ReAct Agent가 도구를 적극 활용하도록 유도하는 쿼리
         enhanced_query = f"""
 다음 질문에 대해 포괄적이고 상세한 분석을 제공하세요.
@@ -846,27 +863,31 @@ class ProcessorAgent:
 
 기본 컨텍스트: {context[:500] if len(context) > 500 else context}
 
-단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
+- 단계별로 사고하고, 필요한 도구를 사용하여 최상의 답변을 제공하세요.
+- 최종 답변을 제공할 때는, 복잡한 쿼리일 수록, 수집된 정보를 바탕으로 섹션을 잘 나누어서 자세히 답변하세요.
+- 간단한 쿼리는 간단하게 답하되 수집된 정보를 최대한 활용해서 최종 답변을 생성하세요.
+- 이미 이전 Agent 들이 정보를 많이 수집했기 때문에 최종답변을 생성할 때까지 너무 많은 정보를 또 수집하려고 하지는 마세요. 정말 정보가 부족하거나, 실시간 정보가 부족한 경우에만 추가 정보를 수집하세요.
+
 """
 
         try:
             # ReAct Agent를 astream_events로 실행하여 스트리밍 처리
             full_response = ""
             agent_completed = False
-            
+
             async for event in agent_executor.astream_events(
-                {"input": enhanced_query}, 
+                {"input": enhanced_query},
                 version="v1"
             ):
                 kind = event["event"]
-                
+
                 # LLM의 실제 출력을 캐치
                 if kind == "on_llm_stream" and event["name"] == "ChatGoogleGenerativeAI":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, 'content') and chunk.content:
                         full_response += chunk.content
                         print(chunk.content, end="", flush=True)
-                
+
                 # Agent의 최종 답변을 확인
                 elif kind == "on_chain_end" and event["name"] == "AgentExecutor":
                     agent_completed = True
@@ -908,7 +929,7 @@ class ProcessorAgent:
 현재 날짜: 2025년 8월
 
 수집된 데이터:
-{context[:6000]}
+{context[:]}
 
 다음 구조로 보고서를 작성하세요:
 
@@ -939,8 +960,29 @@ class ProcessorAgent:
 
         except Exception as e:
             print(f"  - 폴백 보고서 스트리밍 실패: {e}")
-            # 최종 폴백: 간단한 요약
-            return f"""
+
+            # API 할당량 초과 등의 경우 수집된 데이터만으로 간단한 요약 제공
+            error_type = str(e)
+            if "quota" in error_type.lower() or "429" in error_type:
+                response = f"""
+# API 할당량 초과로 인한 간단 요약
+
+**질문:** {query}
+
+**수집된 정보 요약:**
+"""
+                # 수집된 컨텍스트에서 핵심 정보 추출
+                context_lines = context.split('\n')[:15]  # 처음 15줄만
+                for line in context_lines:
+                    if line.strip() and len(line.strip()) > 10:
+                        response += f"- {line.strip()}\n"
+
+                response += "\n**참고:** API 할당량 제한으로 상세한 분석 대신 수집된 데이터의 요약만 제공됩니다.\n"
+                response += "더 자세한 분석을 원하시면 잠시 후 다시 시도해 주세요."
+                return response
+            else:
+                # 다른 오류의 경우 기본 메시지
+                return f"""
 # 질문에 대한 답변
 
 **질문:** {query}
@@ -948,7 +990,7 @@ class ProcessorAgent:
 **수집된 정보 요약:**
 {context[:1000]}
 
-**참고:** 상세한 분석을 위해 시스템 오류로 인해 간단한 요약만 제공됩니다.
+**참고:** 시스템 오류로 인해 간단한 요약만 제공됩니다.
 더 자세한 정보가 필요하시면 다시 문의해 주세요.
 """
 

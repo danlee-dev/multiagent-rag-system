@@ -203,7 +203,50 @@ class RAGWorkflow:
         async for event in self.workflow.astream_events(initial_state, version="v1"):
             kind = event["event"]
 
-            if kind == "on_chain_end":
+            if kind == "on_chain_start":
+                node_name = event["name"]
+                inputs = event["data"].get("input", {})
+
+                # Executor가 시작될 때 현재 실행할 단계 정보 표시
+                if node_name == "executor":
+                    plan = inputs.get("plan", {})
+                    current_step_index = inputs.get("current_step_index", 0)
+                    steps = plan.get("steps", [])
+                    
+                    if current_step_index < len(steps):
+                        current_step = steps[current_step_index]
+                        agent_type = current_step.get("agent", "unknown")
+                        step_inputs = current_step.get("inputs", {})
+                        
+                        # 각 Agent 타입별로 적절한 상태 메시지 생성
+                        if agent_type == "DataGathererAgent":
+                            tool = step_inputs.get("tool", "")
+                            if tool == "web_search":
+                                status_msg = "웹에서 정보 수집 중..."
+                            elif tool == "vector_db_search":
+                                status_msg = "데이터베이스에서 정보 수집 중..."
+                            elif tool == "graph_db_search":
+                                status_msg = "그래프 데이터베이스에서 정보 수집 중..."
+                            elif tool == "rdb_search":
+                                status_msg = "관계형 데이터베이스에서 정보 수집 중..."
+                            else:
+                                status_msg = f"{tool}에서 정보 수집 중..."
+                        elif agent_type == "ProcessorAgent":
+                            processor_type = step_inputs.get("processor_type", "")
+                            if processor_type == "integrate_context":
+                                status_msg = "수집된 정보 통합 중..."
+                            elif processor_type == "generate_report":
+                                status_msg = "보고서 생성 중..."
+                            elif processor_type == "create_charts":
+                                status_msg = "차트 생성 중..."
+                            else:
+                                status_msg = f"{processor_type} 처리 중..."
+                        else:
+                            status_msg = f"{agent_type} 실행 중..."
+                        
+                        yield json.dumps({"type": "status", "message": status_msg})
+
+            elif kind == "on_chain_end":
                 node_name = event["name"]
                 outputs = event["data"].get("output", {})
 
@@ -245,13 +288,44 @@ class RAGWorkflow:
                             async for chunk in self.processor_agent.process_streaming("generate_report", data, outputs.get("original_query", "")):
                                 yield json.dumps({"type": "content", "chunk": chunk})
                         else:
-                            # 다른 모든 결과는 프론트엔드로 전송
-                            if isinstance(last_result, str):
-                                yield json.dumps({"type": "content", "chunk": last_result})
-                            elif isinstance(last_result, list) and all(hasattr(item, 'source') for item in last_result):
-                                # SearchResult 리스트인 경우
+                            # 다른 모든 결과는 프론트엔드로 전송 (데이터 수집 결과)
+                            if isinstance(last_result, list) and all(hasattr(item, 'source') for item in last_result):
+                                # SearchResult 리스트인 경우 - 도구 이름과 함께 전송
+                                step_info = steps[current_step] if current_step >= 0 and current_step < len(steps) else {}
+                                agent_type = step_info.get("agent", "unknown")
+                                step_inputs = step_info.get("inputs", {})
+                                
+                                # 도구 이름 결정
+                                tool_name = "unknown"
+                                if agent_type == "DataGathererAgent":
+                                    tool = step_inputs.get("tool", "")
+                                    if tool:
+                                        source_map = {
+                                            "web_search": "웹 검색",
+                                            "vector_db_search": "벡터 데이터베이스",
+                                            "graph_db_search": "그래프 데이터베이스",
+                                            "rdb_search": "관계형 데이터베이스"
+                                        }
+                                        tool_name = source_map.get(tool, tool)
+                                    else:
+                                        tool_name = "데이터 수집"
+                                
+                                # 실제 검색 쿼리 추출
+                                search_query = ""
+                                if current_step >= 0 and current_step < len(steps):
+                                    step_info = steps[current_step]
+                                    search_query = step_info.get("inputs", {}).get("query", outputs.get("original_query", ""))
+                                
                                 results_for_ui = [item.model_dump() if hasattr(item, 'model_dump') else item.__dict__ for item in last_result]
-                                yield json.dumps({"type": "search_results", "results": results_for_ui})
+                                yield json.dumps({
+                                    "type": "search_results", 
+                                    "tool_name": tool_name,
+                                    "step": current_step + 1,
+                                    "query": search_query,
+                                    "results": results_for_ui
+                                })
+                            elif isinstance(last_result, str):
+                                yield json.dumps({"type": "content", "chunk": last_result})
                             elif isinstance(last_result, dict):
                                 yield json.dumps({"type": "result", "data": last_result})
 

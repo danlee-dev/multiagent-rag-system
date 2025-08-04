@@ -30,6 +30,7 @@ export default function Home() {
   // Claude 스타일 실시간 검색 결과 상태
   const [currentSearchResults, setCurrentSearchResults] = useState([]);
   const [searchResultsVisible, setSearchResultsVisible] = useState({});
+  const [conversationSearchResults, setConversationSearchResults] = useState({}); // 대화별 검색 결과
 
   // 스크롤 관리
   const messagesEndRef = useRef(null);
@@ -51,14 +52,43 @@ export default function Home() {
   useEffect(() => {
     const savedConversations = localStorage.getItem("chatConversations");
     if (savedConversations) {
-      setConversations(JSON.parse(savedConversations));
+      try {
+        setConversations(JSON.parse(savedConversations));
+      } catch (error) {
+        console.error("대화 히스토리 로드 오류:", error);
+        setConversations([]);
+      }
     }
-  }, []);
 
-  // 대화 히스토리 저장
+    // 검색 결과도 로컬 스토리지에서 로드
+    const savedSearchResults = localStorage.getItem("currentSearchResults");
+    if (savedSearchResults) {
+      try {
+        const searchResults = JSON.parse(savedSearchResults);
+        setCurrentSearchResults(searchResults);
+      } catch (error) {
+        console.error("검색 결과 로드 오류:", error);
+      }
+    }
+
+    const savedSearchVisible = localStorage.getItem("searchResultsVisible");
+    if (savedSearchVisible) {
+      try {
+        setSearchResultsVisible(JSON.parse(savedSearchVisible));
+      } catch (error) {
+        console.error("검색 결과 표시 상태 로드 오류:", error);
+      }
+    }
+  }, []);  // 대화 히스토리 저장
   const saveConversations = useCallback((newConversations) => {
     localStorage.setItem("chatConversations", JSON.stringify(newConversations));
     setConversations(newConversations);
+  }, []);
+
+  // 검색 결과 저장
+  const saveSearchResults = useCallback((searchResults, visibleState) => {
+    localStorage.setItem("currentSearchResults", JSON.stringify(searchResults));
+    localStorage.setItem("searchResultsVisible", JSON.stringify(visibleState));
   }, []);
 
   // 새 채팅 시작
@@ -71,8 +101,14 @@ export default function Home() {
     setQuery("");
     setSourcesData(null);
     setSourcesPanelVisible(false);
+    // 새 채팅 시작할 때만 검색 결과 초기화
     setCurrentSearchResults([]);
     setSearchResultsVisible({});
+    setConversationSearchResults({});
+    // 로컬 스토리지에서도 제거
+    localStorage.removeItem("currentSearchResults");
+    localStorage.removeItem("searchResultsVisible");
+    localStorage.removeItem("conversationSearchResults");
   };
 
   // 기존 대화 로드
@@ -85,8 +121,12 @@ export default function Home() {
     setQuery("");
     setSourcesData(null);
     setSourcesPanelVisible(false);
+    // 기존 대화 로드할 때만 검색 결과 초기화
     setCurrentSearchResults([]);
     setSearchResultsVisible({});
+    // 로컬 스토리지에서도 제거
+    localStorage.removeItem("currentSearchResults");
+    localStorage.removeItem("searchResultsVisible");
   };
 
   // 출처 패널 토글
@@ -134,8 +174,7 @@ export default function Home() {
     processedChartIds.current.clear();
     setStatusMessage("생각하는 중...");
     setSourcesData(null); // 새 요청 시 출처 데이터 초기화
-    setCurrentSearchResults([]); // 검색 결과 초기화
-    setSearchResultsVisible({}); // 토글 상태 초기화
+    // 검색 결과는 유지 - 새 쿼리에서도 이전 검색 박스 보존
 
     // 빈 어시스턴트 메시지 추가 (스트리밍용)
     const assistantMessage = {
@@ -215,9 +254,9 @@ export default function Home() {
                   let statusText = `단계 ${data.step}/${totalSteps}: ${data.description}`;
                   if (data.tool && data.query) {
                     if (data.status === "searching") {
-                      statusText = `🔍 ${data.tool}로 검색 중: "${data.query}"`;
+                      statusText = `${data.tool}로 검색 중: "${data.query}"`;
                     } else if (data.status === "processing") {
-                      statusText = `⚙️ ${data.tool}로 처리 중`;
+                      statusText = `${data.tool}로 처리 중`;
                     }
                   }
 
@@ -226,21 +265,47 @@ export default function Home() {
 
                 case "search_results":
                   // Claude 스타일 실시간 검색 결과 표시
+                  console.log("검색 결과 받음:", data); // 디버깅 로그
                   const searchResultData = {
                     step: data.step,
                     tool_name: data.tool_name || "unknown",
                     query: data.query || "",
                     results: data.results,
-                    timestamp: new Date().toISOString()
+                    timestamp: new Date().toISOString(),
+                    conversationId: conversationId || data.session_id || Date.now().toString()
                   };
+                  console.log("처리된 검색 데이터:", searchResultData); // 디버깅 로그
 
-                  setCurrentSearchResults(prev => [...prev, searchResultData]);
+                  // 현재 대화의 검색 결과에 추가
+                  const currentConvId = conversationId || data.session_id || Date.now().toString();
+                  
+                  setConversationSearchResults(prev => {
+                    const newResults = {
+                      ...prev,
+                      [currentConvId]: [...(prev[currentConvId] || []), searchResultData]
+                    };
+                    // 로컬 스토리지에 저장
+                    localStorage.setItem("conversationSearchResults", JSON.stringify(newResults));
+                    return newResults;
+                  });
+
+                  setCurrentSearchResults(prev => {
+                    const newResults = [...prev, searchResultData];
+                    // 로컬 스토리지에 저장
+                    localStorage.setItem("currentSearchResults", JSON.stringify(newResults));
+                    return newResults;
+                  });
 
                   // 자동으로 검색 결과 펼치기 (최신 검색만)
-                  setSearchResultsVisible(prev => ({
-                    ...prev,
-                    [`${data.step}-latest`]: true
-                  }));
+                  setSearchResultsVisible(prev => {
+                    const newVisible = {
+                      ...prev,
+                      [`${data.step}-latest`]: true
+                    };
+                    // 로컬 스토리지에 저장
+                    localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
+                    return newVisible;
+                  });
 
                   // 임시 출처 데이터 업데이트 (실시간 표시용)
                   const tempSources = {
@@ -333,6 +398,9 @@ export default function Home() {
                   setStatusMessage("");
                   // 스트리밍 완료 - 최종 메시지 업데이트 (출처 정보 보존)
                   setCurrentConversation((prev) => {
+                    const currentConvId = conversationId || data.session_id || Date.now().toString();
+                    const messageSearchResults = conversationSearchResults[currentConvId] || currentSearchResults;
+                    
                     const newConversation = prev.map((msg) =>
                       msg.id === assistantMessage.id
                         ? {
@@ -341,6 +409,7 @@ export default function Home() {
                             charts: finalCharts,
                             isStreaming: false,
                             sources: finalSources, // 최종 출처 정보 저장
+                            searchResults: messageSearchResults, // 해당 메시지의 검색 결과 저장
                           }
                         : msg
                     );
@@ -364,6 +433,9 @@ export default function Home() {
                     return newConversation;
                   });
 
+                  // 현재 스트리밍용 검색 결과 초기화 (다음 질문을 위해)
+                  setCurrentSearchResults([]);
+                  
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   return;
@@ -585,116 +657,183 @@ export default function Home() {
             </div>
           ) : (
             <>
-              {currentConversation.map((message) => (
-                <div
-                  key={message.id}
-                  className={`message-wrapper ${message.type}`}
-                >
-                  {message.type === "assistant" && (
-                    <div className="assistant-avatar">
-                      <svg
-                        width="24"
-                        height="24"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                      >
-                        <circle cx="12" cy="12" r="10" fill="#10a37f" />
-                        <path
-                          d="M8 12h8M12 8v8"
-                          stroke="white"
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                    </div>
-                  )}
-                  <div className="message-content">
-                    {renderMessageContent(message)}
-
-                    {/* 출처 보기 버튼 - 완료된 메시지에만 표시 */}
-                    {message.type === "assistant" && !message.isStreaming && (
-                      <div className="message-actions">
-                        {message.sources && message.sources.total_count > 0 && (
-                          <button
-                            className="sources-simple-btn"
-                            onClick={() => {
-                              setSourcesData(message.sources);
-                              if (!sourcesPanelVisible) {
-                                toggleSourcesPanel();
-                              }
-                            }}
-                          >
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                              <polyline points="14,2 14,8 20,8" />
-                            </svg>
-                            {message.sources.total_count}개 출처
-                          </button>
-                        )}
+              {currentConversation.map((message, messageIndex) => (
+                <div key={message.id}>
+                  <div className={`message-wrapper ${message.type}`}>
+                    {message.type === "assistant" && (
+                      <div className="assistant-avatar">
+                        <svg
+                          width="24"
+                          height="24"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                        >
+                          <circle cx="12" cy="12" r="10" fill="#10a37f" />
+                          <path
+                            d="M8 12h8M12 8v8"
+                            stroke="white"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                          />
+                        </svg>
                       </div>
                     )}
+                    <div className="message-content">
+                      {/* 완료된 어시스턴트 메시지 위에 해당 검색 결과 먼저 표시 */}
+                      {message.type === "assistant" && !message.isStreaming && message.searchResults && (
+                        <div className="claude-search-results">
+                          {message.searchResults.map((searchData, index) => (
+                            <div key={`search-${searchData.step}-${index}`} className="search-result-section">
+                              <div
+                                className="search-result-header"
+                                onClick={() => setSearchResultsVisible(prev => {
+                                  const newVisible = {
+                                    ...prev,
+                                    [`${message.id}-${searchData.step}-${index}`]: !prev[`${message.id}-${searchData.step}-${index}`]
+                                  };
+                                  localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
+                                  return newVisible;
+                                })}
+                              >
+                                <div className="search-info">
+                                  <span className="search-tool">{searchData.tool_name}</span>
+                                  {searchData.query && (
+                                    <span className="search-query">
+                                      "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
+                                    </span>
+                                  )}
+                                  <span className="result-count">{searchData.results.length}개 결과</span>
+                                </div>
+                                <div className="toggle-icon">
+                                  {searchResultsVisible[`${message.id}-${searchData.step}-${index}`] ? '▼' : '▶'}
+                                </div>
+                              </div>
+
+                              {searchResultsVisible[`${message.id}-${searchData.step}-${index}`] && (
+                                <div className="search-result-list">
+                                  {searchData.results.map((result, resultIndex) => (
+                                    <div key={resultIndex} className="search-result-item">
+                                      <div className="result-header">
+                                        <span className="result-title">{result.title}</span>
+                                        <span className="result-source">{result.source}</span>
+                                      </div>
+                                      <div className="result-preview">{result.content_preview}</div>
+                                      {result.url && (
+                                        <div className="result-url">
+                                          <a href={result.url} target="_blank" rel="noopener noreferrer">
+                                            {result.url}
+                                          </a>
+                                        </div>
+                                      )}
+                                      <div className="result-meta">
+                                        <span>관련성: {(result.relevance_score * 100).toFixed(0)}%</span>
+                                        <span>타입: {result.document_type}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 그 다음에 메시지 콘텐츠(보고서) 표시 */}
+                      {renderMessageContent(message)}
+
+                      {/* 출처 보기 버튼 - 완료된 메시지에만 표시 */}
+                      {message.type === "assistant" && !message.isStreaming && (
+                        <div className="message-actions">
+                          {message.sources && message.sources.total_count > 0 && (
+                            <button
+                              className="sources-simple-btn"
+                              onClick={() => {
+                                setSourcesData(message.sources);
+                                if (!sourcesPanelVisible) {
+                                  toggleSourcesPanel();
+                                }
+                              }}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14,2 14,8 20,8" />
+                              </svg>
+                              {message.sources.total_count}개 출처
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}
 
-              {/* 스트리밍 중일 때만 검색 결과와 상태 표시 */}
+              {/* 스트리밍 중일 때만 상태 표시 */}
               {isStreaming && (
                 <div className="streaming-status">
                   <div className="status-content">
                     <div className="pulse-dot"></div>
                     <span>{statusMessage}</span>
                   </div>
+                </div>
+              )}
 
-                  {/* Claude 스타일 실시간 검색 결과 */}
-                  {currentSearchResults.length > 0 && (
-                    <div className="claude-search-results">
-                      {currentSearchResults.map((searchData, index) => (
-                        <div key={`search-${searchData.step}-${index}`} className="search-result-section">
-                          <div
-                            className="search-result-header"
-                            onClick={() => setSearchResultsVisible(prev => ({
-                              ...prev,
-                              [`${searchData.step}-${index}`]: !prev[`${searchData.step}-${index}`]
-                            }))}
-                          >
-                            <div className="search-info">
-                              <span className="search-tool">🔍 {searchData.tool_name}</span>
-                              <span className="search-query">"{searchData.query}"</span>
-                              <span className="result-count">{searchData.results.length}개 결과</span>
-                            </div>
-                            <div className="toggle-icon">
-                              {searchResultsVisible[`${searchData.step}-${index}`] ? '▼' : '▶'}
-                            </div>
-                          </div>
-
-                          {searchResultsVisible[`${searchData.step}-${index}`] && (
-                            <div className="search-result-list">
-                              {searchData.results.map((result, resultIndex) => (
-                                <div key={resultIndex} className="search-result-item">
-                                  <div className="result-header">
-                                    <span className="result-title">{result.title}</span>
-                                    <span className="result-source">{result.source}</span>
-                                  </div>
-                                  <div className="result-preview">{result.content_preview}</div>
-                                  {result.url && (
-                                    <div className="result-url">
-                                      <a href={result.url} target="_blank" rel="noopener noreferrer">
-                                        {result.url}
-                                      </a>
-                                    </div>
-                                  )}
-                                  <div className="result-meta">
-                                    <span>관련성: {(result.relevance_score * 100).toFixed(0)}%</span>
-                                    <span>타입: {result.document_type}</span>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
+              {/* 현재 스트리밍 중인 검색 결과만 임시 표시 */}
+              {isStreaming && currentSearchResults.length > 0 && (
+                <div className="claude-search-results">
+                  {currentSearchResults.map((searchData, index) => (
+                    <div key={`search-${searchData.step}-${index}`} className="search-result-section">
+                      <div
+                        className="search-result-header"
+                        onClick={() => setSearchResultsVisible(prev => {
+                          const newVisible = {
+                            ...prev,
+                            [`current-${searchData.step}-${index}`]: !prev[`current-${searchData.step}-${index}`]
+                          };
+                          localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
+                          return newVisible;
+                        })}
+                      >
+                        <div className="search-info">
+                          <span className="search-tool">{searchData.tool_name}</span>
+                          {searchData.query && (
+                            <span className="search-query">
+                              "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
+                            </span>
                           )}
+                          <span className="result-count">{searchData.results.length}개 결과</span>
                         </div>
-                      ))}
+                        <div className="toggle-icon">
+                          {searchResultsVisible[`current-${searchData.step}-${index}`] ? '▼' : '▶'}
+                        </div>
+                      </div>
+
+                      {searchResultsVisible[`current-${searchData.step}-${index}`] && (
+                        <div className="search-result-list">
+                          {searchData.results.map((result, resultIndex) => (
+                            <div key={resultIndex} className="search-result-item">
+                              <div className="result-header">
+                                <span className="result-title">{result.title}</span>
+                                <span className="result-source">{result.source}</span>
+                              </div>
+                              <div className="result-preview">{result.content_preview}</div>
+                              {result.url && (
+                                <div className="result-url">
+                                  <a href={result.url} target="_blank" rel="noopener noreferrer">
+                                    {result.url}
+                                  </a>
+                                </div>
+                              )}
+                              <div className="result-meta">
+                                <span>관련성: {(result.relevance_score * 100).toFixed(0)}%</span>
+                                <span>타입: {result.document_type}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                  )}
+                  ))}
                 </div>
               )}
             </>

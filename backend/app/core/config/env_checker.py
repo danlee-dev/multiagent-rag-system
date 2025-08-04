@@ -12,7 +12,7 @@ def check_api_keys():
     print("\n>> API 키 환경변수 체크 시작")
     print("=" * 50)
 
-    required_keys = ["OPENAI_API_KEY", "SERPER_API_KEY", "LANGSMITH_API_KEY"]
+    required_keys = ["OPENAI_API_KEY", "SERPER_API_KEY", "LANGSMITH_API_KEY", "GOOGLE_API_KEY"]
 
     missing_keys = []
 
