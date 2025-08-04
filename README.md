@@ -531,16 +531,14 @@ docker-compose exec backend python -m pytest
 ## Contact & Support
 
 ### 연락처
-- **Project Lead**: 이성민 (고려대학교 컴퓨터학과 23학번)
 - **Company**: 크라우드웍스 (Crowdworks)
 - **GitHub**: [@danlee-dev](https://github.com/danlee-dev)
-- **Email**: danlee.dev@crowdworks.co.kr
 
 ### 산학 협력
 - **대학**: 고려대학교 컴퓨터학과
 - **기업**: 크라우드웍스
 - **분야**: B2B AI Agent 플랫폼 개발
-- **기간**: 2024.09 ~ 2025.08
+- **기간**: 2025.06 ~ 2025.11
 
 ### 이슈 및 지원
 - **버그 리포트**: [GitHub Issues](https://github.com/danlee-dev/multiagent-rag-system/issues)
@@ -566,12 +564,10 @@ docker-compose exec backend python -m pytest
 ## Version History
 
 ### Recent Updates
-- **v3.0.0** (2025.08): Custom AFLOW 아키텍처 도입, 실시간 스트리밍 UI
-- **v2.0.0** (2025.07): 모듈화 리팩토링 및 팀별 템플릿 시스템
-- **v1.5.0** (2025.06): Docker 컨테이너화 및 프로덕션 준비
-- **v1.0.0** (2025.05): 초기 Multi-Agent RAG 시스템 구현
+- **v3.0.0** (2025.08 1주차): Custom AFLOW 아키텍처 도입, 실시간 스트리밍 UI
+- **v2.0.0** (2025.07 4주차): 모듈화 리팩토링 및 팀별 템플릿 시스템
+- **v1.5.0** (2025.07 3주차): Docker 컨테이너화
+- **v1.0.0** (2025.07 2주차): 초기 Multi-Agent RAG 시스템 구현
 
 ### 로드맵
-- **v3.1.0**: 음성 인터페이스 추가
-- **v3.2.0**: 멀티모달 입력 지원 (이미지, 문서)
-- **v4.0.0**: 엔터프라이즈 기능 (사용자 관리, 권한 제어)
+- **v3.1.0**: 멀티모달 입력 지원 (이미지, 문서)
