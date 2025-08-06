@@ -8,6 +8,7 @@ import re
 
 from ..models.models import StreamingAgentState, SearchResult
 from .worker_agents import DataGathererAgent, ProcessorAgent
+from sentence_transformers import SentenceTransformer
 
 
 class TriageAgent:
@@ -208,6 +209,10 @@ class OrchestratorAgent:
         """비동기 제어를 통해 순서가 보장되는 보고서 생성 워크플로우"""
         query = state["original_query"]
 
+        print("\n>> SentenceTransformer 모델 로딩 시작...")
+        hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
+        print(">> SentenceTransformer 모델 로딩 완료.")
+
         # 차트 카운터 초기화
         state['chart_counter'] = 0
 
@@ -216,42 +221,28 @@ class OrchestratorAgent:
         plan = state_with_plan.get("plan", {})
         yield {"type": "plan", "data": {"plan": plan}}
 
-        # --- 데이터 수집 로직 변경 ---
+        # --- [수정] 모든 작업을 다시 병렬로 처리하도록 복원 ---
 
-        collected_data = []
-        all_sub_questions = plan.get("sub_questions", [])
-
-        # 1. 태스크를 '순차 처리'와 '병렬 처리'로 분리
-        vector_db_tasks = []
-        parallel_tasks = []
-        for sq in all_sub_questions:
+        collection_tasks = []
+        for sq in plan.get("sub_questions", []):
             task = {"tool": sq["tool"], "inputs": {"query": sq["question"]}}
+            # vector_db_search 작업에만 미리 로드한 hf_model을 전달
             if sq["tool"] == "vector_db_search":
-                vector_db_tasks.append(task)
-            else:
-                parallel_tasks.append(task)
+                task["inputs"]["hf_model"] = hf_model
+            collection_tasks.append(task)
 
-        # 2. 병렬 처리 태스크 먼저 실행 (vector_db_search 제외)
-        if parallel_tasks:
-            yield {"type": "status", "data": {"message": f"{len(parallel_tasks)}개 작업 병렬 수집 시작..."}}
-            parallel_results_dict = await self.data_gatherer.execute_parallel(parallel_tasks)
-            parallel_results_list = [item for sublist in parallel_results_dict.values() for item in sublist]
-            collected_data.extend(parallel_results_list)
-            yield {"type": "status", "data": {"message": f"병렬 작업 완료. 현재까지 {len(collected_data)}개 정보 수집."}}
+        if collection_tasks:
+            # 상태: 데이터 수집 시작
+            yield {"type": "status", "data": {"message": f"{len(collection_tasks)}개 작업으로 정보 수집을 시작합니다..."}}
+            parallel_results = await self.data_gatherer.execute_parallel(collection_tasks)
+            collected_data = [item for sublist in parallel_results.values() for item in sublist]
+            print(f"\n>> 총 {len(collected_data)}개의 초기 데이터 수집 완료.")
+            # 상태: 데이터 수집 완료
+            yield {"type": "status", "data": {"message": f"총 {len(collected_data)}개의 정보를 수집했습니다."}}
+        else:
+            collected_data = []
 
-        # 3. vector_db_search 태스크를 순차적으로 실행
-        if vector_db_tasks:
-            yield {"type": "status", "data": {"message": f"{len(vector_db_tasks)}개 벡터 DB 작업 순차 수집 시작..."}}
-            for i, task in enumerate(vector_db_tasks):
-                yield {"type": "status", "data": {"message": f"벡터 DB 작업 ({i+1}/{len(vector_db_tasks)}) 실행 중: '{task['inputs']['query']}'"}}
-                sequential_result = await self.data_gatherer.execute(task["tool"], task["inputs"])
-                collected_data.extend(sequential_result)
-            yield {"type": "status", "data": {"message": f"벡터 DB 작업 완료. 현재까지 {len(collected_data)}개 정보 수집."}}
-
-        print(f"\n>> 총 {len(collected_data)}개의 초기 데이터 수집 완료.")
-        yield {"type": "status", "data": {"message": f"총 {len(collected_data)}개의 정보를 수집했습니다."}}
-
-        # ------------------
+        # --- [수정 끝] ---
 
         # 3. 섹션별 데이터 상태 분석 및 보고서 구조 설계
         yield {"type": "status", "data": {"message": "수집된 정보를 바탕으로 보고서 목차를 설계합니다..."}}
@@ -273,8 +264,10 @@ class OrchestratorAgent:
                 if feedback:
                     # 상태: 특정 섹션 데이터 보강 시작
                     yield {"type": "status", "data": {"message": f"'{section.get('section_title')}' 섹션의 데이터 보강을 시작합니다..."}}
+                    # --- [수정 1] 재수집 시에도 hf_model 전달 ---
+                    recollection_input = {"query": feedback, "hf_model": hf_model}
                     recollection_tasks[i] = asyncio.create_task(
-                        self.data_gatherer.execute("vector_db_search", {"query": feedback})
+                        self.data_gatherer.execute("vector_db_search", recollection_input)
                     )
 
 
