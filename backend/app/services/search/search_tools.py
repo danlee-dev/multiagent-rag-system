@@ -94,7 +94,7 @@ def debug_web_search(query: str) -> str:
                 result_text = f"웹 검색 결과 (검색어: {query}):\n\n"
                 for i, result in enumerate(results):
                     result_text += f"{i+1}. {result['title']}\n"
-                    result_text += f"   링크: {result['link']}\n"
+                    result_text += f"   출처 링크: {result['link']}\n"
                     result_text += f"   요약: {result['snippet']}\n\n"
 
                 print(f"- 유효한 검색 결과: {len(results)}개")
@@ -278,7 +278,7 @@ def rdb_search(query: str) -> str:
 
 
 @tool
-def vector_db_search(query: str, top_k = 3, hf_model = None) -> List:
+def vector_db_search(query: str, top_k = 50) -> List:
     """
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
     """
@@ -300,11 +300,12 @@ def vector_db_search(query: str, top_k = 3, hf_model = None) -> List:
                     "title": f"Mock Document {i+1}",
                     "document_id": f"mock_{i+1}",
                     "similarity_score": 0.8 - (i * 0.1),
-                    "metadata": doc.metadata
+                    "metadata": doc.metadata,
+                    "source_url": f"Mock Document {i+1}"  # Mock 출처 정보 추가
                 })
             return formatted_results
 
-        search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config, hf_model=hf_model)
+        search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config)
 
         print(f"\n>> Vector DB 검색 시작: {query}")
         results = search_engine.advanced_rag_search(query)
@@ -325,12 +326,20 @@ def vector_db_search(query: str, top_k = 3, hf_model = None) -> List:
             metadata = doc.get('meta_data', doc.get('metadata', {}))
             similarity = doc.get('score', doc.get('similarity_score', 0.7))
 
+            # 출처 정보 더 명확히 포함
+            source_info = metadata.get('source', 'Vector DB Document')
+            if 'url' in metadata:
+                source_info = metadata['url']
+            elif 'file_name' in metadata:
+                source_info = f"문서: {metadata['file_name']}"
+
             formatted_result = {
                 "content": content,
                 "title": title,
                 "document_id": f"doc_{i+1}",
                 "similarity_score": similarity,
-                "metadata": metadata
+                "metadata": metadata,
+                "source_url": source_info  # 출처 정보 추가
             }
             processed_docs.append(formatted_result)
 
@@ -350,7 +359,8 @@ def vector_db_search(query: str, top_k = 3, hf_model = None) -> List:
                     "title": f"Mock Document {i+1}",
                     "document_id": f"mock_{i+1}",
                     "similarity_score": 0.8 - (i * 0.1),
-                    "metadata": doc.metadata
+                    "metadata": doc.metadata,
+                    "source_url": f"Mock Document {i+1}"  # Mock 출처 정보 추가
                 })
             return formatted_results
         except Exception as fallback_error:

@@ -383,6 +383,18 @@ export default function Home() {
                   );
                   break;
 
+                case "content":
+                  // SimpleAnswerer의 스트리밍 답변 처리
+                  finalContent += data.chunk;
+                  setCurrentConversation((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessage.id
+                        ? { ...msg, content: finalContent }
+                        : msg
+                    )
+                  );
+                  break;
+
                 case "content_chunk":
                   // 최종 보고서 및 기타 컨텐츠 표시 (context integration 제외)
                   finalContent += data.chunk;

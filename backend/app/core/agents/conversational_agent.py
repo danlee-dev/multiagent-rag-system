@@ -105,14 +105,15 @@ class SimpleAnswererAgent:
                                 relevance_score=0.9,  # 웹검색 결과는 높은 점수
                                 timestamp=datetime.now().isoformat(),
                                 document_type="web",
-                                metadata={"original_query": query, **current_result}
+                                metadata={"original_query": query, **current_result},
+                                source_url=current_result.get("link", "웹 검색 결과")
                             )
                             search_results.append(search_result)
 
                         # 새 결과 시작
                         current_result = {"title": line[3:].strip()}  # 번호 제거
-                    elif line.startswith("링크:"):
-                        current_result["link"] = line[3:].strip()
+                    elif line.startswith("출처 링크:"):
+                        current_result["link"] = line[7:].strip()  # "출처 링크:" 제거
                     elif line.startswith("요약:"):
                         current_result["snippet"] = line[3:].strip()
 
@@ -127,7 +128,8 @@ class SimpleAnswererAgent:
                         relevance_score=0.9,
                         timestamp=datetime.now().isoformat(),
                         document_type="web",
-                        metadata={"original_query": query, **current_result}
+                        metadata={"original_query": query, **current_result},
+                        source_url=current_result.get("link", "웹 검색 결과")
                     )
                     search_results.append(search_result)
 
@@ -197,9 +199,17 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
             response = await self.llm_lite.ainvoke(prompt)
             response_content = response.content.strip()
 
-            # JSON 파싱 시도
+            # JSON 파싱 시도 - 개선된 파싱 로직
             try:
-                response_json = json.loads(response_content)
+                # 코드 블록 제거
+                clean_response = response_content
+                if "```json" in response_content:
+                    clean_response = response_content.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_content:
+                    clean_response = response_content.split("```")[1].split("```")[0].strip()
+                
+                # JSON 파싱
+                response_json = json.loads(clean_response)
                 needs_web_search = response_json.get("needs_web_search", False)
                 web_search_query = response_json.get("web_search_query", "")
                 needs_vector_search = response_json.get("needs_vector_search", False)
@@ -211,8 +221,23 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
             except json.JSONDecodeError as e:
                 print(f"- JSON 파싱 오류: {e}")
                 print(f"- LLM 응답: {response_content[:200]}...")
+                
+                # 문자열 패턴 매칭으로 fallback 파�ing
+                needs_web_search = False
+                needs_vector_search = False
+                
+                # 응답에서 키워드 기반으로 판단
+                if "needs_web_search" in response_content:
+                    if "needs_web_search\": true" in response_content or "needs_web_search\":true" in response_content:
+                        needs_web_search = True
+                        
+                if "needs_vector_search" in response_content:
+                    if "needs_vector_search\": true" in response_content or "needs_vector_search\":true" in response_content:
+                        needs_vector_search = True
+                
+                print(f"- Fallback 파싱 결과: 웹={needs_web_search}, 벡터={needs_vector_search}")
                 # 기본값 반환 (간단한 인사는 검색 불필요)
-                return False, "", False, ""
+                return needs_web_search, "", needs_vector_search, ""
 
         except Exception as e:
             print(f"- _needs_search 오류: {e}")
@@ -233,7 +258,15 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
             for result in search_results[:3]:
                 content = result.content
                 title = getattr(result, 'metadata', {}).get("title", result.title or "자료")
-                summary_parts.append(f"- **{title}**: {content[:200]}...")
+                
+                # URL 정보 추가 (웹 검색 결과인 경우)
+                url_info = ""
+                if hasattr(result, 'url') and result.url:
+                    url_info = f"\n  **출처 링크**: {result.url}"
+                elif hasattr(result, 'source_url') and result.source_url and not result.source_url.startswith(('웹 검색', 'Vector DB')):
+                    url_info = f"\n  **출처 링크**: {result.source_url}"
+                    
+                summary_parts.append(f"- **{title}**: {content[:200]}...{url_info}")
             context_summary = "\n".join(summary_parts)
 
         # 메모리 컨텍스트 처리
@@ -259,6 +292,7 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
 - 간결하면서도 도움이 되는 답변 제공
 - 필요시 추가 질문을 권유
 - 마크다운 형식으로 답변 작성
-- 수집된 문서 바탕으로 작성된 부분이 있을 경우, 해당 부분에 마크다운 형식의 하이퍼링크 출처를 명시
+- **중요**: 참고 정보에서 제공된 **출처 링크**를 사용하여 정확한 마크다운 하이퍼링크로 출처를 명시하세요
+  예시: "건강기능식품 시장 규모는 6조 440억 원입니다 [한국건강기능식품협회](https://k-hffs.or.kr/stat/sales)"
 
 답변:"""

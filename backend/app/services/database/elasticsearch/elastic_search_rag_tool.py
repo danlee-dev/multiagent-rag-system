@@ -41,8 +41,12 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stdin, 'reconfigure'):
     sys.stdin.reconfigure(encoding='utf-8')
 
+print(">> CPU 전용으로 모델 로드...")
+hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
+print(">> CPU 모델 로드 성공")
+
 class MultiIndexRAGSearchEngine:
-    def __init__(self, google_api_key: str = None, cohere_api_key: str = None, hf_model = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
+    def __init__(self, google_api_key: str = None, cohere_api_key: str = None, hf_model = hf_model, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
         if config is None:
             config = RAGConfig()
         api_key = google_api_key or os.getenv('GOOGLE_API_KEY')
@@ -64,31 +68,31 @@ class MultiIndexRAGSearchEngine:
         )
         # SentenceTransformer 안전한 초기화 (meta 장치 문제 완전 회피)
         
-        if not hf_model:
-            try:
-                print(">> SentenceTransformer 모델 로드 시작...")
+        # if not hf_model:
+        #     try:
+        #         print(">> SentenceTransformer 모델 로드 시작...")
 
-                # 환경변수로 meta 장치 사용 방지
-                os.environ["TRANSFORMERS_OFFLINE"] = "0"
+        #         # 환경변수로 meta 장치 사용 방지
+        #         os.environ["TRANSFORMERS_OFFLINE"] = "0"
 
-                # 1단계: CPU 전용으로 로드
-                print(">> CPU 전용으로 모델 로드...")
-                self.hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
-                print(">> CPU 모델 로드 성공")
+        #         # 1단계: CPU 전용으로 로드
+        #         print(">> CPU 전용으로 모델 로드...")
+        #         self.hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
+        #         print(">> CPU 모델 로드 성공")
 
-            except Exception as e:
-                print(f">> 한국어 모델 로드 실패: {e}")
-                print(">> 영어 fallback 모델 시도...")
-                try:
-                    # 더 안정적인 영어 모델로 fallback
-                    self.hf_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-                    print(">> Fallback 모델 로드 성공")
-                except Exception as final_error:
-                    print(f">> 모든 모델 로드 실패: {final_error}")
-                    print(">> 임베딩 기능 비활성화")
-                    self.hf_model = None
-        else:
-            self.hf_model = hf_model
+        #     except Exception as e:
+        #         print(f">> 한국어 모델 로드 실패: {e}")
+        #         print(">> 영어 fallback 모델 시도...")
+        #         try:
+        #             # 더 안정적인 영어 모델로 fallback
+        #             self.hf_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+        #             print(">> Fallback 모델 로드 성공")
+        #         except Exception as final_error:
+        #             print(f">> 모든 모델 로드 실패: {final_error}")
+        #             print(">> 임베딩 기능 비활성화")
+        #             self.hf_model = None
+        # else:
+        self.hf_model = hf_model
             
         self.TEXT_INDEX = "bge_text"
         self.TABLE_INDEX = "bge_table"
@@ -374,13 +378,30 @@ class MultiIndexRAGSearchEngine:
             hits = response.get("hits", {}).get("hits", [])
             for hit in hits:
                 source = hit["_source"]
+                metadata = source.get("meta_data", {})
+                
+                # 문서 제목/출처 정보 추출 개선
+                doc_title = source.get("name", "")
+                if not doc_title and metadata:
+                    doc_title = metadata.get("document_title", metadata.get("file_name", metadata.get("title", f"Document {len(results)+1}")))
+                
+                # 출처 URL 정보 설정
+                source_url = doc_title
+                if metadata.get("url"):
+                    source_url = metadata["url"]
+                elif metadata.get("source"):
+                    source_url = metadata["source"] 
+                elif metadata.get("file_name"):
+                    source_url = f"문서: {metadata['file_name']}"
+                
                 results.append({
                     "score": hit["_score"],
                     "page_content": source.get("page_content", ""),
-                    "name": source.get("name", ""),
-                    "meta_data": source.get("meta_data", {}),
+                    "name": doc_title,
+                    "meta_data": metadata,
                     "search_type": "dense",
-                    "_index": index
+                    "_index": index,
+                    "source_url": source_url  # 출처 정보 추가
                 })
         except Exception as e:
             print(f"Dense 검색 오류({index}): {e}")
@@ -396,13 +417,30 @@ class MultiIndexRAGSearchEngine:
             hits = response.get("hits", {}).get("hits", [])
             for hit in hits:
                 source = hit["_source"]
+                metadata = source.get("meta_data", {})
+                
+                # 문서 제목/출처 정보 추출 개선
+                doc_title = source.get("name", "")
+                if not doc_title and metadata:
+                    doc_title = metadata.get("document_title", metadata.get("file_name", metadata.get("title", f"Document {len(results)+1}")))
+                
+                # 출처 URL 정보 설정
+                source_url = doc_title
+                if metadata.get("url"):
+                    source_url = metadata["url"]
+                elif metadata.get("source"):
+                    source_url = metadata["source"] 
+                elif metadata.get("file_name"):
+                    source_url = f"문서: {metadata['file_name']}"
+                
                 results.append({
                     "score": hit["_score"],
                     "page_content": source.get("page_content", ""),
-                    "name": source.get("name", ""),
-                    "meta_data": source.get("meta_data", {}),
+                    "name": doc_title,
+                    "meta_data": metadata,
                     "search_type": "sparse",
-                    "_index": index
+                    "_index": index,
+                    "source_url": source_url  # 출처 정보 추가
                 })
         except Exception as e:
             print(f"Sparse 검색 오류({index}): {e}")

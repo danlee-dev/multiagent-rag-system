@@ -17,17 +17,19 @@ from fastapi.middleware.cors import CORSMiddleware
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # --- 모델 및 에이전트 클래스 임포트 ---
-# StreamingAgentState는 이제 Pydantic 모델로 관리하는 것이 더 효율적입니다.
-class StreamingAgentState(BaseModel):
+# 기존 에이전트들을 그래프 형태로 개선하되 스트리밍 유지
+from .core.agents.orchestrator import TriageAgent, OrchestratorAgent
+from .core.agents.conversational_agent import SimpleAnswererAgent
+from .core.models.models import StreamingAgentState
+
+# StreamingAgentState를 Pydantic 모델로 재정의
+class StreamingAgentStateModel(BaseModel):
     original_query: str
     session_id: str
     flow_type: str | None = None
     plan: dict | None = None
     design: dict | None = None
     metadata: dict = Field(default_factory=dict)
-
-from .core.agents.orchestrator import TriageAgent, OrchestratorAgent
-from .core.agents.conversational_agent import SimpleAnswererAgent
 
 # --- Pydantic 모델 정의 ---
 class QueryRequest(BaseModel):
@@ -72,7 +74,7 @@ async def stream_query(request: QueryRequest):
     async def event_stream_generator() -> AsyncGenerator[str, None]:
         """쿼리 처리 및 결과 스트리밍을 위한 비동기 생성기"""
 
-        state = StreamingAgentState(
+        state = StreamingAgentStateModel(
             original_query=request.query,
             session_id=request.session_id,
         )
@@ -82,7 +84,7 @@ async def stream_query(request: QueryRequest):
             yield server_sent_event("status", {"message": "요청 유형 분석 중...", "session_id": state.session_id})
             state_dict = state.model_dump()
             updated_state_dict = await triage_agent.classify_request(request.query, state_dict)
-            state = StreamingAgentState(**updated_state_dict)
+            state = StreamingAgentStateModel(**updated_state_dict)
             flow_type = state.flow_type or "task"
 
             # 2. 분류된 유형에 따라 다른 워크플로우 실행

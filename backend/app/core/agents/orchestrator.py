@@ -132,13 +132,13 @@ class OrchestratorAgent:
    - **사용 금지**: 농축수산물 시세, 영양정보, 원산지 등 내부 DB로 명백히 해결 가능한 질문.
 
 **도구 선택 우선순위:**
-1. **수치/통계 데이터 (매출, 판매량, 가격)** → `rdb_search`
+1. **수치/통계 데이터 (식자재 영양성분, 농축수산물 시세)** → `rdb_search`
 2. **관계/분류 정보 (업체-제품, 지역-특산품)** → `graph_db_search`
 3. **분석/연구 문서 (시장분석, 소비자 조사)** → `vector_db_search`
 4. **최신 트렌드/실시간 정보** → `web_search`
 
 **각 도구별 적용 예시:**
-- `rdb_search`: "건강기능식품 매출 현황", "제품별 판매량", "가격 정보"
+- `rdb_search`: "식자재 영양성분", "농축수산물 시세"
 - `graph_db_search`: "건강기능식품 제조업체", "제품 분류 체계", "지역별 특산품"
 - `vector_db_search`: "시장 분석 보고서", "소비자 행동 연구", "정책 문서"
 - `web_search`: "2025년 최신 트렌드", "실시간 업계 동향"
@@ -151,7 +151,7 @@ class OrchestratorAgent:
 * **1단계: 요청 의도 분석**: 사용자의 최종 목표가 무엇인지 파악합니다. (예: 시장 분석 보고서 작성)
 * **2단계: 하위 질문 분해**: 최종 목표를 달성하기 위해 필요한 논리적인 하위 질문들을 3~5개로 분해합니다. **이때, 모든 하위 질문은 원본 요청의 핵심 맥락(예: '대한민국', '건강기능식품')을 반드시 포함해야 합니다.**
 * **3단계: 도구 선택**: 각 하위 질문에 대해, 위 '보유 도구 명세서'를 참고하여 **가장 적합한 도구를 단 하나만** 선택합니다.
-  - **질문에 "매출", "판매량", "가격", "수치"가 포함** → `rdb_search`
+  - **질문에 "성분", "영양", "시세"가 포함** → `rdb_search`
   - **질문에 "업체", "제조사", "분류", "관계"가 포함** → `graph_db_search`
   - **질문에 "분석", "연구", "조사", "보고서"가 포함** → `vector_db_search`
   - **질문에 "최신", "트렌드", "2024-2025"가 포함** → `web_search`
@@ -159,11 +159,11 @@ class OrchestratorAgent:
 
 **예시 검색 전략:**
 - "제주도 감귤 영양성분과 가격" → `rdb_search`("제주도 감귤 영양성분"), `rdb_search`("제주도 감귤 가격"), `graph_db_search`("제주도 감귤 원산지 관계")로 분해
-- "건강기능식품 시장 동향 분석" → `rdb_search`("건강기능식품 매출 데이터"), `vector_db_search`("건강기능식품 시장 트렌드 분석"), `graph_db_search`("건강기능식품 제조업체 관계"), `web_search`("2025년 건강기능식품 최신 동향")로 분해
-- "소비자 구매 패턴 조사" → `vector_db_search`("소비자 건강기능식품 구매 행동 연구"), `rdb_search`("건강기능식품 판매량 통계"), `web_search`("2025년 소비자 건강기능식품 선호도")로 분해
+- "건강기능식품 시장 동향 분석" → `vector_db_search`("건강기능식품 매출 데이터"), `vector_db_search`("건강기능식품 시장 트렌드 분석"), `graph_db_search`("건강기능식품 제조업체 관계"), `web_search`("2025년 건강기능식품 최신 동향")로 분해
+- "소비자 구매 패턴 조사" → `vector_db_search`("소비자 건강기능식품 구매 행동 연구"), `vector_db_search`("건강기능식품 판매량 통계"), `web_search`("2025년 소비자 건강기능식품 선호도")로 분해
 
 **도구 선택 세부 기준:**
-- **판매량, 매출, 가격, 수치 통계** → `rdb_search`
+- **식품 성분, 영양 성분, 농축수산물 시세** → `rdb_search`
 - **업체 관계, 제품 분류, 원산지 정보** → `graph_db_search`
 - **시장 분석, 연구 보고서, 정책 문서** → `vector_db_search`
 - **2024-2025년 최신 트렌드, 실시간 정보** → `web_search`
@@ -209,9 +209,9 @@ class OrchestratorAgent:
         """비동기 제어를 통해 순서가 보장되는 보고서 생성 워크플로우"""
         query = state["original_query"]
 
-        print("\n>> SentenceTransformer 모델 로딩 시작...")
-        hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
-        print(">> SentenceTransformer 모델 로딩 완료.")
+        # print("\n>> SentenceTransformer 모델 로딩 시작...")
+        # hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
+        # print(">> SentenceTransformer 모델 로딩 완료.")
 
         # 차트 카운터 초기화
         state['chart_counter'] = 0
@@ -227,8 +227,8 @@ class OrchestratorAgent:
         for sq in plan.get("sub_questions", []):
             task = {"tool": sq["tool"], "inputs": {"query": sq["question"]}}
             # vector_db_search 작업에만 미리 로드한 hf_model을 전달
-            if sq["tool"] == "vector_db_search":
-                task["inputs"]["hf_model"] = hf_model
+            # if sq["tool"] == "vector_db_search":
+            #     task["inputs"]["hf_model"] = hf_model
             collection_tasks.append(task)
 
         if collection_tasks:
@@ -265,7 +265,7 @@ class OrchestratorAgent:
                     # 상태: 특정 섹션 데이터 보강 시작
                     yield {"type": "status", "data": {"message": f"'{section.get('section_title')}' 섹션의 데이터 보강을 시작합니다..."}}
                     # --- [수정 1] 재수집 시에도 hf_model 전달 ---
-                    recollection_input = {"query": feedback, "hf_model": hf_model}
+                    recollection_input = {"query": feedback}
                     recollection_tasks[i] = asyncio.create_task(
                         self.data_gatherer.execute("vector_db_search", recollection_input)
                     )

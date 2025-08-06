@@ -3,6 +3,7 @@ import re
 import sys
 import asyncio
 import json
+import concurrent.futures
 from typing import Dict, List, Any, Optional, AsyncGenerator
 from datetime import datetime
 
@@ -19,6 +20,7 @@ from ...services.search.search_tools import (
     graph_db_search,
     scrape_and_extract_content,
 )
+
 
 
 class DataGathererAgent:
@@ -243,21 +245,23 @@ class DataGathererAgent:
                 organized_results[f"{tool_name}_{i}"] = []
             else:
                 print(f"  - {tool_name} 병렬 실행 완료: {len(result)}개 결과")
+                print(f"  - {tool_name} 병렬 실행 결과: {result[:3]}...")  # 처음 3개 결과만 출력
                 organized_results[f"{tool_name}_{i}"] = result
 
         return organized_results
 
 
     async def _web_search(self, query: str, **kwargs) -> List[SearchResult]:
-        """웹 검색 실행"""
+        """웹 검색 실행 - 안정성 강화"""
         try:
             # 최적화된 쿼리 사용 (이미 _optimize_query_for_tool에서 처리됨)
-            print(f"- 웹 검색 실행 쿼리: {query}")
+            print(f"  - 웹 검색 실행 쿼리: {query}")
 
-            # 기존 debug_web_search 함수 활용
-            result_text = await asyncio.get_event_loop().run_in_executor(
-                None, debug_web_search, query
-            )
+            # ThreadPoolExecutor를 사용하여 동기 함수를 안전하게 실행
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(debug_web_search, query)
+                result_text = future.result(timeout=30)  # 30초 타임아웃
 
             # 결과가 문자열인 경우 파싱
             search_results = []
@@ -280,14 +284,15 @@ class DataGathererAgent:
                                 relevance_score=0.9,  # 웹검색 결과는 높은 점수
                                 timestamp=datetime.now().isoformat(),
                                 document_type="web",
-                                metadata={"optimized_query": query, **current_result}
+                                metadata={"optimized_query": query, **current_result},
+                                source_url=current_result.get("link", "웹 검색 결과")
                             )
                             search_results.append(search_result)
 
                         # 새 결과 시작
                         current_result = {"title": line[3:].strip()}  # 번호 제거
-                    elif line.startswith("링크:"):
-                        current_result["link"] = line[3:].strip()
+                    elif line.startswith("출처 링크:"):
+                        current_result["link"] = line[7:].strip()  # "출처 링크:" 제거
                     elif line.startswith("요약:"):
                         current_result["snippet"] = line[3:].strip()
 
@@ -299,30 +304,74 @@ class DataGathererAgent:
                         search_query=query,
                         title=current_result.get("title", "웹 검색 결과"),
                         url=current_result.get("link"),
-                        relevance_score=0.9,
+                        relevance_score=0.9,  # 웹검색 결과는 높은 점수
                         timestamp=datetime.now().isoformat(),
                         document_type="web",
-                        metadata={"optimized_query": query, **current_result}
+                        metadata={
+                            "optimized_query": query,
+                            "link": current_result.get("link"),  # 출처 링크 포함
+                            **current_result
+                        },
+                        source_url=current_result.get("link", "웹 검색 결과")
                     )
                     search_results.append(search_result)
 
-            print(f"- 웹 검색 완료: {len(search_results)}개 결과")
+            print(f"  - 웹 검색 완료: {len(search_results)}개 결과")
             return search_results[:5]  # 상위 5개 결과만
+
+        except concurrent.futures.TimeoutError:
+            print(f"웹 검색 타임아웃: {query}")
+            return []
         except Exception as e:
             print(f"웹 검색 오류: {e}")
             return []
 
-    async def _vector_db_search(self, query: str, hf_model = None, **kwargs) -> List[SearchResult]:
-        """Vector DB 검색 실행"""
+    async def _vector_db_search(self, query: str, **kwargs) -> List[SearchResult]:
+        """Vector DB 검색 실행 - 오류 처리 강화"""
         try:
+            # LangChain 추적 비활성화하여 SentenceTransformer 충돌 방지
+            import os
+            os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
+            # 동기 함수를 별도 스레드에서 실행하여 이벤트 루프 충돌 방지
+            # import concurrent.futures
+            # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            #     future = executor.submit(vector_db_search, query)  # hf_model은 None으로 고정
+            #     results = future.result(timeout=300)  # 30초 타임아웃
+
             results = await asyncio.get_event_loop().run_in_executor(
-                None, vector_db_search, query, hf_model
+                None, lambda: vector_db_search(query)
             )
 
             search_results = []
             for result in results:
                 if isinstance(result, dict):
-                    search_result = SearchResult(
+                    # source_url 필드 처리 개선 - document_title을 최우선으로 사용
+                    metadata = result.get("metadata", {})
+                    
+                    # 1순위: metadata의 document_title (실제 보고서 제목)
+                    if metadata.get('document_title'):
+                        source_url = metadata['document_title']
+                    # 2순위: ElasticSearch에서 설정된 source_url
+                    elif result.get("source_url"):
+                        source_url = result.get("source_url")
+                    # 3순위: metadata의 file_name
+                    elif metadata.get('file_name'):
+                        source_url = f"문서: {metadata['file_name']}"
+                    # 4순위: metadata의 url
+                    elif metadata.get('url'):
+                        source_url = metadata['url']
+                    # 5순위: metadata의 source
+                    elif metadata.get('source'):
+                        source_url = metadata['source']
+                    # 6순위: result의 title
+                    elif result.get("title", "") != "벡터 DB 문서":
+                        source_url = result.get("title", "Vector DB Document")
+                    # 최후: 기본값
+                    else:
+                        source_url = "Vector DB Document"
+
+                    search_results.append(SearchResult(
                         source="vector_db",
                         content=result.get("content", ""),
                         search_query=query,
@@ -332,27 +381,66 @@ class DataGathererAgent:
                         timestamp=datetime.now().isoformat(),
                         document_type="database",
                         similarity_score=result.get("similarity_score", 0.7),
-                        metadata=result
-                    )
-                    search_results.append(search_result)
+                        metadata=result,
+                        source_url=source_url  # 개선된 source_url 필드
+                    ))
 
+            print(f"  - Vector DB 검색 완료: {len(search_results)}개 결과")
             return search_results[:5]
+
+        # except concurrent.futures.TimeoutError:
+        #     print(f"Vector DB 검색 타임아웃: {query}")
+        #     return []
         except Exception as e:
             print(f"Vector DB 검색 오류: {e}")
-            return []
+            # Mock 데이터로 fallback
+            return [SearchResult(
+                source="vector_db_fallback",
+                content=f"Vector DB 검색 중 오류가 발생했습니다. 쿼리: {query}",
+                search_query=query,
+                title="Vector DB 오류",
+                url=None,
+                relevance_score=0.1,
+                timestamp=datetime.now().isoformat(),
+                document_type="error",
+                metadata={"error": str(e)},
+                source_url="시스템 오류"
+            )]
 
     async def _graph_db_search(self, query: str, **kwargs) -> List[SearchResult]:
-        """Graph DB 검색 실행"""
-        print(f"  - 변환된 GraphDB 쿼리: {query}")
-        raw_results = await asyncio.to_thread(graph_db_search.invoke, {"query": query})
+        """Graph DB 검색 실행 - 오류 처리 강화"""
+        print(f"  - Graph DB 검색 시작: {query}")
+        try:
+            # 비동기 충돌 방지를 위해 ThreadPoolExecutor 사용
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(graph_db_search.invoke, {"query": query})
+                raw_results = future.result(timeout=20)  # 20초 타임아웃
 
-        search_results = [
-            SearchResult(
-                source="graph_db", content=res.get("content", ""), search_query=query,
-                title=f"그래프 정보: {res.get('entity', '알 수 없음')}", relevance_score=res.get("confidence", 0.8), metadata=res
-            ) for res in raw_results[:5] if isinstance(res, dict)
-        ]
-        return search_results
+            search_results = [
+                SearchResult(
+                    source="graph_db",
+                    content=res.get("content", ""),
+                    search_query=query,
+                    title=f"그래프 정보: {res.get('entity', '알 수 없음')}",
+                    relevance_score=res.get("confidence", 0.8),
+                    timestamp=datetime.now().isoformat(),
+                    document_type="graph",
+                    metadata=res,
+                    source_url=f"그래프 DB: {res.get('entity', '알 수 없음')}"
+                ) for res in raw_results[:5] if isinstance(res, dict)
+            ]
+
+            print(f"  - Graph DB 검색 완료: {len(search_results)}개 결과")
+            return search_results
+
+        except concurrent.futures.TimeoutError:
+            print(f"Graph DB 검색 타임아웃: {query}")
+            return []
+        except Exception as e:
+            print(f"Graph DB 검색 오류: {e}")
+            # 오류 시 빈 결과 반환
+            return []
 
     async def _rdb_search(self, query: str, **kwargs) -> List[SearchResult]:
         """RDB 검색 실행"""
@@ -465,6 +553,8 @@ class ProcessorAgent:
     - **오직, 해당 섹션의 주제와 관련된 내용이 수집된 데이터 요약에 단 한 줄도 없거나, 명백히 주제와 무관한 내용만 있는 '치명적인 경우'에만 `is_sufficient`를 `false`로 설정하세요.**
     - 약간의 정보라도 있다면, 일단은 충분하다고 판단하고 넘어가야 합니다.
 
+4. **'결론' 섹션 추가 (필수)**: 보고서의 가장 마지막에는 항상 '결론' 섹션을 포함하세요. 이 섹션은 앞선 내용들을 종합하여 최종적인 요약과 제언을 담습니다. `content_type`은 'synthesis'로, `is_sufficient`는 `true`로 설정해야 합니다.
+
 **차트 생성 우선 전략**:
 - 시장/업계 분석 → 'full_data_for_chart' (차트 필수)
 - 수치 비교/통계 → 'full_data_for_chart' (차트 필수)
@@ -493,6 +583,12 @@ class ProcessorAgent:
             "is_sufficient": true,
             "feedback_for_gatherer": ""
         }}
+        {{
+            "section_title": "4. 결론",
+            "content_type": "synthesis",
+            "is_sufficient": true,
+            "feedback_for_gatherer": ""
+        }}
     ]
 }}
 """
@@ -514,7 +610,37 @@ class ProcessorAgent:
 
     async def _synthesize_data_for_section(self, section_title: str, all_data: List[SearchResult]) -> str:
         """[고도화됨] 특정 섹션 주제에 맞게 전체 데이터를 지능적으로 '종합'하여 하나의 완성된 글로 작성합니다."""
-        context = "\n\n".join([f"--- 문서 ID {i}: [{res.source}] ---\n제목: {res.title}\n내용: {res.content}" for i, res in enumerate(all_data)])
+        # 출처 정보를 포함한 컨텍스트 생성
+        context_with_sources = ""
+        for i, res in enumerate(all_data):
+            source_info = ""
+            source_link = ""
+
+            # Web search 결과인 경우
+            if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
+                if hasattr(res, 'url') and res.url:
+                    source_link = res.url
+                    source_info = f"웹 출처: {res.url}"
+                elif hasattr(res, 'metadata') and res.metadata and 'link' in res.metadata:
+                    source_link = res.metadata['link']
+                    source_info = f"웹 출처: {res.metadata['link']}"
+                else:
+                    source_info = "웹 검색 결과"
+                    source_link = "웹 검색"
+
+            # Vector DB 결과인 경우
+            elif hasattr(res, 'source_url'):
+                source_info = f"문서 출처: {res.source_url}"
+                source_link = res.source_url
+            elif hasattr(res, 'title'):
+                source_info = f"문서: {res.title}"
+                source_link = res.title
+            else:
+                source_name = res.source if hasattr(res, 'source') else 'Vector DB'
+                source_info = f"출처: {source_name}"
+                source_link = source_name
+
+            context_with_sources += f"--- 문서 ID {i}: [{source_info}] ---\n제목: {res.title}\n내용: {res.content}\n출처_링크: {source_link}\n\n"
 
         prompt = f"""
 당신은 여러 데이터 소스를 종합하여 특정 주제에 대한 분석 보고서의 한 섹션을 저술하는 주제 전문가입니다.
@@ -522,13 +648,16 @@ class ProcessorAgent:
 **작성할 섹션의 주제**: "{section_title}"
 
 **참고할 전체 데이터**:
-{context[:8000]}
+{context_with_sources[:8000]}
 
 **작성 지침**:
 1. **핵심 정보 추출**: '{section_title}' 주제와 직접적으로 관련된 핵심 사실, 수치, 통계 위주로 정보를 추출하세요.
 2. **간결한 요약**: 정보를 단순히 나열하지 말고, 1~2 문단 이내의 간결하고 논리적인 핵심 요약문으로 재구성해주세요.
 3. **중복 제거**: 여러 문서에 걸쳐 반복되는 내용은 하나로 통합하여 제거하세요.
-4.  **객관성 유지**: 데이터에 기반하여 객관적인 사실만을 전달해주세요.
+4. **객관성 유지**: 데이터에 기반하여 객관적인 사실만을 전달해주세요.
+5. **출처 정보 보존**: 중요한 정보나 수치를 언급할 때 해당 정보의 출처를 마크다운 하이퍼링크 형식으로 표기하세요.
+   - 웹 출처의 경우: [출처명](웹주소)
+   - 문서 출처의 경우: [문서명](문서명)
 
 **결과물 (핵심 요약본)**:
 """
@@ -560,11 +689,46 @@ class ProcessorAgent:
 3.  **데이터 기반**: 참고 데이터에 있는 구체적인 수치, 사실, 인용구를 적극적으로 활용하여 내용을 구성하세요. 절대 데이터를 창작하거나 추측하지 마세요
 4.  **전문가적 문체**: 명확하고 간결하며 논리적인 전문가의 톤으로 글을 작성하세요.
 5.  **가독성**: 마크다운 문법(예: `*` 글머리 기호, `**` 굵은 글씨)을 적절히 사용하여 읽기 쉽게 구성하세요.
+6.  **출처 표기 (중요)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 마크다운 하이퍼링크 형식으로 출처를 표기하세요.
+   - Web search 정보 사용 시: [출처](실제_웹_주소)
+   - Vector DB 정보 사용 시: [문서명](문서명)
+   - 예시: "2024년 매출이 증가했습니다 [한국경제신문](https://www.hankyung.com/example)"
 
 **보고서 섹션 내용**:
 """
         else:  # "full_data_for_chart"
-            section_data = "\n\n".join([f"**출처: {res.source}**\n- **제목**: {res.title}\n- **내용**: {res.content}" for res in all_context_data])
+            # 출처 정보를 포함한 데이터 준비
+            section_data_with_sources = ""
+            for res in all_context_data:
+                source_info = ""
+                source_link = ""
+
+                # Web search 결과인 경우
+                if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
+                    if hasattr(res, 'url') and res.url:
+                        source_link = res.url
+                        source_info = f"웹 출처: {res.url}"
+                    elif hasattr(res, 'metadata') and res.metadata and 'link' in res.metadata:
+                        source_link = res.metadata['link']
+                        source_info = f"웹 출처: {res.metadata['link']}"
+                    else:
+                        source_info = "웹 검색 결과"
+                        source_link = "웹 검색"
+
+                # Vector DB 결과인 경우
+                elif hasattr(res, 'source_url'):
+                    source_info = f"문서 출처: {res.source_url}"
+                    source_link = res.source_url
+                elif hasattr(res, 'title'):
+                    source_info = f"문서: {res.title}"
+                    source_link = res.title
+                else:
+                    source_name = res.source if hasattr(res, 'source') else 'Vector DB'
+                    source_info = f"출처: {source_name}"
+                    source_link = source_name
+
+                section_data_with_sources += f"**{source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n- **출처_링크**: {source_link}\n\n"
+
             # [수정됨] 차트 생성 마커 삽입 지침이 포함된 프롬프트
             prompt_template = """
 당신은 데이터 분석가이자 보고서 작성가입니다. 주어진 원본 데이터를 분석하여, 텍스트 설명과 시각적 차트를 결합한 전문가 수준의 보고서 섹션을 작성합니다.
@@ -584,6 +748,12 @@ class ProcessorAgent:
 4.  **차트 마커 삽입 (가장 중요)**: 텍스트 설명의 흐름 상, 시각적 데이터가 필요한 가장 적절한 위치에 `[GENERATE_CHART]` 마커를 한 줄에 단독으로 삽입하세요.
 5.  **서술 계속**: 마커를 삽입한 후, 이어서 나머지 텍스트 설명을 자연스럽게 계속 작성할 수 있습니다.
 6.  **전문가적 문체 및 가독성**: 명확하고 논리적인 문체로 작성하고, 마크다운 문법(`*`, `**`)을 활용하여 가독성을 높이세요.
+7.  **출처 표기 (매우 중요)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 마크다운 하이퍼링크 형식으로 출처를 표기하세요.
+   - 웹 검색 정보 사용 시: [출처명](실제_웹_주소) 형식으로 표기
+   - 문서/논문 정보 사용 시: [문서명](문서명) 형식으로 표기
+   - 반드시 제공된 데이터의 **출처_링크** 정보만 사용하고, 가짜 출처를 만들지 마세요.
+   - 예시 1: "시장 규모가 10% 증가했습니다 [한국경제신문](https://www.hankyung.com/article/123)"
+   - 예시 2: "연구에 따르면 효과가 높습니다 [농업연구보고서](농업연구보고서)"
 
 **보고서 섹션 본문**:
 """
@@ -592,7 +762,7 @@ class ProcessorAgent:
             original_query=original_query,
             section_title=section_title,
             description=description,
-            section_data=section_data
+            section_data=section_data_with_sources if content_type == "full_data_for_chart" else section_data
         )
 
         async for chunk in self.llm_pro.astream(prompt):
