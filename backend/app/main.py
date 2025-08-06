@@ -2,349 +2,44 @@ import os
 import sys
 import uuid
 import json
-import re
-import logging
-from dotenv import load_dotenv
 import asyncio
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, Any, AsyncGenerator, List, Optional
+from typing import AsyncGenerator, Dict, Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+# Pydantic과 FastAPI는 웹 서버 구성을 위해 필요합니다.
+from pydantic import BaseModel, Field
+from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
-# 출력 버퍼링 비활성화
-sys.stdout.reconfigure(line_buffering=True)
-sys.stderr.reconfigure(line_buffering=True)
+# 시스템 경로 설정을 통해 다른 폴더의 모듈을 임포트합니다.
+# 실제 프로젝트 구조에 맞게 이 부분은 조정될 수 있습니다.
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# --- 모델 및 에이전트 클래스 임포트 ---
+# StreamingAgentState는 이제 Pydantic 모델로 관리하는 것이 더 효율적입니다.
+class StreamingAgentState(BaseModel):
+    original_query: str
+    session_id: str
+    flow_type: str | None = None
+    plan: dict | None = None
+    design: dict | None = None
+    metadata: dict = Field(default_factory=dict)
 
-load_dotenv()
-
-from .core.config.env_checker import check_api_keys
-check_api_keys()
-
-from .core.models.models import (
-    StreamingAgentState,
-    SearchResult,
-)
-# 새로운 모듈화된 agent 시스템
 from .core.agents.orchestrator import TriageAgent, OrchestratorAgent
-from .core.agents.worker_agents import DataGathererAgent, ProcessorAgent
 from .core.agents.conversational_agent import SimpleAnswererAgent
 
-from langgraph.graph import StateGraph, END
-from .utils.memory.hierarchical_memory import HierarchicalMemorySystem, ConversationMemory
-
-
-# Request/Response Models
+# --- Pydantic 모델 정의 ---
 class QueryRequest(BaseModel):
     query: str
-    session_id: Optional[str] = None
+    session_id: str | None = Field(default_factory=lambda: str(uuid.uuid4()))
 
-
-class QueryResponse(BaseModel):
-    session_id: str
-    status: str
-    response: str
-
-
-class RAGWorkflow:
-    """최종 아키텍처: 계층적 동적 계획 실행 워크플로우"""
-
-    def __init__(self):
-        print("\n>> 최종 아키텍처 RAG 워크플로우 초기화 시작")
-        # 1. 역할에 따라 재편성된 에이전트들을 초기화합니다.
-        self.triage_agent = TriageAgent()
-        self.orchestrator_agent = OrchestratorAgent()
-        self.data_gatherer_agent = DataGathererAgent()
-        
-        # 환경 변수에서 ReAct 사용 여부 확인
-        use_react = os.getenv('USE_REACT_AGENT', 'false').lower() == 'true'
-        self.processor_agent = ProcessorAgent(use_react=use_react)
-        
-        self.simple_answerer_agent = SimpleAnswererAgent()
-        self.workflow = self._create_workflow()
-        print(">> 최종 아키텍처 RAG 워크플로우 초기화 완료")
-
-    def _create_workflow(self):
-        """LangGraph의 모든 기능을 활용하는 최종 워크플로우 그래프를 생성합니다."""
-        graph = StateGraph(StreamingAgentState)
-
-        # 2. 역할에 맞는 노드들을 정의합니다.
-        graph.add_node("triage", self.triage_node)
-        graph.add_node("simple_chat", self.simple_chat_node)
-        graph.add_node("orchestrator", self.orchestrator_node)
-        graph.add_node("executor", self.executor_node)
-
-        # 3. 워크플로우의 흐름(엣지)을 정의합니다.
-        graph.set_entry_point("triage")
-
-        # Triage 노드 실행 후, State의 'flow_type'에 따라 분기합니다.
-        graph.add_conditional_edges(
-            "triage",
-            lambda state: state.get("flow_type"),
-            {"chat": "simple_chat", "task": "orchestrator"}
-        )
-
-        # Orchestrator 노드는 항상 Executor 노드로 연결됩니다.
-        graph.add_edge("orchestrator", "executor")
-
-        # Executor 노드 실행 후에는 router를 통해 다음 경로를 동적으로 결정합니다.
-        graph.add_conditional_edges(
-            "executor",
-            self.router,
-            {
-                "continue": "executor",      # 루프: 다음 단계를 위해 다시 executor 호출
-                "replan": "orchestrator",    # 재계획: critique 실패 시 orchestrator 호출
-                "__end__": "__end__"         # 종료: 모든 계획이 끝났을 때
-            }
-        )
-
-        # simple_chat 경로는 바로 종료됩니다.
-        graph.add_edge("simple_chat", END)
-
-        return graph.compile()
-
-    # 4. 각 노드가 수행할 함수들을 정의합니다.
-    async def triage_node(self, state: StreamingAgentState) -> Dict[str, Any]:
-        """TriageAgent를 호출하여 State를 업데이트합니다."""
-        return await self.triage_agent.classify_request(state["original_query"], state)
-
-    async def orchestrator_node(self, state: StreamingAgentState) -> Dict[str, Any]:
-        """OrchestratorAgent를 호출하여 State를 업데이트합니다."""
-        return await self.orchestrator_agent.generate_plan(state)
-
-    async def simple_chat_node(self, state: StreamingAgentState) -> Dict[str, Any]:
-        """SimpleAnswererAgent를 호출하기 위해 State를 준비합니다."""
-        # 실제 스트리밍은 API 계층에서 이 노드의 결과를 보고 처리합니다.
-        return state
-
-    async def executor_node(self, state: StreamingAgentState) -> Dict[str, Any]:
-        """계획의 '단 한 단계'만 실행하는 핵심 실행 엔진입니다."""
-        plan = state.get("plan", {})
-        steps = plan.get("steps", [])
-        index = state.get("current_step_index", 0)
-
-        if index >= len(steps):
-            return {"step_results": state.get("step_results", []), "current_step_index": index}
-
-        step_to_execute = steps[index]
-        agent_name = step_to_execute.get("agent")
-        inputs = step_to_execute.get("inputs", {})
-
-        print(f"\n>> Executor: 단계 {index} 실행 - {step_to_execute.get('description', '')}")
-        sys.stdout.flush()
-
-        result = None
-        if agent_name == "DataGathererAgent":
-            result = await self.data_gatherer_agent.execute(inputs.get("tool"), inputs)
-        elif agent_name == "ProcessorAgent":
-            processor_type = inputs.get("processor_type")
-            source_steps = inputs.get("source_steps", [])
-            data = [state["step_results"][i] for i in source_steps if i < len(state["step_results"])]
-            data = data[0] if len(data) == 1 else data
-
-            # generate_report는 stream_workflow_events에서 실시간 처리하므로 placeholder만 반환
-            if processor_type == "generate_report":
-                result = "REPORT_STREAMING_PLACEHOLDER"
-            else:
-                result = self.processor_agent.process(processor_type, data, state['original_query'])
-                if asyncio.iscoroutine(result):
-                    result = await result
-
-        step_results = state.get("step_results", [])
-        step_results.append(result)
-
-        # CriticResult인 경우에만 status 확인
-        if hasattr(result, 'status') and result.status == 'fail_with_feedback':
-            return {
-                "step_results": step_results, "current_step_index": index + 1,
-                "needs_replan": True, "replan_feedback": result.feedback
-            }
-
-        return {"step_results": step_results, "current_step_index": index + 1}
-
-    def router(self, state: StreamingAgentState) -> str:
-        """다음 경로를 결정하는 교통경찰 역할을 합니다."""
-        if state.get("needs_replan", False):
-            # 재계획이 필요하면 실행 상태를 초기화하고 orchestrator로 보냅니다.
-            return "replan"
-
-        if state.get("current_step_index", 0) >= len(state.get("plan", {}).get("steps", [])):
-            return "__end__"
-
-        return "continue"
-
-    # 5. API와 통신하는 스트리밍 중계기를 정의합니다.
-    async def stream_workflow_events(self, session_id: str, query: str) -> AsyncGenerator[str, None]:
-        """LangGraph astream_events를 사용하여 전체 워크플로우를 스트리밍합니다."""
-        initial_state = {
-            "original_query": query, "session_id": session_id, "user_id": session_id,
-            "start_time": datetime.now().isoformat(), "flow_type": None, "plan": None,
-            "current_step_index": 0, "step_results": [], "execution_log": [],
-            "is_sufficient": False, "needs_replan": False, "replan_feedback": None,
-            "final_answer": None, "metadata": {}
-        }
-
-        # 선제적 응답 (빠른 TTFT)
-        yield json.dumps({"type": "status", "message": "분석을 시작하겠습니다..."})
-
-        async for event in self.workflow.astream_events(initial_state, version="v1"):
-            kind = event["event"]
-
-            if kind == "on_chain_start":
-                node_name = event["name"]
-                inputs = event["data"].get("input", {})
-
-                # Executor가 시작될 때 현재 실행할 단계 정보 표시
-                if node_name == "executor":
-                    plan = inputs.get("plan", {})
-                    current_step_index = inputs.get("current_step_index", 0)
-                    steps = plan.get("steps", [])
-                    
-                    if current_step_index < len(steps):
-                        current_step = steps[current_step_index]
-                        agent_type = current_step.get("agent", "unknown")
-                        step_inputs = current_step.get("inputs", {})
-                        
-                        # 각 Agent 타입별로 적절한 상태 메시지 생성
-                        if agent_type == "DataGathererAgent":
-                            tool = step_inputs.get("tool", "")
-                            if tool == "web_search":
-                                status_msg = "웹에서 정보 수집 중..."
-                            elif tool == "vector_db_search":
-                                status_msg = "데이터베이스에서 정보 수집 중..."
-                            elif tool == "graph_db_search":
-                                status_msg = "그래프 데이터베이스에서 정보 수집 중..."
-                            elif tool == "rdb_search":
-                                status_msg = "관계형 데이터베이스에서 정보 수집 중..."
-                            else:
-                                status_msg = f"{tool}에서 정보 수집 중..."
-                        elif agent_type == "ProcessorAgent":
-                            processor_type = step_inputs.get("processor_type", "")
-                            if processor_type == "integrate_context":
-                                status_msg = "수집된 정보 통합 중..."
-                            elif processor_type == "generate_report":
-                                status_msg = "보고서 생성 중..."
-                            elif processor_type == "create_charts":
-                                status_msg = "차트 생성 중..."
-                            else:
-                                status_msg = f"{processor_type} 처리 중..."
-                        else:
-                            status_msg = f"{agent_type} 실행 중..."
-                        
-                        yield json.dumps({"type": "status", "message": status_msg})
-
-            elif kind == "on_chain_end":
-                node_name = event["name"]
-                outputs = event["data"].get("output", {})
-
-                # Triage가 끝나고 chat 경로로 결정되었을 때
-                if node_name == "simple_chat":
-                    async for chunk in self.simple_answerer_agent.answer_streaming(outputs):
-                        yield json.dumps({"type": "content", "chunk": chunk})
-
-                # Orchestrator가 계획을 생성했을 때
-                elif node_name == "orchestrator" and outputs.get("plan"):
-                    yield json.dumps({"type": "plan", "plan": outputs["plan"]})
-
-                # Executor가 한 단계를 끝냈을 때
-                elif node_name == "executor":
-                    current_step_index = outputs.get("current_step_index", 0)
-                    last_result = outputs.get("step_results", [])[-1] if outputs.get("step_results") else None
-
-                    if last_result:
-                        # 계획에서 현재 단계 정보 가져오기
-                        plan = outputs.get("plan") or event["data"].get("input", {}).get("plan", {})
-                        steps = plan.get("steps", [])
-                        current_step = current_step_index - 1  # 방금 완료된 단계
-                        
-                        # context integration 단계는 프론트엔드로 전송하지 않음 (중간 처리 결과)
-                        if (current_step >= 0 and current_step < len(steps) and 
-                            steps[current_step].get("inputs", {}).get("processor_type") in ["integrate_context", "summarize_and_integrate"]):
-                            print(f"- Context integration 결과 생략 (백엔드에서만 처리)")
-                            sys.stdout.flush()
-                        # generate_report 단계는 실시간 스트리밍으로 처리
-                        elif (current_step >= 0 and current_step < len(steps) and 
-                              steps[current_step].get("inputs", {}).get("processor_type") == "generate_report"):
-                            # 보고서 생성을 실시간 스트리밍으로 재실행
-                            source_steps = steps[current_step].get("inputs", {}).get("source_steps", [])
-                            step_results = outputs.get("step_results", [])
-                            data = [step_results[i] for i in source_steps if i < len(step_results)]
-                            data = data[0] if len(data) == 1 else data
-                            
-                            # 실시간 스트리밍 처리
-                            async for chunk in self.processor_agent.process_streaming("generate_report", data, outputs.get("original_query", "")):
-                                yield json.dumps({"type": "content", "chunk": chunk})
-                        else:
-                            # 다른 모든 결과는 프론트엔드로 전송 (데이터 수집 결과)
-                            if isinstance(last_result, list) and all(hasattr(item, 'source') for item in last_result):
-                                # SearchResult 리스트인 경우 - 도구 이름과 함께 전송
-                                step_info = steps[current_step] if current_step >= 0 and current_step < len(steps) else {}
-                                agent_type = step_info.get("agent", "unknown")
-                                step_inputs = step_info.get("inputs", {})
-                                
-                                # 도구 이름 결정
-                                tool_name = "unknown"
-                                if agent_type == "DataGathererAgent":
-                                    tool = step_inputs.get("tool", "")
-                                    if tool:
-                                        source_map = {
-                                            "web_search": "웹 검색",
-                                            "vector_db_search": "벡터 데이터베이스",
-                                            "graph_db_search": "그래프 데이터베이스",
-                                            "rdb_search": "관계형 데이터베이스"
-                                        }
-                                        tool_name = source_map.get(tool, tool)
-                                    else:
-                                        tool_name = "데이터 수집"
-                                
-                                # 실제 검색 쿼리 추출
-                                search_query = ""
-                                if current_step >= 0 and current_step < len(steps):
-                                    step_info = steps[current_step]
-                                    search_query = step_info.get("inputs", {}).get("query", outputs.get("original_query", ""))
-                                
-                                results_for_ui = [item.model_dump() if hasattr(item, 'model_dump') else item.__dict__ for item in last_result]
-                                yield json.dumps({
-                                    "type": "search_results", 
-                                    "tool_name": tool_name,
-                                    "step": current_step + 1,
-                                    "query": search_query,
-                                    "results": results_for_ui
-                                })
-                            elif isinstance(last_result, str):
-                                yield json.dumps({"type": "content", "chunk": last_result})
-                            elif isinstance(last_result, dict):
-                                yield json.dumps({"type": "result", "data": last_result})
-
-        yield json.dumps({"type": "complete", "message": "모든 작업이 완료되었습니다."})
-
-# 전역 워크플로우 인스턴스
-workflow_instance = None
-
-
-def get_workflow():
-    """전역 워크플로우 인스턴스를 반환하거나 생성"""
-    global workflow_instance
-    if workflow_instance is None:
-        workflow_instance = RAGWorkflow()
-    return workflow_instance
-
-
-# FastAPI 앱 설정
-app = FastAPI(title="MultiAgent RAG System", version="2.0")
+# --- FastAPI 애플리케이션 설정 ---
+app = FastAPI(
+    title="Intelligent RAG Agent System",
+    description="A sophisticated, multi-agent system for handling complex queries.",
+    version="3.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -354,54 +49,96 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- 에이전트 인스턴스 초기화 ---
+triage_agent = TriageAgent()
+orchestrator_agent = OrchestratorAgent()
+simple_answerer_agent = SimpleAnswererAgent()
 
+# --- API 엔드포인트 정의 ---
 @app.get("/")
 async def root():
-    return {"message": "MultiAgent RAG System v2.0 - 새로운 모듈화된 아키텍처"}
-
+    return {"message": "Intelligent RAG Agent System is running."}
 
 @app.post("/query/stream")
 async def stream_query(request: QueryRequest):
-    """실시간 스트리밍 쿼리 엔드포인트 - Claude 스타일"""
-    session_id = request.session_id or str(uuid.uuid4())
+    """
+    사용자 쿼리를 받아, 유형에 따라 적절한 에이전트 워크플로우를 실행하고
+    그 결과를 실시간으로 스트리밍하는 메인 엔드포인트입니다.
+    """
+    print(f"\n{'='*20} New Query Received {'='*20}")
+    print(f"Session ID: {request.session_id}")
+    print(f"Query: {request.query}")
 
-    print(f"\n=== 실시간 스트리밍 쿼리 시작 ===")
-    print(f"세션 ID: {session_id}")
-    print(f"쿼리: {request.query}")
-    sys.stdout.flush()
+    async def event_stream_generator() -> AsyncGenerator[str, None]:
+        """쿼리 처리 및 결과 스트리밍을 위한 비동기 생성기"""
 
-    workflow = RAGWorkflow()
+        state = StreamingAgentState(
+            original_query=request.query,
+            session_id=request.session_id,
+        )
 
-    async def generate():
         try:
-            async for json_data in workflow.stream_workflow_events(session_id, request.query):
-                # JSON 데이터를 파싱하여 session_id 추가
-                try:
-                    data = json.loads(json_data)
-                    data["session_id"] = session_id
-                    yield f"data: {json.dumps(data)}\n\n"
-                except json.JSONDecodeError:
-                    # 이전 방식의 텍스트 chunk인 경우
-                    yield f"data: {json.dumps({'type': 'content', 'chunk': json_data, 'session_id': session_id})}\n\n"
+            # 1. Triage Agent 실행
+            yield server_sent_event("status", {"message": "요청 유형 분석 중...", "session_id": state.session_id})
+            state_dict = state.model_dump()
+            updated_state_dict = await triage_agent.classify_request(request.query, state_dict)
+            state = StreamingAgentState(**updated_state_dict)
+            flow_type = state.flow_type or "task"
 
-                await asyncio.sleep(0.01)
+            # 2. 분류된 유형에 따라 다른 워크플로우 실행
+            if flow_type == "chat":
+                print(">> Flow type: 'chat'. Starting SimpleAnswererAgent.")
+                yield server_sent_event("status", {"message": "간단한 답변 생성 중...", "session_id": state.session_id})
 
-            # 최종 완료 신호
-            yield f"data: {json.dumps({'type': 'final_complete', 'session_id': session_id})}\n\n"
+                async for chunk in simple_answerer_agent.answer_streaming(state.model_dump()):
+                    yield server_sent_event("content", {"chunk": chunk, "session_id": state.session_id})
+
+            else: # flow_type == "task"
+                print(">> Flow type: 'task'. Starting OrchestratorAgent workflow.")
+
+                # OrchestratorAgent의 워크플로우를 스트리밍하면서 상세한 상태 메시지 처리
+                chart_index = 1
+                # execute_report_workflow는 이제 텍스트/차트 외에 상태 정보도 함께 yield 합니다.
+
+                async for event in orchestrator_agent.execute_report_workflow(state.model_dump()):
+
+                    event_type = event.get("type")
+                    data = event.get("data")
+
+                    # session_id를 모든 이벤트에 추가
+                    if isinstance(data, dict):
+                        data["session_id"] = state.session_id
+
+                    if event_type == "chart":
+                        print(f"Chart event received: {data}")
+                        # 프론트엔드가 인식할 수 있는 최종 차트 객체로 변환하여 전송
+                        chart_payload = {
+                            "chart_data": data,
+                            "session_id": state.session_id
+                        }
+                        yield server_sent_event("chart", chart_payload)
+                        chart_index += 1
+                    else:
+                        # status, plan, content_chunk 등 다른 모든 이벤트를 그대로 전달
+                        yield server_sent_event(event_type, data if isinstance(data, dict) else {"data": data, "session_id": state.session_id})
 
         except Exception as e:
-            error_msg = f"스트리밍 중 오류 발생: {str(e)}"
-            yield f"data: {json.dumps({'type': 'error', 'message': error_msg, 'session_id': session_id})}\n\n"
+            print(f"!! 스트리밍 중 심각한 오류 발생: {e}", file=sys.stderr)
+            error_payload = {"message": f"오류가 발생했습니다: {str(e)}", "session_id": state.session_id}
+            yield server_sent_event("error", error_payload)
 
-    return StreamingResponse(
-        generate(),
-        media_type="text/plain",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-        }
-    )
+        finally:
+            print(f"Query processing finished for session: {request.session_id}\n{'='*57}")
+            yield server_sent_event("final_complete", {"message": "모든 작업이 완료되었습니다.", "session_id": state.session_id})
+
+    return StreamingResponse(event_stream_generator(), media_type="text/event-stream")
+
+def server_sent_event(event_type: str, data: Dict[str, Any]) -> str:
+    """Server-Sent Events (SSE) 형식에 맞는 문자열을 생성합니다."""
+    # 프론트엔드가 기대하는 형식에 맞춰 type을 data에 포함
+    data_with_type = {"type": event_type, "session_id": data.get("session_id"), **data}
+    payload = json.dumps(data_with_type, ensure_ascii=False)
+    return f"data: {payload}\n\n"
 
 
 @app.get("/memory/stats")

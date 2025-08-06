@@ -10,7 +10,7 @@ from pypdf import PdfReader
 # 각 RAG 툴의 메인 함수를 import
 from ..database.postgres_rag_tool import postgres_rdb_search
 from ..database.neo4j_rag_tool import neo4j_search_sync
-from ..database.elastic_search_rag_tool import search, MultiIndexRAGSearchEngine, RAGConfig
+from ..database.elasticsearch.elastic_search_rag_tool import search, MultiIndexRAGSearchEngine, RAGConfig
 
 from ..database.mock_databases import create_mock_vector_db
 
@@ -278,7 +278,7 @@ def rdb_search(query: str) -> str:
 
 
 @tool
-def vector_db_search(query: str, top_k = 3) -> List:
+def vector_db_search(query: str, top_k = 3, hf_model = None) -> List:
     """
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
     """
@@ -304,7 +304,7 @@ def vector_db_search(query: str, top_k = 3) -> List:
                 })
             return formatted_results
 
-        search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config)
+        search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config, hf_model=hf_model)
 
         print(f"\n>> Vector DB 검색 시작: {query}")
         results = search_engine.advanced_rag_search(query)

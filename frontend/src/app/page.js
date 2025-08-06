@@ -156,7 +156,17 @@ export default function Home() {
 
   // 메시지 전송
   const handleSubmit = async () => {
-    if (!query.trim() || isStreaming) return;
+    console.log("handleSubmit 호출됨, query:", query, "isStreaming:", isStreaming);
+
+    if (!query.trim() || isStreaming) {
+      console.log("조건 불만족으로 반환:", {
+        queryTrimmed: query.trim(),
+        isStreaming: isStreaming
+      });
+      return;
+    }
+
+    console.log("API 요청 시작...");
 
     const userMessage = {
       id: Date.now(),
@@ -190,6 +200,15 @@ export default function Home() {
     setCurrentConversation((prev) => [...prev, assistantMessage]);
 
     try {
+      console.log("API_BASE_URL 값:", API_BASE_URL);
+      console.log("API 요청 URL:", `${API_BASE_URL}/query/stream`);
+      console.log("요청 데이터:", {
+        query: currentQuery,
+        session_id: conversationId || undefined,
+      });
+
+      console.log("fetch 요청 시작!");
+
       const res = await fetch(`${API_BASE_URL}/query/stream`, {
         method: "POST",
         headers: {
@@ -201,9 +220,27 @@ export default function Home() {
           query: currentQuery,
           session_id: conversationId || undefined,
         }),
+      }).catch(error => {
+        console.error("fetch 요청 자체가 실패:", error);
+        throw new Error(`Network request failed: ${error.message}`);
       });
 
-      if (!res.body) throw new Error("Response body is null");
+      console.log("fetch 응답 받음:", res.status, res.statusText);
+      console.log("응답 헤더:", res.headers);
+
+      if (!res.ok) {
+        console.error("HTTP 오류 응답:", res.status, res.statusText);
+        const errorText = await res.text();
+        console.error("오류 내용:", errorText);
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      if (!res.body) {
+        console.error("Response body is null");
+        throw new Error("Response body is null");
+      }
+
+      console.log("스트리밍 시작...");
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -215,10 +252,17 @@ export default function Home() {
       let finalSources = null; // 최종 출처 정보 저장
 
       while (true) {
+        console.log("스트리밍 청크 읽기 시도...");
         const { done, value } = await reader.read();
-        if (done) break;
+        console.log("청크 읽기 결과:", { done, valueLength: value?.length });
+
+        if (done) {
+          console.log("스트리밍 완료");
+          break;
+        }
 
         const chunk = decoder.decode(value, { stream: true });
+        console.log("디코딩된 청크:", chunk.substring(0, 100) + (chunk.length > 100 ? '...' : ''));
         buffer += chunk;
 
         const events = buffer.split("\n\n");
@@ -239,6 +283,10 @@ export default function Home() {
               switch (data.type) {
                 case "status":
                   setStatusMessage(data.message);
+                  break;
+
+                case "chart":
+                  finalCharts.push(data.chart_data);
                   break;
 
                 case "plan":
@@ -278,7 +326,7 @@ export default function Home() {
 
                   // 현재 대화의 검색 결과에 추가
                   const currentConvId = conversationId || data.session_id || Date.now().toString();
-                  
+
                   setConversationSearchResults(prev => {
                     const newResults = {
                       ...prev,
@@ -335,7 +383,7 @@ export default function Home() {
                   );
                   break;
 
-                case "content":
+                case "content_chunk":
                   // 최종 보고서 및 기타 컨텐츠 표시 (context integration 제외)
                   finalContent += data.chunk;
                   setCurrentConversation((prev) =>
@@ -400,7 +448,7 @@ export default function Home() {
                   setCurrentConversation((prev) => {
                     const currentConvId = conversationId || data.session_id || Date.now().toString();
                     const messageSearchResults = conversationSearchResults[currentConvId] || currentSearchResults;
-                    
+
                     const newConversation = prev.map((msg) =>
                       msg.id === assistantMessage.id
                         ? {
@@ -435,7 +483,7 @@ export default function Home() {
 
                   // 현재 스트리밍용 검색 결과 초기화 (다음 질문을 위해)
                   setCurrentSearchResults([]);
-                  
+
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   return;
@@ -461,7 +509,11 @@ export default function Home() {
         }
       }
     } catch (error) {
-      console.error("API 오류:", error);
+      console.error("=== API 오류 상세 정보 ===");
+      console.error("오류 타입:", error.name);
+      console.error("오류 메시지:", error.message);
+      console.error("오류 스택:", error.stack);
+      console.error("========================");
       setStatusMessage(`오류: ${error.message}`);
       setIsStreaming(false);
     }
@@ -469,7 +521,10 @@ export default function Home() {
 
   // Enter 키 처리
   const handleKeyPress = (e) => {
+    console.log("키 눌림:", e.key, "Shift:", e.shiftKey);
+
     if (e.key === "Enter" && !e.shiftKey) {
+      console.log("Enter 키 감지, handleSubmit 호출");
       e.preventDefault();
       handleSubmit();
     }

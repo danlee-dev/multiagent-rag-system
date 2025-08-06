@@ -1089,7 +1089,7 @@ const getAdvancedOptions = (chartType, chartConfig) => {
 };
 
 
-const preprocessAdvancedChartData = (chartType, data) => {
+const preprocessAdvancedChartData = (chartType, data, chartConfig) => {
   if (!data || typeof data !== "object") {
     return { labels: [], datasets: [] };
   }
@@ -1104,7 +1104,7 @@ const preprocessAdvancedChartData = (chartType, data) => {
   let processedData = { ...convertedData };
 
   // 차트 설정에서 색상 팔레트 선택 (기본값: modern)
-  const paletteType = chartConfig.palette || "modern";
+  const paletteType = (chartConfig && chartConfig.palette) || "modern";
   const palette = colorPalettes[paletteType] || colorPalettes.modern;
 
   processedData.datasets = processedData.datasets.map(
@@ -1596,7 +1596,8 @@ export function ChartComponent({ chartConfig }) {
   // 데이터 전처리
   const processedData = preprocessAdvancedChartData(
     chartType,
-    chartConfig.data
+    chartConfig.data,
+    chartConfig
   );
 
   if (

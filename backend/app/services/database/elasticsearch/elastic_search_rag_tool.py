@@ -13,8 +13,9 @@ from typing import List, Dict, Any, Optional, Tuple
 from elasticsearch import Elasticsearch
 from datetime import datetime
 import re
-from ...core.config.rag_config import RAGConfig
+from ....core.config.rag_config import RAGConfig
 from sentence_transformers import SentenceTransformer
+import cohere
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -32,7 +33,7 @@ from elasticsearch import Elasticsearch
 import google.generativeai as genai
 from datetime import datetime
 import re
-from ...core.config.rag_config import RAGConfig
+from ....core.config.rag_config import RAGConfig
 from sentence_transformers import SentenceTransformer
 
 if hasattr(sys.stdout, 'reconfigure'):
@@ -41,31 +42,54 @@ if hasattr(sys.stdin, 'reconfigure'):
     sys.stdin.reconfigure(encoding='utf-8')
 
 class MultiIndexRAGSearchEngine:
-    def __init__(self, google_api_key: str = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
+    def __init__(self, google_api_key: str = None, cohere_api_key: str = None, hf_model = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
         if config is None:
             config = RAGConfig()
         api_key = google_api_key or os.getenv('GOOGLE_API_KEY')
         if not api_key:
             raise ValueError("Google API 키를 설정해주세요 (환경변수 GOOGLE_API_KEY)")
 
+        # Cohere API 키 설정
+        cohere_key = cohere_api_key or os.getenv("COHERE_API_KEY")
+        if not cohere_key:
+            raise ValueError("Cohere API 키를 설정해주세요 (환경변수 COHERE_API_KEY 또는 초기화 파라미터)")
+
         import google.generativeai as genai
         genai.configure(api_key=api_key)
         self.client = genai.GenerativeModel('gemini-2.5-flash')
+        self.cohere_client = cohere.Client(cohere_key)
         self.es = Elasticsearch(
             es_host or config.ELASTICSEARCH_HOST,
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
         )
-        try:
-            self.hf_model = SentenceTransformer(
-                "dragonkue/bge-m3-ko",
-                device="cuda"  # GPU 사용
-            )
-        except Exception:
-            # GPU가 없거나 meta tensor 에러가 난다면 CPU로 fallback
-            self.hf_model = SentenceTransformer(
-                "dragonkue/bge-m3-ko",
-                device="cpu"
-            )
+        # SentenceTransformer 안전한 초기화 (meta 장치 문제 완전 회피)
+        
+        if not hf_model:
+            try:
+                print(">> SentenceTransformer 모델 로드 시작...")
+
+                # 환경변수로 meta 장치 사용 방지
+                os.environ["TRANSFORMERS_OFFLINE"] = "0"
+
+                # 1단계: CPU 전용으로 로드
+                print(">> CPU 전용으로 모델 로드...")
+                self.hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
+                print(">> CPU 모델 로드 성공")
+
+            except Exception as e:
+                print(f">> 한국어 모델 로드 실패: {e}")
+                print(">> 영어 fallback 모델 시도...")
+                try:
+                    # 더 안정적인 영어 모델로 fallback
+                    self.hf_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+                    print(">> Fallback 모델 로드 성공")
+                except Exception as final_error:
+                    print(f">> 모든 모델 로드 실패: {final_error}")
+                    print(">> 임베딩 기능 비활성화")
+                    self.hf_model = None
+        else:
+            self.hf_model = hf_model
+            
         self.TEXT_INDEX = "bge_text"
         self.TABLE_INDEX = "bge_table"
         self.config = config
@@ -83,15 +107,27 @@ class MultiIndexRAGSearchEngine:
         self.SUMMARIZATION_RATIO = config.SUMMARIZATION_RATIO
         self.DOMAIN_KEYWORDS = config.DOMAIN_KEYWORDS
 
+        # 동의어 사전 로드 (synonym.json)
+        syn_path = os.path.join(os.path.dirname(__file__), "synonym.json")
+        if os.path.exists(syn_path):
+            with open(syn_path, encoding='utf-8') as f:
+                self.synonym_dict = json.load(f)
+        else:
+            self.synonym_dict = {}
+
     def embed_text(self, text: str) -> List[float]:
         try:
+            if self.hf_model is None:
+                print(">> 임베딩 모델이 없어 더미 벡터 반환")
+                return [0.0] * 1024  # 더미 임베딩 벡터
+
             safe_text = text.encode('utf-8', errors='ignore').decode('utf-8')
             # Hugging Face 모델로 임베딩 생성
             embedding = self.hf_model.encode(safe_text)
             return embedding.tolist()
         except Exception as e:
             print(f"임베딩 생성 오류: {e}")
-            return []
+            return [0.0] * 1024  # 오류 시 더미 벡터 반환
 
     def query_enhancement_hyde_text(self, query: str) -> str:
         try:
@@ -142,6 +178,57 @@ class MultiIndexRAGSearchEngine:
             print(f"HyDE(table) 처리 중 오류: {e}")
             return query
 
+    # ========== 동의어 확장 헬퍼 ==========
+    def expand_terms(self, tokens: List[str]) -> Dict[str, List[str]]:
+        """
+        토큰 리스트를 받아서 동의어 사전 기반으로 확장된 variants 딕셔너리 반환
+        {원어: [원어, 동의어1, 동의어2, ...], ...}
+        """
+        expanded: Dict[str, List[str]] = {}
+        for t in tokens:
+            variants = [t]
+            if t in self.synonym_dict:
+                variants.extend(self.synonym_dict[t])
+            expanded[t] = variants
+        return expanded
+
+    def build_synonym_expanded_query(self, query: str, top_k: int) -> Dict[str, Any]:
+        """
+        원본 쿼리와 동의어 사전을 기반으로 bool should 확장 쿼리 생성
+        """
+        tokens = query.strip().split()
+        expanded = self.expand_terms(tokens)
+
+        # 기본 cross_fields 매칭
+        should_clauses: List[Dict[str, Any]] = [
+            {
+                "multi_match": {
+                    "query": query,
+                    "type": "cross_fields",
+                    "fields": [
+                        "page_content^2",
+                        "page_content.ngram^1",
+                        "name^3",
+                        "meta_data.document_title^2"
+                    ],
+                    "operator": "and"
+                }
+            }
+        ]
+        # 각 토큰과 variants로 match/phrase 추가
+        for variants in expanded.values():
+            for v in variants:
+                should_clauses.append({"match": {"name": {"query": v, "boost": 2.5}}})
+                should_clauses.append({"match_phrase": {"meta_data.document_title": {"query": v, "boost": 2.0}}})
+                should_clauses.append({"match": {"page_content.ngram": {"query": v, "boost": 1.0, "operator": "and"}}})
+
+        bool_query = {"bool": {"should": should_clauses, "minimum_should_match": 1}}
+        return {
+            "size": top_k,
+            "query": bool_query,
+            "_source": ["page_content", "name", "meta_data"]
+        }
+
     def dense_retrieval(self, query: str, top_k: int = 100) -> List[Dict]:
         vector = self.embed_text(query)
         if not vector:
@@ -176,25 +263,14 @@ class MultiIndexRAGSearchEngine:
         return results
 
     def sparse_retrieval(self, query: str, top_k: int = 100) -> List[Dict]:
+        """
+        index별로 query-time 동의어 확장 쿼리를 사용한 sparse 검색
+        """
         results = []
         for index in [self.TEXT_INDEX, self.TABLE_INDEX]:
-            search_query = {
-                "size": top_k,
-                "query": {
-                    "bool": {
-                        "should": [
-                            {"match_phrase": {"page_content": {"query": query, "boost": 5.0}}},
-                            {"match": {"name": {"query": query, "boost": 4.0}}},
-                            {"match": {"page_content": {"query": query, "boost": 2.0}}},
-                            {"match": {"page_content.ngram": {"query": query, "boost": 1.0}}}
-                        ],
-                        "minimum_should_match": 1
-                    }
-                },
-                "_source": ["page_content", "name", "meta_data"]
-            }
+            body = self.build_synonym_expanded_query(query, top_k)
             try:
-                response = self.es.search(index=index, body=search_query)
+                response = self.es.search(index=index, body=body)
                 hits = response.get("hits", {}).get("hits", [])
                 for hit in hits:
                     source = hit["_source"]
@@ -311,24 +387,12 @@ class MultiIndexRAGSearchEngine:
         return results
 
     def sparse_retrieval_index(self, query: str, index: str, top_k: int = 100) -> List[Dict]:
+        # multi-index RAG hybrid_search 내에서 사용되는 sparse 검색
         results = []
-        search_query = {
-            "size": top_k,
-            "query": {
-                "bool": {
-                    "should": [
-                        {"match_phrase": {"page_content": {"query": query, "boost": 5.0}}},
-                        {"match": {"name": {"query": query, "boost": 4.0}}},
-                        {"match": {"page_content": {"query": query, "boost": 2.0}}},
-                        {"match": {"page_content.ngram": {"query": query, "boost": 1.0}}}
-                    ],
-                    "minimum_should_match": 1
-                }
-            },
-            "_source": ["page_content", "name", "meta_data"]
-        }
+        # Query-time 동의어 확장 쿼리
+        body = self.build_synonym_expanded_query(query, top_k)
         try:
-            response = self.es.search(index=index, body=search_query)
+            response = self.es.search(index=index, body=body)
             hits = response.get("hits", {}).get("hits", [])
             for hit in hits:
                 source = hit["_source"]
@@ -351,24 +415,59 @@ class MultiIndexRAGSearchEngine:
         page_content_hash = str(hash(result.get("page_content", "")))
         return f"{chunk_id}_{name}_{page_content_hash}"
 
+    def cohere_reranking(self, results: List[Dict], query: str, top_k: int = 20) -> List[Dict]:
+        """
+        Cohere reranker를 사용한 재순위화
+        """
+        if not results or len(results) == 0:
+            return results
+
+        try:
+            # Cohere reranker에 전달할 문서들 준비
+            documents = []
+            for r in results[:top_k]:
+                content = r.get("page_content", "")
+                name = r.get("name", "")
+                # 문서 제목과 내용을 결합
+                doc_text = f"제목: {name}\n내용: {content}"
+                documents.append(doc_text)
+
+            if not documents:
+                return results
+
+            # Cohere reranker 호출
+            response = self.cohere_client.rerank(
+                query=query,
+                documents=documents,
+                top_n=len(documents),
+                model="rerank-v3.5"  # 다국어 지원 모델
+            )
+
+            # 결과 재정렬
+            reranked_results = []
+            for i, result in enumerate(response.results):
+                original_index = result.index
+                if original_index < len(results):
+                    r = results[original_index].copy()
+                    r["rerank_score"] = result.relevance_score
+                    r["rerank_rank"] = i + 1
+                    reranked_results.append(r)
+
+            # rerank_score로 정렬
+            reranked_results.sort(key=lambda x: x["rerank_score"], reverse=True)
+
+            return reranked_results
+
+        except Exception as e:
+            print(f"Cohere reranker 오류: {e}")
+            # 오류 발생시 원본 결과 반환
+            return results[:top_k]
+
     def simple_reranking(self, results: List[Dict], query: str, top_k: int = 20) -> List[Dict]:
-        reranked_results = []
-        for result in results[:top_k]:
-            page_content = result.get("page_content", "")
-            name = result.get("name", "")
-            query_terms = query.lower().split()
-            content_lower = page_content.lower()
-            name_lower = name.lower()
-            content_matches = sum(content_lower.count(term) for term in query_terms)
-            name_matches = sum(name_lower.count(term) for term in query_terms)
-            original_score = result.get("hybrid_score", result.get("score", 0))
-            rerank_bonus = (content_matches * 0.1) + (name_matches * 0.2)
-            rerank_score = original_score + rerank_bonus
-            result["rerank_score"] = rerank_score
-            result["rerank_bonus"] = rerank_bonus
-            reranked_results.append(result)
-        reranked_results.sort(key=lambda x: x["rerank_score"], reverse=True)
-        return reranked_results
+        """
+        Cohere reranker를 사용한 재순위화 (기존 simple_reranking 대체)
+        """
+        return self.cohere_reranking(results, query, top_k)
 
     def document_summarization(self, results: List[Dict], query: str) -> List[Dict]:
         summarized_results = []
@@ -437,15 +536,27 @@ def search(query: str, top_k: int = 50):
     결과를 json 객체로 반환합니다.
     """
     config = RAGConfig()
+
+    # Google API 키 확인
     if config.GOOGLE_API_KEY == "your-google-api-key-here":
         print("⚠️ rag_config.py에서 Google API 키가 설정되지 않았습니다.")
         api_key = input("Google API 키를 입력하세요 (또는 Enter로 스킵): ").strip()
         if not api_key:
-            print("❌ API 키 없이는 테스트할 수 없습니다.")
+            print("❌ Google API 키 없이는 테스트할 수 없습니다.")
             return None
     else:
         api_key = config.GOOGLE_API_KEY
-    search_engine = MultiIndexRAGSearchEngine(google_api_key=api_key, config=config)
+
+    # Cohere API 키 확인
+    cohere_key = os.getenv("COHERE_API_KEY")
+    if not cohere_key:
+        print("⚠️ 환경변수에서 Cohere API 키가 설정되지 않았습니다.")
+        cohere_key = input("Cohere API 키를 입력하세요 (또는 Enter로 스킵): ").strip()
+        if not cohere_key:
+            print("❌ Cohere API 키 없이는 reranking을 사용할 수 없습니다.")
+            return None
+
+    search_engine = MultiIndexRAGSearchEngine(google_api_key=api_key, cohere_api_key=cohere_key, config=config)
     if not query:
         print("검색어가 입력되지 않았습니다.")
         return None
