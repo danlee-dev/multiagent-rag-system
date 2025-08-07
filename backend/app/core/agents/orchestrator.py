@@ -4,6 +4,7 @@ import asyncio
 from typing import Dict, List, Any, Optional, Tuple, AsyncGenerator
 from datetime import datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 import re
 
 from ..models.models import StreamingAgentState, SearchResult
@@ -93,7 +94,7 @@ class OrchestratorAgent:
 
     def __init__(self, model: str = "gemini-2.5-flash-lite", temperature: float = 0.2):
         self.llm = ChatGoogleGenerativeAI(model=model, temperature=temperature)
-        self.llm_openai_mini = ChatGoogleGenerativeAI(model="gpt-4o-mini", temperature=temperature)
+        self.llm_openai_mini = ChatOpenAI(model="gpt-4o-mini", temperature=temperature)
         self.data_gatherer = DataGathererAgent()
         self.processor = ProcessorAgent()
 
@@ -153,9 +154,10 @@ class OrchestratorAgent:
 **## 보유 도구 명세서 및 선택 가이드**
 
 **1. rdb_search (PostgreSQL) - 1순위 활용**
-   - **데이터 종류**: 정형 데이터 (식자재 영양성분, 농축수산물 시세).
-   - **사용 시점**: 영양성분, 현재가격, 시세변동, 가격비교, 영양비교 등 정확한 수치가 필요할 때.
-   - **특징**: 실시간 데이터이며 가장 신뢰도 높은 수치를 제공. 검색어는 한국어 필수.
+   - **데이터 종류**: 정형 데이터 (테이블 기반: 식자재 **영양성분**, 농·축·수산물 **시세/가격/거래량** 등 수치 데이터).
+   - **사용 시점**: 영양성분, 현재가격, 시세변동, 가격비교, 순위/평균/합계 등 **정확한 수치 연산**이 필요할 때.
+   - **특징**: 날짜·지역·품목 컬럼으로 **필터/집계** 최적화. 다중 조건(where)과 group by, order by를 통한 **통계/랭킹** 질의에 적합. (관계 그래프 탐색은 비권장)
+   - **예시 질의 의도**: "사과 비타민C 함량", "지난달 제주 감귤 평균가", "전복 가격 추이", "영양성분 상위 TOP 10"
 
 **2. vector_db_search (Elasticsearch) - 1순위 활용**
    - **데이터 종류**: 비정형 데이터 (뉴스기사, 논문, 보고서 전문).
@@ -163,9 +165,11 @@ class OrchestratorAgent:
    - **특징**: 의미기반 검색으로 질문의 맥락과 가장 관련성 높은 문서를 찾아줌.
 
 **3. graph_db_search (Neo4j) - 1순위 활용**
-   - **데이터 종류**: 관계형 데이터 (개체간 연결관계, 소속정보).
-   - **사용 시점**: 특정 품목의 원산지정보, 특산품조회 등 개체 간의 관계 파악이 필요할 때.
-   - **특징**: '제주도'와 '감귤'의 관계처럼 지식그래프를 탐색함.
+   - **데이터 종류**: **관계형(그래프) 데이터**. 노드: 품목(농산물/수산물/축산물), **Origin(원산지: city/region)**, **Nutrient(영양소)**.
+     관계: `(품목)-[:isFrom]->(Origin)`, `(품목)-[:hasNutrient]->(Nutrient)`. 수산물은 품목 노드에 `fishState`(활어/선어/냉동/건어) 속성 존재.
+   - **사용 시점**: **품목 ↔ 원산지**, **품목 ↔ 영양소**처럼 **엔티티 간 연결**이 핵심일 때. 지역·상태(fishState) 조건을 얹은 **원산지/특산품 탐색**.
+   - **특징**: 지식그래프 경로 탐색에 최적화. 키워드는 **품목명/지역명/영양소/수산물 상태(fishState)**로 간결히 표현하고, 질문은 **"A의 원산지", "A의 영양소", "지역 B의 특산품/원산지", "활어 A의 원산지"**처럼 **관계를 명시**할수록 정확도 상승.
+   - **예시 질의 의도**: "사과의 원산지", "오렌지의 영양소", "제주도의 감귤 원산지", "활어 문어 원산지", "경상북도 사과 산지 연결"
 
 **4. web_search - 2순위 (최후의 수단)**
    - **데이터 종류**: 실시간 최신 정보, 외부 일반 지식.
@@ -174,13 +178,13 @@ class OrchestratorAgent:
 
 **도구 선택 우선순위:**
 1. **수치/통계 데이터 (식자재 영양성분, 농축수산물 시세)** → `rdb_search`
-2. **관계/분류 정보 (업체-제품, 지역-특산품, 품목-영양소, 품목-원산지)** → `graph_db_search`
+2. **관계/분류 정보 (품목-원산지, 품목-영양소, 지역-특산품, 수산물 상태별 원산지)** → `graph_db_search`
 3. **분석/연구 문서 (시장분석, 소비자 조사)** → `vector_db_search`
 4. **최신 트렌드/실시간 정보** → `web_search`
 
 **각 도구별 적용 예시:**
-- `rdb_search`: "식자재 영양성분", "농축수산물 시세"
-- `graph_db_search`: "건강기능식품 제조업체", "제품 분류 체계", "지역별 특산품"
+- `rdb_search`: "식자재 영양성분", "농축수산물 시세", "가격 추이/비교", "영양성분 상위 TOP"
+- `graph_db_search`: "사과의 원산지", "오렌지의 영양소", "제주-감귤 관계", "활어 문어 원산지", "지역별 특산품 연결"
 - `vector_db_search`: "시장 분석 보고서", "소비자 행동 연구", "정책 문서"
 - `web_search`: "2025년 최신 트렌드", "실시간 업계 동향"
 
@@ -206,7 +210,7 @@ class OrchestratorAgent:
 **5단계: 각 질문에 대한 최적 도구 선택**
 - '보유 도구 명세서'를 참고하여 각 하위 질문에 가장 적합한 도구를 **단 하나만** 신중하게 선택합니다.
     - **"성분", "영양", "시세", "가격"** 포함 → `rdb_search`
-    - **"원산지", "관계", "제조사", "특산품"** 포함 → `graph_db_search`
+    - **"원산지", "관계", "제조사", "특산품", "fishState(활어/선어/냉동/건어)"** 포함 → `graph_db_search`
     - **"분석", "연구", "조사", "보고서", "동향"** 포함 → `vector_db_search`
     - **"최신 트렌드", "실시간 정보", "2025년"** 등 최신성 강조 시 → `web_search`
 
@@ -279,6 +283,7 @@ class OrchestratorAgent:
     ]
 }}
 """
+
         try:
             response = await self.llm.ainvoke(planning_prompt)
             content = response.content.strip()
@@ -639,7 +644,7 @@ class OrchestratorAgent:
 
             if i in recollection_tasks and recollection_tasks[i].done():
                 try:
-                    new_data = recollection_tasks[i].result()
+                    new_data, _ = recollection_tasks[i].result()
                     if new_data:
                         before_count = len(final_collected_data)
                         final_collected_data.extend(new_data)
@@ -702,7 +707,7 @@ class OrchestratorAgent:
                     "section_data_count": len(section_data)
                 }
                 yield {"type": "section_mapping", "data": section_mapping_data}
-                
+
                 # ⭐ 섹션별 선택된 데이터와 매핑 정보 전달
                 async for chunk in self.processor.generate_section_streaming(section, section_data, query, final_use_contents):
                     section_content_generated = True
@@ -722,7 +727,7 @@ class OrchestratorAgent:
                         yield {"type": "status", "data": {"message": f"'{section_title}' 섹션의 차트를 생성합니다..."}}
 
                         async def chart_yield_callback(event_data):
-                            yield event_data
+                            return None
 
                         # ⭐ 핵심 개선: 이미 선택된 section_data 사용 (복잡한 키워드 매칭 제거)
                         chart_data = await self.processor.process("create_chart_data", section_data, section_title, buffer, "", chart_yield_callback)

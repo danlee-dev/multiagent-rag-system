@@ -6,7 +6,7 @@ import './SourceRenderer.css';
 
 const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMappings = [] }) => {
   const [hoveredSource, setHoveredSource] = useState(null);
-  const [hoverPosition, setHoverPosition] = useState({ x: 0, y: 0 });
+  const [hoveredIndex, setHoveredIndex] = useState(null); // 현재 호버된 버튼의 인덱스
 
   // [SOURCE:번호] 또는 [SOURCE:번호, 번호, ...] 형식을 파싱해서 출처 버튼으로 변환
   const parseContentWithSources = (text) => {
@@ -14,10 +14,14 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
       return [{ type: 'text', content: '' }];
     }
 
-    console.log("SourceRenderer - 받은 텍스트:", text);
-    console.log("SourceRenderer - 받은 출처:", sources);
-    console.log("SourceRenderer - 스트리밍 상태:", isStreaming);
-    console.log("SourceRenderer - 섹션 매핑:", sectionMappings);
+    console.log("SourceRenderer 렌더링 시작:");
+  console.log("- content 길이:", content?.length || 0);
+  console.log("- sources 개수:", sources?.length || 0);
+  console.log("- isStreaming:", isStreaming);
+  console.log("- sectionMappings:", sectionMappings);
+  console.log("- sectionMappings 타입:", typeof sectionMappings);
+  console.log("- sectionMappings 배열 여부:", Array.isArray(sectionMappings));
+  console.log("- sectionMappings 길이:", sectionMappings?.length || 0);
 
     // 개선된 정규식: [SOURCE:1] 또는 [SOURCE:1, 2, 3] 형식 모두 지원
     const sourcePattern = /\[SOURCE:([\d\s,]+)\]/g;
@@ -47,28 +51,50 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
         let sourceData = null;
         let actualIndex = sourceNumber;
 
+        console.log(`🔍 SOURCE:${sourceNumber} 매핑 시작`);
+        console.log(`   - sectionMappings:`, sectionMappings);
+        console.log(`   - sources 길이:`, sources?.length);
+
         if (sources && sources.length > 0) {
-          // 1. 매핑 정보가 있으면 매핑된 인덱스 사용
-          if (sectionMappings && sectionMappings.length > sourceNumber) {
-            const globalIndex = sectionMappings[sourceNumber];
-            if (sources[globalIndex]) {
+          // 🔥 핵심 수정: 섹션 매핑 사용 (1-based SOURCE를 0-based로 변환)
+          if (sectionMappings && Array.isArray(sectionMappings) && sectionMappings.length > sourceNumber - 1) {
+            const globalIndex = sectionMappings[sourceNumber - 1]; // SOURCE:1 -> 매핑[0], SOURCE:2 -> 매핑[1]
+
+            console.log(`   - SOURCE:${sourceNumber} → 매핑 인덱스: ${globalIndex}`);
+
+            // 매핑된 인덱스가 sources 범위 내에 있는지 확인
+            if (typeof globalIndex === 'number' && globalIndex >= 0 && globalIndex < sources.length && sources[globalIndex]) {
               sourceData = sources[globalIndex];
-              actualIndex = sourceNumber;
-              console.log(`매핑 사용: 섹션 인덱스 ${sourceNumber} → 전체 인덱스 ${globalIndex}`);
+              actualIndex = sourceNumber; // 버튼 표시는 그대로 1-based
+              console.log(`✅ 매핑 성공: SOURCE:${sourceNumber} → 전체 인덱스 ${globalIndex}`);
+              console.log(`   - 출처 제목:`, sourceData.title?.substring(0, 50) + '...');
+              console.log(`   - 출처 내용:`, sourceData.content?.substring(0, 100) + '...');
+            } else {
+              console.log(`❌ 매핑 실패: 섹션 SOURCE:${sourceNumber} → 전체 인덱스 ${globalIndex} (범위 벗어남 또는 데이터 없음)`);
+              console.log(`   - sources.length: ${sources.length}, globalIndex: ${globalIndex}, 유효성: ${typeof globalIndex === 'number' && globalIndex >= 0 && globalIndex < sources.length}`);
             }
           }
-          
-          // 2. 매핑이 없거나 실패한 경우 기존 로직 사용
+
+          // 2. 매핑이 없거나 실패한 경우 기본 로직 사용 (1-based를 0-based로)
           if (!sourceData) {
-            // 먼저 직접 인덱스로 시도 (0-based)
-            if (sources[sourceNumber]) {
-              sourceData = sources[sourceNumber];
-              actualIndex = sourceNumber;
-            }
-            // 1-based 인덱스로 시도
-            else if (sourceNumber > 0 && sources[sourceNumber - 1]) {
-              sourceData = sources[sourceNumber - 1];
-              actualIndex = sourceNumber;
+            const fallbackIndex = sourceNumber - 1;
+            if (fallbackIndex >= 0 && fallbackIndex < sources.length && sources[fallbackIndex]) {
+              sourceData = sources[fallbackIndex];
+              actualIndex = sourceNumber; // 버튼 표시는 그대로 1-based
+              console.log(`🔄 기본 로직 사용: SOURCE:${sourceNumber} → 인덱스 ${fallbackIndex}`);
+            } else {
+              console.log(`❌ 기본 로직도 실패: SOURCE:${sourceNumber} → 인덱스 ${fallbackIndex} (범위 벗어남 또는 데이터 없음)`);
+              console.log(`   - sources.length: ${sources.length}, fallbackIndex: ${fallbackIndex}`);
+
+              // 🔧 범위를 벗어나는 경우, 사용 가능한 마지막 인덱스로 대체
+              if (sources.length > 0) {
+                const safeIndex = Math.min(fallbackIndex, sources.length - 1);
+                if (sources[safeIndex]) {
+                  sourceData = sources[safeIndex];
+                  actualIndex = sourceNumber; // 버튼 표시는 원래 번호 유지
+                  console.log(`🔧 안전 인덱스 사용: SOURCE:${sourceNumber} → 인덱스 ${safeIndex} (최대 ${sources.length - 1})`);
+                }
+              }
             }
           }
         }
@@ -110,50 +136,29 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
     return parts;
   };
 
-  const handleSourceContainerEnter = (event, sourceData, sourceNumber) => {
-    // 로딩 중이거나 데이터가 없으면 툴팁 표시 안함
-    if (!sourceData) return;
+  const handleSourceContainerEnter = (event, sourceData, sourceNumber, buttonIndex) => {
+    if (!sourceData) return; // 데이터가 없으면 툴팁 표시 안함
 
-    const rect = event.target.getBoundingClientRect();
-    const tooltipHeight = 200; // 예상 tooltip 높이
-    const tooltipWidth = 320; // 예상 tooltip 너비
-    const viewportHeight = window.innerHeight;
-    const viewportWidth = window.innerWidth;
-
-    // tooltip이 위쪽으로 나갈 공간이 충분한지 확인
-    const spaceAbove = rect.top;
-    const spaceBelow = viewportHeight - rect.bottom;
-
-    // 좌우 위치 조정
-    let x = rect.left + rect.width / 2;
-    const spaceLeft = x - tooltipWidth / 2;
-    const spaceRight = x + tooltipWidth / 2;
-
-    if (spaceLeft < 10) {
-      x = tooltipWidth / 2 + 10; // 왼쪽 여백 확보
-    } else if (spaceRight > viewportWidth - 10) {
-      x = viewportWidth - tooltipWidth / 2 - 10; // 오른쪽 여백 확보
-    }
-
-    let position = {
-      x: x,
-      y: rect.top - 10
-    };
-
-    // 위쪽 공간이 부족하면 아래쪽에 표시
-    if (spaceAbove < tooltipHeight && spaceBelow > spaceAbove) {
-      position.y = rect.bottom + 10;
-      position.showBelow = true;
-    } else {
-      position.showBelow = false;
-    }
-
-    setHoverPosition(position);
-    setHoveredSource({ data: sourceData, number: sourceNumber });
+    setHoveredSource({
+      number: sourceNumber,
+      data: sourceData
+    });
+    setHoveredIndex(buttonIndex); // 현재 호버된 버튼의 인덱스 저장
   };
 
   const handleSourceContainerLeave = () => {
     setHoveredSource(null);
+    setHoveredIndex(null);
+  };
+
+  // 툴팁에 마우스가 올라갔을 때 툴팁 유지
+  const handleTooltipEnter = () => {
+    // 현재 hoveredSource 상태 유지 (툴팁이 사라지지 않도록)
+  };
+
+  const handleTooltipLeave = () => {
+    setHoveredSource(null);
+    setHoveredIndex(null);
   };
 
   const parts = parseContentWithSources(content);
@@ -187,8 +192,9 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
             <div
               key={index}
               className="source-container"
-              onMouseEnter={(e) => handleSourceContainerEnter(e, part.sourceData, part.sourceNumber)}
+              onMouseEnter={(e) => handleSourceContainerEnter(e, part.sourceData, part.sourceNumber, index)}
               onMouseLeave={handleSourceContainerLeave}
+              style={{ position: 'relative', display: 'inline-block' }}
             >
               <button
                 className={`source-button ${part.isLoading ? 'loading' : ''} ${!part.sourceData ? 'no-data' : ''}`}
@@ -203,33 +209,81 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                 {part.sourceNumber}
               </button>
 
-              {/* 출처 툴팁 - 데이터가 있을 때만 표시 */}
-              {hoveredSource && hoveredSource.number === part.sourceNumber && part.sourceData && (
+              {/* 출처 툴팁 - 현재 호버된 특정 버튼에만 표시 */}
+              {hoveredSource && hoveredIndex === index && part.sourceData && (
                 <div
-                  className={`source-tooltip ${hoverPosition.showBelow ? 'show-below' : 'show-above'}`}
                   style={{
-                    position: 'fixed',
-                    left: hoverPosition.x,
-                    top: hoverPosition.y,
-                    transform: hoverPosition.showBelow
-                      ? 'translateX(-50%) translateY(0%)'
-                      : 'translateX(-50%) translateY(-100%)',
-                    zIndex: 1000
+                    position: 'absolute',
+                    bottom: '100%', // 버튼 바로 위에 붙임
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    width: '300px',
+                    maxHeight: '180px',
+                    overflow: 'hidden',
+                    zIndex: 1000,
+                    backgroundColor: '#1a1a1a',
+                    border: '1px solid #444',
+                    borderRadius: '8px',
+                    padding: '10px',
+                    fontSize: '12px',
+                    lineHeight: '1.4',
+                    color: '#fff',
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+                    marginBottom: '2px' // 버튼과 약간의 간격
                   }}
+                  onMouseEnter={handleTooltipEnter}
+                  onMouseLeave={handleTooltipLeave}
                 >
-                  <div className="source-tooltip-header">
-                    <h4>{hoveredSource.data.title}</h4>
-                    {(hoveredSource.data.url || hoveredSource.data.source_url) && (
-                      <span className="source-url">
-                        {(hoveredSource.data.url || hoveredSource.data.source_url).replace(/^https?:\/\//, '')}
-                      </span>
-                    )}
+                  {/* 제목 */}
+                  <div style={{
+                    fontWeight: 'bold',
+                    marginBottom: '6px',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    fontSize: '13px'
+                  }}>
+                    {hoveredSource.data.title}
                   </div>
-                  <div className="source-tooltip-content">
-                    {hoveredSource.data.content}
+
+                  {/* URL */}
+                  {(hoveredSource.data.url || hoveredSource.data.source_url) && (
+                    <div style={{
+                      fontSize: '10px',
+                      color: '#888',
+                      marginBottom: '8px',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {(hoveredSource.data.url || hoveredSource.data.source_url).replace(/^https?:\/\//, '')}
+                    </div>
+                  )}
+
+                  {/* 내용 */}
+                  <div style={{
+                    fontSize: '11px',
+                    maxHeight: '80px',
+                    overflow: 'hidden',
+                    marginBottom: '8px',
+                    lineHeight: '1.4',
+                    color: '#ccc'
+                  }}>
+                    {hoveredSource.data.content && hoveredSource.data.content.length > 150
+                      ? hoveredSource.data.content.substring(0, 150) + '...'
+                      : hoveredSource.data.content
+                    }
                   </div>
-                  <div className="source-tooltip-footer">
-                    <span className="source-type">
+
+                  {/* 하단 정보 */}
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    fontSize: '10px',
+                    marginTop: '6px'
+                  }}>
+                    <span style={{ color: '#666' }}>
                       {hoveredSource.data.source_type === 'web_search' ? '웹 검색' :
                        hoveredSource.data.source_type === 'vector_db' ? '문서' : '출처'}
                     </span>
@@ -238,7 +292,11 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                         href={hoveredSource.data.url || hoveredSource.data.source_url}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="source-link"
+                        style={{
+                          color: '#4a9eff',
+                          textDecoration: 'none',
+                          fontSize: '10px'
+                        }}
                         onClick={(e) => e.stopPropagation()}
                       >
                         링크 열기 →

@@ -5,100 +5,314 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 import google.generativeai as genai
-import typing
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 
+# -------------------------------------------
+# KeywordExtractor (2-Stage: route -> extract)
+# -------------------------------------------
 class KeywordExtractor:
-    def __init__(self):
-        api_key = os.getenv('GOOGLE_API_KEY')
-        genai.configure(api_key=api_key)
-        self.client = genai.GenerativeModel('gemini-2.5-flash')
-
-    def extract_search_params(self, query: str) -> Dict[str, Any]:
-        """LLM을 사용하여 검색 파라미터 추출"""
-
-        prompt = f"""
-    다음 질문을 분석하여 농수산물 데이터베이스 검색에 필요한 정보를 JSON 형태로 추출해주세요.
-
-    질문: {query}
-
-    다음 형태의 JSON으로 응답해주세요:
-    {{
-        "search_type": "price|nutrition|trade|news|general",
-        "items": ["품목1", "품목2"],
-        "regions": ["지역1", "지역2"],
-        "time_period": "recent|today|this_week|this_month|this_year|specific_date",
-        "specific_info": ["가격", "영양성분", "칼로리", "비타민" 등 구체적 정보],
-        "search_intent": "사용자가 원하는 정보를 한 문장으로 요약"
-    }}
-
-    ## 중요한 품목 추출 규칙
-    1. **완전한 품목명을 정확히 추출**: "귀리 영양성분" → items: ["귀리"]
-    2. **농수산물 품목명만 추출**: 귀리, 사과, 감자, 쌀, 보리, 옥수수, 콩, 당근, 양파, 배추, 무, 고구마, 딸기, 포도, 복숭아, 수박, 참외, 호박, 오이, 토마토, 상추, 시금치, 깻잎, 마늘, 생강, 파, 대파, 쪽파, 부추, 고추, 피망, 감귤, 귤, 바나나, 키위, 망고 등
-    3. **명시적으로 언급된 품목만 추출**: 질문에 없는 품목은 추가하지 말 것
-
-    ## 예시
-    - "귀리 영양성분이 궁금해요" → items: ["귀리"], search_type: "nutrition"
-    - "사과 가격 알려주세요" → items: ["사과"], search_type: "price"
-    - "오늘 양파 시세는?" → items: ["양파"], search_type: "price", time_period: "today"
-    - "농산물 영양정보" → items: [], search_type: "nutrition" (구체적 품목 없음)
-
-    ## 절대 금지사항
-    - "귀리"를 "파"로 잘못 추출하는 것
-    - 품목명의 일부만 추출하는 것
-    - 질문에 없는 품목을 임의로 추가하는 것
-
-    **오직 JSON만 응답하고 다른 설명은 하지 마세요.**
+    """
+    1) 라우팅 LLM: 어떤 테이블을 볼지와 search_type을 결정
+    2) 컬럼 인지 LLM: 선택된 테이블의 실제 컬럼명/표시명만 사용해 파라미터를 추출
+    - 실패 시 휴리스틱 폴백을 사용
     """
 
-        try:
-            print(f"- LLM 키워드 추출 시작: {query}")
-            response = self.client.generate_content(prompt)
+    # 스키마 메타 (스크린샷 기준 요약)
+    TABLE_SCHEMAS: Dict[str, Dict[str, Any]] = {
+        "kamis_product_price_latest": {
+            "key_columns": [
+                "regday", "category_name", "item_name", "unit",
+                "dpr1", "dpr2", "dpr3", "dpr4", "direction", "value"
+            ],
+            "display_to_alias": {
+                "가격": "value",
+                "현재가격": "dpr1",
+                "어제가격": "dpr2",
+                "1개월전": "dpr3",
+                "1년전": "dpr4",
+                "단위": "unit",
+                "품목": "item_name",
+                "품목명": "item_name",
+                "분류": "category_name",
+                "날짜": "regday"
+            }
+        },
+        # 영양은 foods + 세부 5테이블 조합
+        "foods": {
+            "key_columns": ["식품군", "식품명", "출처", "폐기율_percent"],
+        },
+        "proximates": {
+            "key_columns": [
+                "에너지 (kcal/100g)","수분 (g/100g)","단백질 (g/100g)","지방 (g/100g)",
+                "회분 (g/100g)","탄수화물 (g/100g)","당류 (g/100g)","자당 (g/100g)",
+                "포도당 (g/100g)","과당 (g/100g)","유당 (g/100g)","맥아당 (g/100g)",
+                "갈락토오스 (g/100g)","총 식이섬유 (g/100g)","수용성 식이섬유 (g/100g)",
+                "불용성 식이섬유 (g/100g)","식염상당량 (g/100g)"
+            ],
+        },
+        "minerals": {
+            "key_columns": [
+                "칼슘 (mg/100g)","철 (mg/100g)","마그네슘 (mg/100g)","인 (mg/100g)",
+                "칼륨 (mg/100g)","나트륨 (mg/100g)","아연 (mg/100g)","구리 (mg/100g)",
+                "망간 (mg/100g)","셀레늄 (μg/100g)","몰리브덴 (μg/100g)","요오드 (μg/100g)"
+            ],
+        },
+        "vitamins": {
+            "key_columns": [
+                "비타민 A (μg/100g)","레티놀 (μg/100g)","베타카로틴 (μg/100g)",
+                "티아민 (mg/100g)","리보플라빈 (mg/100g)","니아신 (mg/100g)",
+                "니아신당량(NE) (mg/100g)","니코틴산 (mg/100g)","니코틴아미드 (mg/100g)",
+                "판토텐산 (mg/100g)","비타민 B6 (mg/100g)","피리독신 (mg/100g)",
+                "비오틴 (μg/100g)","엽산_ 엽산당량 (μg/100g)","엽산_ 식품 엽산 (μg/100g)",
+                "엽산_ 합성 엽산 (μg/100g)","비타민 B12 (μg/100g)","비타민 C (mg/100g)",
+                "비타민 D (μg/100g)","비타민 D2 (μg/100g)","비타민 D3 (μg/100g)",
+                "비타민 E (mg/100g)","알파 토코페롤 (mg/100g)","베타 토코페롤 (mg/100g)",
+                "감마 토코페롤 (mg/100g)","델타 토코페롤 (mg/100g)",
+                "알파 토코트리에놀 (mg/100g)","베타 토코트리에놀 (mg/100g)",
+                "감마 토코트리에놀 (mg/100g)","델타 토코트리에놀 (mg/100g)",
+                "비타민 K (μg/100g)","비타민 K1 (μg/100g)","비타민 K2 (μg/100g)"
+            ],
+        },
+        "amino_acids": {
+            "key_columns": [
+                "총 아미노산 (mg/100g)","총 필수 아미노산 (mg/100g)","이소류신 (mg/100g)",
+                "류신 (mg/100g)","라이신 (mg/100g)","메티오닌 (mg/100g)","페닐알라닌 (mg/100g)",
+                "트레오닌 (mg/100g)","트립토판 (mg/100g)","발린 (mg/100g)","히스티딘 (mg/100g)",
+                "아르기닌 (mg/100g)","티로신 (mg/100g)","시스테인 (mg/100g)","알라닌 (mg/100g)",
+                "아스파르트산 (mg/100g)","글루탐산 (mg/100g)","글라이신 (mg/100g)",
+                "프롤린 (mg/100g)","세린 (mg/100g)","타우린 (mg/100g)"
+            ],
+        },
+        "fatty_acids": {
+            "key_columns": [
+                "콜레스테롤 (mg/100g)","총 지방산 (g/100g)","총 필수 지방산 (g/100g)",
+                "총 포화 지방산 (g/100g)","부티르산 (4:0) (mg/100g)","카프로산 (6:0) (mg/100g)",
+                "카프릴산 (8:0) (mg/100g)","카프르산 (10:0) (mg/100g)","라우르산 (12:0) (mg/100g)",
+                "트라이데칸산 (13:0) (mg/100g)","미리스트산 (14:0) (mg/100g)","펜타데칸산 (15:0) (mg/100g)",
+                "팔미트산 (16:0) (mg/100g)","헵타데칸산 (17:0) (mg/100g)","스테아르산 (18:0) (mg/100g)",
+                "아라키드산 (20:0) (mg/100g)","헨에이코산산 (21:0) (mg/100g)","베헨산 (22:0) (mg/100g)",
+                "트리코산산 (23:0) (mg/100g)","리그노세르산 (24:0) (mg/100g)",
+                "총 불포화 지방산 (g/100g)","총 단일 불포화지방산 (g/100g)",
+                "미리스톨레산 (14:1) (mg/100g)","팔미톨레산 (16:1) (mg/100g)","헵타데센산 (17:1) (mg/100g)",
+                "올레산 (18:1(n-9)) (mg/100g)","박센산 (18:1(n-7)) (mg/100g)","가돌레산 (20:1) (mg/100g)",
+                "에루크산 (22:1) (mg/100g)","네르본산 (24:1) (mg/100g)","총 다가 불포화지방산 (g/100g)",
+                "리놀레산 (18:2(n-6)) (mg/100g)","알파 리놀렌산 (18:3 (n-3)) (mg/100g)",
+                "감마 리놀렌산 (18:3 (n-6)) (mg/100g)","에이코사 디에노산 (20:2(n-6)) (mg/100g)",
+                "디호모 리놀렌산 (20:3(n-3)) (mg/100g)","에이코사 트리에노산 (20:3(n-6)) (mg/100g)",
+                "아라키돈산 (20:4(n-6)) (mg/100g)","에이코사 펜타에노산 (20:5(n-3)) (mg/100g)",
+                "도코사 디에노산(22:2) (mg/100g)","도코사 펜타에노산 (22:5(n-3)) (mg/100g)",
+                "도코사 헥사에노산 (22:6(n-3)) (mg/100g)","오메가3 지방산 (g/100g)",
+                "오메가6 지방산 (g/100g)","총 트랜스 지방산 (g/100g)",
+                "트랜스 올레산(18:1(n-9)t) (mg/100g)","트랜스 리놀레산(18:2t) (mg/100g)",
+                "트랜스 리놀렌산(18:3t) (mg/100g)"
+            ],
+        },
+    }
 
-            # ✅ 안전한 응답 처리
-            if not response or not hasattr(response, 'text'):
-                print(f"- LLM 응답이 비어있음")
-                return self._get_fallback_result(query)
+    # 검색 타입 키워드 폴백
+    _PRICE_HINTS = ("가격", "시세", "얼마", "비싸", "dpr", "kamis")
+    _NUTR_HINTS  = ("영양", "칼로리", "비타민", "미네랄", "아미노산", "지방산", "nutri")
 
-            response_text = response.text.strip()
-            print(f"- LLM 원본 응답: {response_text[:100]}...")
+    # 자연어 동의어 → 영문 키(검색 결과 요약에서 사용하는 alias) 매핑
+    SPECIFIC_SYNONYM_TO_RESULT_KEY = {
+        # 주요 10여개만 우선 매핑 (필요 시 추가)
+        "칼로리": "energy_kcal", "에너지": "energy_kcal",
+        "단백질": "protein_g", "지방": "fat_g", "탄수화물": "carbohydrate_g", "당류": "sugars_g",
+        "칼슘": "calcium_mg", "철": "iron_mg", "철분": "iron_mg",
+        "나트륨": "sodium_mg", "칼륨": "potassium_mg", "마그네슘": "magnesium_mg",
+        "비타민a": "vitamin_a_ug_rae", "비타민 a": "vitamin_a_ug_rae",
+        "비타민c": "vitamin_c_mg", "비타민 c": "vitamin_c_mg",
+        "비타민d": "vitamin_d_ug", "비타민 d": "vitamin_d_ug",
+        "비타민e": "vitamin_e_mg_ate", "비타민 e": "vitamin_e_mg_ate",
+        "비타민k": "vitamin_k_ug", "비타민 k": "vitamin_k_ug",
+        "b6": "vitamin_b6_mg", "비타민b6": "vitamin_b6_mg",
+        "b12": "vitamin_b12_ug", "비타민b12": "vitamin_b12_ug",
+        "오메가3": "omega_3_fatty_acids_g", "오메가6": "omega_6_fatty_acids_g",
+        "콜레스테롤": "cholesterol_mg",
+        "식이섬유": "total_dietary_fiber_g",
+        "류신": "leucine_mg", "라이신": "lysine_mg", "트립토판": "tryptophan_mg",
+    }
 
-            if not response_text:
-                print(f"- LLM 응답 텍스트가 비어있음")
-                return self._get_fallback_result(query)
+    def __init__(self):
+        api_key = os.getenv("GOOGLE_API_KEY")
+        genai.configure(api_key=api_key)
+        self.client = genai.GenerativeModel("gemini-2.5-flash")
 
-            # ✅ JSON 파싱 개선
-            try:
-                # 코드 블록 제거
-                if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0].strip()
-                elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0].strip()
+    # ---------- public ----------
+    def extract_search_params(self, query: str) -> Dict[str, Any]:
+        """LLM 2단계 + 폴백. 기존 반환 스키마 유지."""
+        print(f"- LLM 키워드 추출 시작: {query}")
 
-                # JSON 파싱
-                result = json.loads(response_text)
-                print(f"- LLM 추출 성공: {result}")
-                return result
+        # 1) 라우팅
+        route = self._route_tables_with_llm(query)
+        search_type = route.get("search_type", "general")
+        chosen = route.get("chosen_tables", [])
 
-            except json.JSONDecodeError as e:
-                print(f"- JSON 파싱 실패: {e}")
-                print(f"- 파싱 시도한 텍스트: {response_text}")
-                return self._get_fallback_result(query)
+        # 영양 검색이면 foods + 5테이블 강제 포함
+        if search_type in ("nutrition", "general"):
+            must = ["foods","proximates","minerals","vitamins","amino_acids","fatty_acids"]
+            chosen = list(dict.fromkeys(chosen + must))
 
-        except Exception as e:
-            print(f"- LLM 키워드 추출 실패: {e}")
+        # 2) 컬럼 인지 파라미터 추출
+        params = self._extract_params_with_llm(query, chosen)
+
+        # 3) 정규화/동의어 매핑/기본값
+        result = self._normalize(query, search_type, params)
+        print(f"- LLM 추출 성공: {result}")
+        return result
+
+    # ---------- stage 1 ----------
+    def _route_tables_with_llm(self, query: str) -> Dict[str, Any]:
+        prompt = f"""
+너는 쿼리 라우터다. 질문을 보고 어떤 테이블을 조회할지 결정한다.
+
+[테이블]
+- 가격: kamis_product_price_latest
+- 영양: foods + (proximates, minerals, vitamins, amino_acids, fatty_acids)  ← foods.id = 각 테이블.food_id 로 조인
+
+다음 JSON만 응답:
+{{
+  "search_type": "price|nutrition|general",
+  "chosen_tables": ["테이블명1","테이블명2", ...]
+}}
+
+규칙:
+- '가격/시세' 문맥이면 search_type="price", chosen=["kamis_product_price_latest"].
+- '영양/칼로리/비타민/미네랄/아미노산/지방산' 문맥이면 search_type="nutrition",
+  chosen=["foods","proximates","minerals","vitamins","amino_acids","fatty_acids"].
+- 애매하면 "general"로 하고 관련 테이블을 포괄적으로 포함.
+
+질문: {query}
+오직 JSON으로만 응답.
+"""
+        data = self._safe_json_from_llm(prompt)
+        if not data:
+            # 폴백 라우팅
+            st = "nutrition" if any(k in query for k in self._NUTR_HINTS) else \
+                 ("price" if any(k in query for k in self._PRICE_HINTS) else "general")
+            chosen = (["kamis_product_price_latest"] if st == "price"
+                      else ["foods","proximates","minerals","vitamins","amino_acids","fatty_acids"])
+            return {"search_type": st, "chosen_tables": chosen}
+        return data
+
+    # ---------- stage 2 ----------
+    def _extract_params_with_llm(self, query: str, chosen_tables: List[str]) -> Dict[str, Any]:
+        picked = {t: self.TABLE_SCHEMAS.get(t, {}) for t in chosen_tables}
+        table_cols = {t: v.get("key_columns", []) for t, v in picked.items()}
+        price_display = self.TABLE_SCHEMAS["kamis_product_price_latest"].get("display_to_alias", {})
+
+        prompt = f"""
+너는 SQL 파라미터 추출기다. 아래 질문에서 '실제 컬럼이 존재하는 값'만 뽑아낸다.
+
+[중요]
+- 영양 검색은 반드시 foods."식품명"으로 품목을 매칭하고, foods.id = 각 테이블.food_id 로 조인한다.
+- 가격 검색은 kamis_product_price_latest.item_name, category_name, regday 등을 사용한다.
+- specific_info는 아래 컬럼 목록에 존재하는 항목(표시명 or 일반명)만 포함한다.
+- 기간 언급 없으면 time_period="recent".
+
+선택된 테이블과 주요 컬럼:
+{json.dumps(table_cols, ensure_ascii=False, indent=2)}
+
+가격 표시명→실제 컬럼:
+{json.dumps(price_display, ensure_ascii=False, indent=2)}
+
+반환 JSON 스키마(이 형식만):
+{{
+  "search_type": "price|nutrition|general",
+  "items": ["foods.\"식품명\"에 들어갈 명시 품목명들"],
+  "regions": ["지역명 목록 (가격일 때만 사용, 없으면 [])"],
+  "time_period": "recent|today|this_week|this_month|this_year|specific_date",
+  "specific_info": ["위 컬럼 목록에 있는 영양/지표 이름만", "..."],
+  "search_intent": "사용자 의도를 한 문장으로 요약"
+}}
+
+질문: {query}
+오직 JSON으로만 응답.
+"""
+        data = self._safe_json_from_llm(prompt)
+        # 실패 시 폴백
+        if not data:
             return self._get_fallback_result(query)
+        return data
 
+    # ---------- utils ----------
+    def _safe_json_from_llm(self, prompt: str) -> Optional[Dict[str, Any]]:
+        try:
+            resp = self.client.generate_content(prompt)
+            if not resp or not hasattr(resp, "text"):
+                return None
+            text = resp.text.strip()
+            if not text:
+                return None
+            # 코드블록 제거
+            if "```json" in text:
+                text = text.split("```json")[1].split("```")[0].strip()
+            elif text.startswith("```"):
+                text = text.split("```")[1].split("```")[0].strip()
+            return json.loads(text)
+        except Exception as e:
+            print(f"- LLM JSON 파싱 실패: {e}")
+            return None
+
+    def _normalize(self, query: str, search_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        # 기본 골격
+        items = data.get("items") or []
+        regions = data.get("regions") or []
+        time_period = data.get("time_period") or "recent"
+        specific_info_raw = data.get("specific_info") or []
+        intent = data.get("search_intent") or query
+
+        # specific_info: 동의어 -> 결과 요약에서 쓰는 영문 alias 로 정리
+        normalized_specific = []
+        for s in specific_info_raw:
+            key = s.strip().lower().replace(" ", "")
+            mapped = self.SPECIFIC_SYNONYM_TO_RESULT_KEY.get(key)
+            if mapped and mapped not in normalized_specific:
+                normalized_specific.append(mapped)
+
+        # search_type 폴백
+        if not search_type or search_type not in ("price","nutrition","general"):
+            if any(k in query for k in self._PRICE_HINTS):
+                search_type = "price"
+            elif any(k in query for k in self._NUTR_HINTS):
+                search_type = "nutrition"
+            else:
+                search_type = "general"
+
+        return {
+            "search_type": search_type,
+            "items": items,
+            "regions": regions,
+            "time_period": time_period,
+            "specific_info": normalized_specific,  # 영문 alias로 정규화 (없으면 [])
+            "search_intent": intent
+        }
+
+    def _get_fallback_result(self, query: str) -> Dict[str, Any]:
+        # 아주 보수적 폴백: 타입만 유추
+        st = "nutrition" if any(k in query for k in self._NUTR_HINTS) else \
+             ("price" if any(k in query for k in self._PRICE_HINTS) else "general")
+        return {
+            "search_type": st,
+            "items": [],
+            "regions": [],
+            "time_period": "recent",
+            "specific_info": [],
+            "search_intent": query
+        }
+
+
+# -----------------------------
+# PostgreSQL RAG (동일 시그니처)
+# -----------------------------
 class PostgreSQLRAG:
     def __init__(self):
-        """PostgreSQL 연결 풀 초기화"""
         self.pool = None
         self.keyword_extractor = KeywordExtractor()
         self._init_connection_pool()
 
     def _init_connection_pool(self):
-        """PostgreSQL 연결 풀 초기화"""
         try:
             db_config = {
                 'host': os.getenv('DB_HOST', 'localhost'),
@@ -107,24 +321,16 @@ class PostgreSQLRAG:
                 'user': os.getenv('DB_USER', 'your_user'),
                 'password': os.getenv('DB_PASSWORD', 'your_password')
             }
-
-            self.pool = psycopg2.pool.ThreadedConnectionPool(
-                minconn=1,
-                maxconn=20,
-                **db_config
-            )
+            self.pool = psycopg2.pool.ThreadedConnectionPool(minconn=1, maxconn=20, **db_config)
             print(">> PostgreSQL 연결 풀 초기화 완료")
-
         except Exception as e:
             print(f">> PostgreSQL 연결 풀 초기화 실패: {e}")
             self.pool = None
 
     @contextmanager
     def get_connection(self):
-        """DB 연결 컨텍스트 매니저"""
         if not self.pool:
             raise Exception("DB 연결 풀이 초기화되지 않음")
-
         conn = None
         try:
             conn = self.pool.getconn()
@@ -139,15 +345,13 @@ class PostgreSQLRAG:
                 self.pool.putconn(conn)
 
     def __del__(self):
-        """소멸자에서 연결 풀 정리"""
         if self.pool:
             self.pool.closeall()
             print(">> PostgreSQL 연결 풀 정리 완료")
 
+    # ---- helpers ----
     def _extract_search_params(self, query: str) -> Dict[str, Any]:
-        """키워드 추출"""
         llm_result = self.keyword_extractor.extract_search_params(query)
-
         params = {
             'items': llm_result.get('items', []),
             'regions': llm_result.get('regions', []),
@@ -156,16 +360,13 @@ class PostgreSQLRAG:
             'sort_by': 'date_desc',
             'limit': 100,
             'search_type': llm_result.get('search_type', 'general'),
-            'specific_info': llm_result.get('specific_info', []),
+            'specific_info': llm_result.get('specific_info', []),  # 이미 정규화된 alias 사용
             'search_intent': llm_result.get('search_intent', query)
         }
-
         return params
 
-    def _parse_time_period(self, time_period: str) -> tuple:
-        """시간 범위 파싱"""
+    def _parse_time_period(self, time_period: str) -> Optional[tuple]:
         now = datetime.now()
-
         if time_period == "today":
             return (now.replace(hour=0, minute=0, second=0), now)
         elif time_period == "this_week":
@@ -176,16 +377,11 @@ class PostgreSQLRAG:
             return (month_start, now)
         elif time_period == "recent":
             return (now - timedelta(days=30), now)
-        else:
-            return None
+        return None
 
+    # ---- public ----
     def comprehensive_search(self, query: str) -> Dict[str, Any]:
-        """
-        LLM의 search_type을 유일한 기준으로 사용하여 검색 대상을 결정하는 종합 검색 함수입니다.
-        """
         print(f"\n>> RDB 종합 검색 시작: {query}")
-
-        # 1. LLM을 통해 사용자 의도를 구조화된 정보(params)로 변환합니다.
         params = self._extract_search_params(query)
 
         results = {
@@ -195,49 +391,39 @@ class PostgreSQLRAG:
             'nutrition_data': [],
         }
 
-        search_type = params.get('search_type', 'general')
-
-        # 2. 오직 search_type에 따라 어떤 정보를 검색할지 결정합니다.
-        #   - 'general' 타입은 관련된 모든 정보를 검색합니다.
-        #   - 특정 타입('price', 'nutrition' 등)은 해당 정보만 정확히 검색합니다.
-
-        if search_type in ['price', 'general']:
+        st = params.get('search_type', 'general')
+        if st in ['price', 'general']:
             print(">> 가격 정보 검색 수행")
             results['price_data'] = self.search_price_data(params)
-
-        if search_type in ['nutrition', 'general']:
+        if st in ['nutrition', 'general']:
             print(">> 영양 정보 검색 수행")
             results['nutrition_data'] = self.search_nutrition_data(params)
 
-        # 3. 모든 검색 결과를 합산하여 총 개수를 계산합니다.
-        results['total_results'] = sum(len(data) for key, data in results.items() if key.endswith('_data'))
-
+        results['total_results'] = sum(
+            len(data) for key, data in results.items() if key.endswith('_data')
+        )
         print(f">> 검색 완료 - 총 {results['total_results']}건")
         return results
 
     def search_nutrition_data(self, params: Dict[str, Any]) -> List[Dict]:
-        """영양소 정보 검색"""
         items = params.get('items', [])
 
-        # items가 비어있으면 쿼리에서 품목명 추출 시도
         if not items:
+            # 폴백: 의도 문장에서 품목 추정 (최소한의 보수적 목록)
             query_text = params.get('search_intent', '')
-            # 농수산물 품목명 직접 검색 (더 포괄적으로)
-            food_items = ['귀리', '사과', '감자', '쌀', '보리', '옥수수', '콩', '당근', '양파', '배추', '무', '고구마',
-                         '딸기', '포도', '복숭아', '수박', '참외', '호박', '오이', '토마토', '상추', '시금치',
-                         '깻잎', '마늘', '생강', '파', '대파', '쪽파', '부추', '고추', '피망', '파프리카',
-                         '감귤', '귤', '오렌지', '바나나', '키위', '망고', '배', '자두', '체리']
-
-            for possible_item in food_items:
-                if possible_item in query_text and possible_item not in items:
-                    items.append(possible_item)
-                    print(f"    - 폴백으로 '{possible_item}' 품목 추가")
+            food_items = ['귀리', '사과', '감자', '쌀', '보리', '옥수수', '콩', '당근', '양파', '배추', '무',
+                          '고구마','딸기','포도','복숭아','수박','참외','호박','오이','토마토','상추','시금치',
+                          '깻잎','마늘','생강','파','대파','쪽파','부추','고추','피망','파프리카','감귤','귤',
+                          '오렌지','바나나','키위','망고','배','자두','체리']
+            for w in food_items:
+                if w in query_text and w not in items:
+                    items.append(w)
+                    print(f"    - 폴백으로 '{w}' 품목 추가")
 
         if not items:
             print(">> 검색할 품목이 없어서 영양소 검색 건너뜀")
             return []
 
-        # foods 테이블을 중심으로 5개의 영양소 테이블을 LEFT JOIN하는 새로운 쿼리
         base_query = """
         SELECT
             f."식품군" as "food_group",
@@ -245,7 +431,7 @@ class PostgreSQLRAG:
             f."출처" as "source",
             f."폐기율_percent" as "waste_rate_percent",
 
-            -- proximates (주요 영양소)
+            -- proximates
             p."에너지 (kcal/100g)" as "energy_kcal",
             p."수분 (g/100g)" as "moisture_g",
             p."단백질 (g/100g)" as "protein_g",
@@ -264,7 +450,7 @@ class PostgreSQLRAG:
             p."불용성 식이섬유 (g/100g)" as "insoluble_dietary_fiber_g",
             p."식염상당량 (g/100g)" as "salt_equivalent_g",
 
-            -- minerals (미네랄)
+            -- minerals
             m."칼슘 (mg/100g)" as "calcium_mg",
             m."철 (mg/100g)" as "iron_mg",
             m."마그네슘 (mg/100g)" as "magnesium_mg",
@@ -278,7 +464,7 @@ class PostgreSQLRAG:
             m."몰리브덴 (μg/100g)" as "molybdenum_ug",
             m."요오드 (μg/100g)" as "iodine_ug",
 
-            -- vitamins (비타민)
+            -- vitamins
             v."비타민 A (μg/100g)" as "vitamin_a_ug_rae",
             v."레티놀 (μg/100g)" as "retinol_ug",
             v."베타카로틴 (μg/100g)" as "beta_carotene_ug",
@@ -313,7 +499,7 @@ class PostgreSQLRAG:
             v."비타민 K1 (μg/100g)" as "vitamin_k1_ug",
             v."비타민 K2 (μg/100g)" as "vitamin_k2_ug",
 
-            -- amino_acids (아미노산)
+            -- amino_acids
             aa."총 아미노산 (mg/100g)" as "total_amino_acids_mg",
             aa."총 필수 아미노산 (mg/100g)" as "total_essential_amino_acids_mg",
             aa."이소류신 (mg/100g)" as "isoleucine_mg",
@@ -336,7 +522,7 @@ class PostgreSQLRAG:
             aa."세린 (mg/100g)" as "serine_mg",
             aa."타우린 (mg/100g)" as "taurine_mg",
 
-            -- fatty_acids (지방산)
+            -- fatty_acids
             fa."콜레스테롤 (mg/100g)" as "cholesterol_mg",
             fa."총 지방산 (g/100g)" as "total_fatty_acids_g",
             fa."총 필수 지방산 (g/100g)" as "total_essential_fatty_acids_g",
@@ -384,36 +570,30 @@ class PostgreSQLRAG:
             fa."총 트랜스 지방산 (g/100g)" as "total_trans_fatty_acids_g",
             fa."트랜스 올레산(18:1(n-9)t) (mg/100g)" as "trans_oleic_acid_18_1_n9t_mg",
             fa."트랜스 리놀레산(18:2t) (mg/100g)" as "trans_linoleic_acid_18_2t_mg",
-            fa."트랜스 리놀렌산(18:3t) (mg/100g)" as "trans_linolenic_acid_18_3t_mg",
-
-
+            fa."트랜스 리놀렌산(18:3t) (mg/100g)" as "trans_linolenic_acid_18_3t_mg"
         FROM foods f
-        LEFT JOIN proximates p ON f.id = p.food_id
-        LEFT JOIN minerals m ON f.id = m.food_id
-        LEFT JOIN vitamins v ON f.id = v.food_id
+        LEFT JOIN proximates  p  ON f.id = p.food_id
+        LEFT JOIN minerals   m  ON f.id = m.food_id
+        LEFT JOIN vitamins   v  ON f.id = v.food_id
         LEFT JOIN amino_acids aa ON f.id = aa.food_id
         LEFT JOIN fatty_acids fa ON f.id = fa.food_id
         WHERE 1=1
         """
 
-        where_conditions = []
-        query_params = []
-
+        where_conditions, query_params = [], []
         if items:
-            # 여러 품목에 대해 OR 조건으로 검색 (foods 테이블의 '식품명' 컬럼 기준)
-            item_conditions = " OR ".join(['f."식품명" ILIKE %s' for item in items])
-            where_conditions.append(f"({item_conditions})")
-            query_params.extend([f"%{item}%" for item in items])
+            cond = " OR ".join(['f."식품명" ILIKE %s' for _ in items])
+            where_conditions.append(f"({cond})")
+            query_params.extend([f"%{it}%" for it in items])
 
         if where_conditions:
             base_query += " AND " + " AND ".join(where_conditions)
-
         base_query += " LIMIT 10"
 
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    print(f">> 영양소 검색 쿼리: {cursor.mogrify(base_query, tuple(query_params)).decode('utf-8')}")
+                    print(">> 영양소 검색 쿼리:", cursor.mogrify(base_query, tuple(query_params)).decode("utf-8"))
                     cursor.execute(base_query, tuple(query_params))
                     results = cursor.fetchall()
                     print(f">> 영양소 검색 결과: {len(results)}건")
@@ -423,66 +603,38 @@ class PostgreSQLRAG:
             return []
 
     def search_price_data(self, params: Dict[str, Any]) -> List[Dict]:
-        """가격 데이터 검색"""
         base_query = """
         SELECT
-            id,
-            regday,
-            product_cls_code,
-            product_cls_name,
-            category_code,
-            category_name,
-            productno,
-            lastest_day,
-            "productName",
-            item_name,
-            unit,
-            day1,
-            dpr1,
-            day2,
-            dpr2,
-            day3,
-            dpr3,
-            day4,
-            dpr4,
-            direction,
-            value
+            id, regday, product_cls_code, product_cls_name,
+            category_code, category_name, productno, lastest_day,
+            "productName", item_name, unit,
+            day1, dpr1, day2, dpr2, day3, dpr3, day4, dpr4,
+            direction, value
         FROM kamis_product_price_latest
         WHERE 1=1
         """
-
-        where_conditions = []
-        query_params = []
+        where_conditions, query_params = [], []
 
         if params.get('items'):
-            item_conditions = []
+            conds = []
             for item in params['items']:
-                item_conditions.append("item_name ILIKE %s")
+                conds.append("item_name ILIKE %s")
                 query_params.append(f"%{item}%")
-
-            if item_conditions:
-                where_conditions.append(f"({' OR '.join(item_conditions)})")
-
-        if params.get('regions'):
-            region_conditions = []
-            for region in params['regions']:
-                region_conditions.append("category_name ILIKE %s")
-                query_params.append(f"%{region}%")
-
-            if region_conditions:
-                where_conditions.append(f"({' OR '.join(region_conditions)})")
+            if conds:
+                where_conditions.append(f"({' OR '.join(conds)})")
 
         if params.get('date_range'):
             where_conditions.append("regday >= %s AND regday <= %s")
             query_params.extend([d.date() for d in params['date_range']])
 
         if params.get('price_range'):
-            if len(params['price_range']) == 1:
+            pr = params['price_range']
+            if len(pr) == 1:
                 where_conditions.append("value <= %s")
-                query_params.append(params['price_range'][0])
-            elif len(params['price_range']) == 2:
+                query_params.append(pr[0])
+            elif len(pr) == 2:
                 where_conditions.append("value BETWEEN %s AND %s")
-                query_params.extend(params['price_range'])
+                query_params.extend(pr)
 
         if where_conditions:
             base_query += " AND " + " AND ".join(where_conditions)
@@ -492,8 +644,6 @@ class PostgreSQLRAG:
             base_query += " ORDER BY value DESC"
         elif sort_by == 'price_asc':
             base_query += " ORDER BY value ASC"
-        elif sort_by == 'date_desc':
-            base_query += " ORDER BY regday DESC"
         else:
             base_query += " ORDER BY regday DESC"
 
@@ -503,111 +653,76 @@ class PostgreSQLRAG:
         try:
             with self.get_connection() as conn:
                 with conn.cursor() as cursor:
-                    print(f">> 실행 쿼리: {base_query}")
-                    print(f">> 파라미터: {query_params}")
-
-                    if query_params:
-                        cursor.execute(base_query, query_params)
-                    else:
-                        cursor.execute(base_query)
-
+                    print(">> 실행 쿼리:", cursor.mogrify(base_query, tuple(query_params)).decode("utf-8"))
+                    cursor.execute(base_query, tuple(query_params) if query_params else None)
                     results = cursor.fetchall()
-
                     print(f">> 검색 결과: {len(results)}건")
                     return [dict(row) for row in results]
-
         except Exception as e:
             print(f">> 가격 데이터 검색 오류: {e}")
             return []
 
 
-# PostgreSQL RAG 인스턴스 생성
+# -----------------------------
+# Public API (리턴: str)  ---- 기존 호출부 호환
+# -----------------------------
 postgres_rag = PostgreSQLRAG()
 
 def postgres_rdb_search(query: str) -> str:
-    """
-    PostgreSQL DB에 저장된 정형 데이터를 조회하여 정확한 수치나 통계를 제공합니다.
-    - 사용 시점:
-      1. 구체적인 품목, 날짜, 지역 등의 조건으로 정확한 데이터를 찾을 때
-      2. 영양 정보, 시세 등 명확한 스펙이나 통계 수치를 물을 때
-      3. 특정 기간의 데이터 순위나 추이를 알고 싶을 때
-    - 데이터 종류: 농산물 시세, 원산지, 영양소 정보
-    """
     try:
         search_results = postgres_rag.comprehensive_search(query)
-
-        # 실제 데이터가 있는지 먼저 확인
         has_data = any([
             search_results['price_data'],
             search_results['nutrition_data']
         ])
-
         if not has_data:
             print(f">> RDB에서 '{query}' 관련 데이터 없음")
             return f"PostgreSQL 검색 결과: '{query}'와 관련된 데이터를 찾을 수 없습니다."
 
         summary = f"PostgreSQL 검색 결과 (총 {search_results['total_results']}건):\n\n"
 
+        # 가격 요약
         if search_results['price_data']:
             summary += f"### 가격 데이터 ({len(search_results['price_data'])}건)\n"
             for item in search_results['price_data'][:5]:
-                # 1. 단기(전일 대비) 가격 정보 생성 (0: 하락, 1: 상승, 2: 변동없음)
                 direction_map = {0: '▼', 1: '▲', 2: '-'}
                 direction_symbol = direction_map.get(item.get('direction'), '')
-
                 price_now = item.get('dpr1')
                 price_yesterday = item.get('dpr2')
-
-                # 날짜 객체를 'YYYY-MM-DD' 형식의 문자열로 변환 (값이 없을 경우 대비)
                 lastest_day_obj = item.get('lastest_day')
                 display_date = lastest_day_obj.strftime('%Y-%m-%d') if lastest_day_obj else 'N/A'
 
-                # 어제 대비 가격 변동 정보
                 daily_trend_info = ""
                 if price_now is not None and price_yesterday is not None and price_yesterday > 0:
-                    price_diff = price_now - price_yesterday
-                    if price_diff != 0:
-                        daily_trend_info = f" (어제보다 {abs(price_diff):,}원 {direction_symbol})"
+                    diff = price_now - price_yesterday
+                    if diff != 0:
+                        daily_trend_info = f" (어제보다 {abs(diff):,}원 {direction_symbol})"
 
-                # 2. 장기(월/년 단위) 가격 정보 생성
-                historical_info_parts = []
-                price_month_ago = item.get('dpr3')
-                price_year_ago = item.get('dpr4')
+                hist = []
+                m_ago = item.get('dpr3'); y_ago = item.get('dpr4')
+                if price_now is not None and m_ago:
+                    pct = ((price_now - m_ago) / m_ago) * 100
+                    hist.append(f"1개월 전: {pct:+.1f}% {'▲' if pct>0 else '▼'}")
+                if price_now is not None and y_ago:
+                    pct = ((price_now - y_ago) / y_ago) * 100
+                    hist.append(f"1년 전: {pct:+.1f}% {'▲' if pct>0 else '▼'}")
 
-                # 1개월 전 대비
-                if price_now is not None and price_month_ago is not None and price_month_ago > 0:
-                    month_change_pct = ((price_now - price_month_ago) / price_month_ago) * 100
-                    month_symbol = '▲' if month_change_pct > 0 else '▼'
-                    historical_info_parts.append(f"1개월 전: {month_change_pct:+.1f}% {month_symbol}")
-
-                # 1년 전 대비
-                if price_now is not None and price_year_ago is not None and price_year_ago > 0:
-                    year_change_pct = ((price_now - price_year_ago) / price_year_ago) * 100
-                    year_symbol = '▲' if year_change_pct > 0 else '▼'
-                    historical_info_parts.append(f"1년 전: {year_change_pct:+.1f}% {year_symbol}")
-
-                # 3. 최종 요약 라인 조합
-                # 메인 정보 (현재 가격, 전일 대비)
                 summary += (
-                    f"- **{item.get('item_name', 'N/A')}** ({item.get('category_name', 'N/A')}): "
-                    f"**{price_now:,}원**/{item.get('unit', 'N/A')} "
+                    f"- **{item.get('item_name','N/A')}** ({item.get('category_name','N/A')}): "
+                    f"**{(price_now if price_now is not None else 'N/A'):,}원**/{item.get('unit','N/A')} "
                     f"[{display_date} 기준]{daily_trend_info}\n"
                 )
-
-                # 추가 정보 (장기 추세)
-                if historical_info_parts:
-                    summary += f"    - `추세: {' | '.join(historical_info_parts)}`\n"
-
+                if hist:
+                    summary += f"    - `추세: {' | '.join(hist)}`\n"
             if len(search_results['price_data']) > 5:
                 summary += f"... 외 {len(search_results['price_data']) - 5}건\n"
             summary += "\n"
 
+        # 영양 요약
         if search_results['nutrition_data']:
             summary += f"### 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
 
-            # 1. (개선) 동의어를 그룹으로 묶어 중복을 제거한 매핑 테이블
             NUTRIENT_MAP = {
-                # DB 컬럼명: {표시 이름, 동의어 리스트, 단위}
                 'energy_kcal': {'display': '에너지(칼로리)', 'keywords': ['에너지', '칼로리'], 'unit': 'kcal'},
                 'moisture_g': {'display': '수분', 'keywords': ['수분'], 'unit': 'g'},
                 'protein_g': {'display': '단백질', 'keywords': ['단백질'], 'unit': 'g'},
@@ -636,57 +751,37 @@ def postgres_rdb_search(query: str) -> str:
             }
 
             params = search_results.get('extracted_params', {})
-            specific_info = [info.replace(" ", "") for info in params.get('specific_info', [])]
+            specific_info = params.get('specific_info', [])  # 이미 영문 alias
 
             for item in search_results['nutrition_data']:
                 summary += f"- **{item.get('food_name', 'N/A')}** ({item.get('food_group', 'N/A')}):\n"
-
-                highlighted_summaries = []
-                processed_nutrients = set() # 이미 처리된 영양성분 기록 (중복 출력 방지)
-
-                # 2. (개선) 새로운 MAP 구조에 맞춰 사용자 요청 정보 확인
+                highlights, done = [], set()
                 if specific_info:
-                    for db_key, nutrient_details in NUTRIENT_MAP.items():
-                        # 이미 요약에 추가된 성분이면 건너뛰기
-                        if db_key in processed_nutrients:
+                    for db_key in specific_info:
+                        if db_key in done:
                             continue
-
-                        # 사용자가 요청한 키워드가 현재 영양성분의 동의어 목록에 있는지 확인
-                        for keyword in nutrient_details['keywords']:
-                            if keyword.replace(" ", "") in specific_info:
-                                value = item.get(db_key)
-                                if value is not None:
-                                    display_name = nutrient_details['display']
-                                    unit = nutrient_details['unit']
-                                    highlighted_summaries.append(f"**{display_name}**: {value}{unit}/100g")
-                                    processed_nutrients.add(db_key) # 처리된 것으로 기록
-                                    break # 해당 영양성분 처리가 끝났으므로 다음 MAP 항목으로 이동
-
-                # 3. 강조할 정보가 있으면 그것만 보여주고, 없으면 기본 정보를 보여줌
-                if highlighted_summaries:
-                    summary += "    - " + " | ".join(highlighted_summaries) + "\n"
+                        nm = NUTRIENT_MAP.get(db_key, None)
+                        value = item.get(db_key)
+                        if nm and value is not None:
+                            highlights.append(f"**{nm['display']}**: {value}{nm['unit']}/100g")
+                            done.add(db_key)
+                if highlights:
+                    summary += "    - " + " | ".join(highlights) + "\n"
                 else:
-                    # 기본으로 보여줄 주요 영양 정보 (에너지, 단백질, 지방, 탄수화물, 당류)
                     energy = item.get('energy_kcal', 'N/A')
                     protein = item.get('protein_g', 'N/A')
                     fat = item.get('fat_g', 'N/A')
                     carb = item.get('carbohydrate_g', 'N/A')
                     sugar = item.get('sugars_g', 'N/A')
-
                     summary += (
                         f"    - **주요성분**: "
-                        f"칼로리 {energy}kcal/100g | "
-                        f"단백질 {protein}g/100g | "
-                        f"지방 {fat}g/100g | "
-                        f"탄수화물 {carb}g/100g | "
-                        f"당류 {sugar}g/100g\n"
+                        f"칼로리 {energy}kcal/100g | 단백질 {protein}g/100g | "
+                        f"지방 {fat}g/100g | 탄수화물 {carb}g/100g | 당류 {sugar}g/100g\n"
                     )
-
             summary += "\n"
 
         summary += "### 상세 데이터 (JSON)\n"
         summary += json.dumps(search_results, ensure_ascii=False, indent=2, default=str)
-
         return summary
 
     except Exception as e:

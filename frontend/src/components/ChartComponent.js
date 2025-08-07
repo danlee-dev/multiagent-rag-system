@@ -1034,14 +1034,14 @@ export function ChartComponent({ chartConfig }) {
 
 
   const advancedOptions = getAdvancedOptions(chartType, chartConfig);
-  
+
   // 백엔드에서 오는 차트 옵션에서 문제가 되는 콜백 함수들 제거
   const cleanChartOptions = JSON.parse(JSON.stringify(chartConfig.options || {}));
-  
+
   // 콜백 함수들을 안전하게 제거
   const removeCallbacks = (obj) => {
     if (typeof obj !== 'object' || obj === null) return obj;
-    
+
     for (const key in obj) {
       if (obj.hasOwnProperty(key)) {
         if (key === 'callbacks' || key === 'generateLabels') {
@@ -1055,9 +1055,9 @@ export function ChartComponent({ chartConfig }) {
     }
     return obj;
   };
-  
+
   removeCallbacks(cleanChartOptions);
-  
+
   const finalOptions = {
     ...advancedOptions,
     ...cleanChartOptions,
@@ -1124,8 +1124,8 @@ export function ChartComponent({ chartConfig }) {
           {renderError.message}
         </small>
         <br />
-        <button 
-          onClick={() => window.location.reload()} 
+        <button
+          onClick={() => window.location.reload()}
           style={{
             marginTop: "10px",
             padding: "8px 16px",

@@ -10,9 +10,8 @@ from pypdf import PdfReader
 # 각 RAG 툴의 메인 함수를 import
 from ..database.postgres_rag_tool import postgres_rdb_search
 from ..database.neo4j_rag_tool import neo4j_search_sync
-from ..database.elasticsearch.elastic_search_rag_tool import search, MultiIndexRAGSearchEngine, RAGConfig
+from ..database.elasticsearch.elastic_search_rag_tool import MultiIndexRAGSearchEngine, RAGConfig
 
-from ..database.mock_databases import create_mock_vector_db
 
 from ...core.models.models import ScrapeInput
 
@@ -332,51 +331,26 @@ def vector_db_search(query: str, top_k = 50) -> List:
 
     except Exception as e:
         print(f"Vector DB 검색 오류: {e}")
-        # 오류 발생 시 Mock DB로 fallback
-        try:
-            print("- Mock DB로 fallback 실행")
-            mock_db = create_mock_vector_db()
-            results = mock_db.similarity_search(query, k=top_k)
-            formatted_results = []
-            for i, doc in enumerate(results):
-                formatted_results.append({
-                    "content": doc.page_content,
-                    "title": f"Mock Document {i+1}",
-                    "document_id": f"mock_{i+1}",
-                    "similarity_score": 0.8 - (i * 0.1),
-                    "metadata": doc.metadata,
-                    "source_url": f"Mock Document {i+1}"  # Mock 출처 정보 추가
-                })
-            return formatted_results
-        except Exception as fallback_error:
-            print(f"Mock DB fallback도 실패: {fallback_error}")
-            return []
 
 
 @tool
 def graph_db_search(query: str) -> str:
     """
-    Neo4j 지식 그래프에서 농산물, 수산물, 지역 등의 개체와 그들 간의 관계를 검색합니다.
-    - 사용 시점: 'A의 생산지는 어디야?'와 같이 개체 간의 연결 관계나 소속 정보(원산지 정보)가 필요할 때 사용합니다.
+    상위 레벨 도구 진입점:
+    - 실행중 이벤트 루프가 있으면 ThreadPool에서 동기 함수 실행
+    - 없으면 동기 실행
     """
-    print(f"Neo4j Graph DB 검색 실행: {query}")
+    print(f"Graph DB search called: {query}")
     try:
-        # 이벤트 루프가 이미 실행 중인지 확인
         try:
-            loop = asyncio.get_running_loop()
-            # 이미 루프가 실행 중이면 thread pool에서 실행
-            print(f"- 기존 이벤트 루프 감지됨, 별도 스레드에서 실행")
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(neo4j_search_sync, query)
-                result = future.result()
-                print(f"- Neo4j 검색 결과: {result}")
-                return result
+            asyncio.get_running_loop()
+            print("Detected running loop -> using ThreadPool")
+            with concurrent.futures.ThreadPoolExecutor() as ex:
+                fut = ex.submit(neo4j_search_sync, query)
+                return fut.result()
         except RuntimeError:
-            # 실행 중인 루프가 없으면 직접 동기 함수 호출
-            print(f"- 동기 방식으로 Neo4j 검색 실행")
-            result = neo4j_search_sync(query)
-            print(f"- Neo4j 검색 결과: {result}")
-            return result
+            print("No running loop -> direct sync call")
+            return neo4j_search_sync(query)
     except Exception as e:
-        print(f"- Graph DB 검색 중 오류 발생: {e}")
+        print(f"graph_db_search error: {e}")
         return f"Graph DB 검색 중 오류: {e}"

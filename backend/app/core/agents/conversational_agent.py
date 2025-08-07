@@ -115,7 +115,7 @@ class SimpleAnswererAgent:
                 search_event = {
                     "type": "search_results",
                     "step": 1,
-                    "tool_name": "Web Search",
+                    "tool_name": "web_search",
                     "query": web_search_query,
                     "results": [
                         {
@@ -123,11 +123,15 @@ class SimpleAnswererAgent:
                             "content_preview": result.content[:200] + "..." if len(result.content) > 200 else result.content,
                             "url": result.url if hasattr(result, 'url') else None,
                             "source": result.source,
-                            "relevance_score": result.relevance_score,
-                            "document_type": result.document_type
+                            "score": getattr(result, 'score', getattr(result, 'relevance_score', 0.9)),
+                            "document_type": getattr(result, 'document_type', 'web')
                         }
                         for result in web_results
-                    ]
+                    ],
+                    # 🆕 Chat 모드 검색임을 표시
+                    "is_intermediate_search": False,
+                    "section_context": None,
+                    "message_id": state.get("message_id")
                 }
                 yield json.dumps(search_event)
                 print(f"- 웹 검색 결과 스트리밍 완료: {len(web_results)}개 결과")
@@ -142,7 +146,7 @@ class SimpleAnswererAgent:
                 search_event = {
                     "type": "search_results",
                     "step": 2,
-                    "tool_name": "Vector Database",
+                    "tool_name": "vector_db_search",
                     "query": vector_search_query,
                     "results": [
                         {
@@ -150,11 +154,15 @@ class SimpleAnswererAgent:
                             "content_preview": result.content[:200] + "..." if len(result.content) > 200 else result.content,
                             "url": result.url if hasattr(result, 'url') else None,
                             "source": result.source,
-                            "relevance_score": result.relevance_score,
+                            "score": getattr(result, 'relevance_score', getattr(result, 'score', 0.7)),
                             "document_type": result.document_type
                         }
                         for result in vector_results
-                    ]
+                    ],
+                    # 🆕 Chat 모드 검색임을 표시
+                    "is_intermediate_search": False,
+                    "section_context": None,
+                    "message_id": state.get("message_id")
                 }
                 yield json.dumps(search_event)
                 print(f"- 벡터 검색 결과 스트리밍 완료: {len(vector_results)}개 결과")
@@ -449,9 +457,12 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
 - 간결하면서도 도움이 되는 답변 제공
 - 필요시 추가 질문을 권유
 - 마크다운 형식으로 답변 작성
+- 마크다운의 '-', '*', '+', '##', '###' 등을 사용하여 가독성 좋은 답변 작성
 - **중요**: 참고 정보를 사용할 때는 다음 형식으로 출처를 표기하세요:
-  * 문장 끝에 [SOURCE:번호] 형식으로 출처 번호를 표기
-  * 예시: "건강기능식품 시장 규모는 6조 440억 원입니다 [SOURCE:1]"
+  * 문장 끝에 [SOURCE:번호1, 번호2, ...] 형식으로 출처 번호를 표기
+  * 예시: "건강기능식품 시장 규모는 6조 440억 원입니다 [SOURCE:3]"
+  * 예시: "경쟁사의 경우 바이럴을 통한 마케팅 전략을 사용합니다. [SOURCE:1, 2]"
+  * 예시: "돼지고기에 대한 영양 성분은 다음과 같습니다. [SOURCE:1, 4, 5]"
   * 참고 정보의 순서대로 1, 2, 3... 번호를 사용하세요
 
 답변:"""

@@ -5,7 +5,7 @@ import asyncio
 import json
 import concurrent.futures
 import os
-from typing import Dict, List, Any, Optional, AsyncGenerator
+from typing import Dict, List, Any, Optional, AsyncGenerator, Tuple
 from datetime import datetime
 
 from langchain.prompts import PromptTemplate
@@ -101,61 +101,114 @@ class DataGathererAgent:
         if tool == "rdb_search":
             print(f"  - {tool} 쿼리 최적화 시작: '{query}'")
             prompt = f"""
-다음 사용자 질문을 {tool} 검색에 가장 효과적인 핵심 키워드 2~3개만 쉼표(,)로 구분해서 추출해줘.
-다른 설명은 절대 추가하지 말고 키워드만 반환해.
+        너는 PostgreSQL RDB에 질의할 '요약 검색문'을 만드는 어시스턴트다.
+        사용자 질문을 다음 규칙으로 1줄짜리 한국어 문장으로 재작성해라. (추가 설명/따옴표/코드블록 금지)
 
-지역 정보 변환 규칙:
-- "국내" → "대한민국"
-- "우리나라" → "대한민국"
-- "한국" → "대한민국"
-- 지역 언급이 없으면 "대한민국" 자동 추가
+        [규칙]
+        1) 포함 항목: 지역, 품목(들), 의도(가격|시세|영양|칼로리|비타민|무역|수출|수입|시장현황 등), 기간.
+        2) 지역 정규화:
+        - "국내", "우리나라", "한국" → "대한민국".
+        - 지역 미언급 시 "대한민국"을 기본으로 넣는다.
+        3) 기간 정규화:
+        - 오늘/현재 → today
+        - 이번주 → this_week
+        - 이번달/당월/최근 1달 → this_month 또는 recent(모호하면 recent)
+        - 특정 연도/날짜가 있으면 숫자를 그대로 포함 (예: 2023년 → 2023)
+        4) 품목은 질문에 나온 원문 그대로 적되 불필요한 어미/조사는 제거(예: "국내산 사과" → "사과").
+        5) 의도는 질문에서 요구한 것을 가능한 한 구체적으로 나열(예: 가격·시세, 영양, 칼로리, 비타민C, 수출액, 성장률 등).
+        6) 출력 형식(딱 한 줄):
+        "지역=..., 품목=..., 의도=..., 기간=..."
 
-예시:
-- 질문: '국내 감귤의 최신 가격과 영양성분 알려줘'
-- 키워드: '대한민국, 감귤, 가격, 영양성분'
+        [예시]
+        - 질문: 국내 감귤의 최신 가격과 영양성분 알려줘
+        - 출력: 지역=대한민국, 품목=감귤, 의도=가격·시세·영양, 기간=today
 
-- 질문: '우리나라 특산품인 전복의 유통 구조가 궁금해'
-- 키워드: '대한민국, 전복, 특산품, 유통'
+        - 질문: 우리나라 특산품인 전복의 유통 구조가 궁금해
+        - 출력: 지역=대한민국, 품목=전복, 의도=유통·시장현황, 기간=recent
 
-- 질문: '건강기능식품 시장 현황을 알려줘' (지역 언급 없음)
-- 키워드: '대한민국, 건강기능식품, 시장현황'
+        - 질문: 건강기능식품 시장 현황을 알려줘
+        - 출력: 지역=대한민국, 품목=건강기능식품, 의도=시장현황, 기간=recent
 
-질문: "{query}"
-키워드:
-"""
+        - 질문: 2023년 만두의 주요 수출국별 수출액과 성장률
+        - 출력: 지역=대한민국, 품목=만두, 의도=수출액·성장률, 기간=2023
+
+        사용자 질문: "{query}"
+        출력:
+        """
             try:
                 response_content = await self._invoke_with_fallback(prompt)
-                optimized_query = response_content
+                optimized_query = response_content.strip()
                 print(f"  - 최적화된 키워드: '{optimized_query}'")
                 return optimized_query
             except Exception as e:
                 print(f"  - 쿼리 최적화 실패, 원본 쿼리 사용: {e}")
-                return query # 실패 시 원본 쿼리 반환
+                return query
 
         elif tool == "graph_db_search":
             print(f"  - {tool} 쿼리 최적화 시작: '{query}'")
+
+            # 그래프 스키마 기준: (품목)-[:isFrom]->(Origin), (품목)-[:hasNutrient]->(Nutrient)
+            # 우리가 원하는 정규 문구:
+            #   - "<품목>의 원산지"            -> isFrom
+            #   - "<품목>의 영양소"            -> hasNutrient
+            #   - "<지역>의 <품목> 원산지"     -> isFrom + region filter
+            #   - "(활어|선어|냉동|건어) <수산물> 원산지" -> isFrom + fishState filter
             prompt = f"""
-다음 사용자 질문을 Graph DB 검색에 가장 효과적인 핵심 키워드를 포함한 관계로 변환해주세요.
- - graph DB는 관계형 데이터베이스로, 키워드 기반 검색에 최적화되어 있습니다.
- - graph DB 데이터 특징(엔티티, 관계) : 품목 - 원산지, 품목 - 영양소
+        다음 사용자 질문을, Neo4j 그래프 검색에 바로 넣을 수 있는 **정규 질의 문구**로 변환하세요.
+        그래프 스키마:
+        - 품목 노드 라벨: 농산물 | 수산물 | 축산물  (공통 속성: product)
+        - 원산지 노드 라벨: Origin (속성: city, region)
+        - 관계: (품목)-[:isFrom]->(Origin), (품목)-[:hasNutrient]->(Nutrient)
+        - 수산물 상태: fishState ∈ {{활어, 선어, 냉동, 건어}}
 
-**중요 규칙 (반드시 준수)**:
-1. Graph DB의 데이터 특성을 반영하여, 엔티티와 관계를 명확히 표현해야 합니다.
+        규칙(반드시 준수):
+        1) 결과는 **한 줄당 하나의 질의**로 출력하고, 아래 4가지 패턴만 사용하세요.
+        - "<품목>의 원산지"
+        - "<품목>의 영양소"
+        - "<지역>의 <품목> 원산지"
+        - "<상태> <수산물> 원산지"   (상태=활어|선어|냉동|건어 중 하나)
+        2) 질문에 해당되지 않는 패턴은 만들지 마세요. 추측 금지.
+        3) 불필요한 접두사/설명/따옴표/번호/Bullet 금지. 텍스트만.
+        4) 품목, 지역, 상태는 사용자 질문에서 **그대로 발췌**하세요(동의어 치환 금지).
+        5) 결과가 없으면 **빈 문자열**만 반환.
 
-예시 답변: "사과의 원산지", "오렌지의 영양소", "오렌지의 원산지와 영양소"
+        예시:
+        - 질문: "사과 어디서 나와?"  ->  사과의 원산지
+        - 질문: "오렌지 영양 성분 알려줘" -> 오렌지의 영양소
+        - 질문: "경상북도 사과 산지" -> 경상북도의 사과 원산지
+        - 질문: "활어 문어 산지" -> 활어 문어 원산지
 
-질문 : "{query}"
-답변 :
-"""
+        질문: "{query}"
+        출력:
+        """.strip()
+
             try:
                 response_content = await self._invoke_with_fallback(prompt)
-                optimized_query = response_content
-                print(f"  - 최적화된 키워드: '{optimized_query}'")
-                return optimized_query
+                # 파싱: 줄 단위로 정리, 허용 패턴만 통과
+                allowed_prefixes = ("활어 ", "선어 ", "냉동 ", "건어 ")
+                def _is_allowed(line: str) -> bool:
+                    if not line: return False
+                    # 패턴 1/2: "<품목>의 (원산지|영양소)"
+                    if "의 원산지" in line or "의 영양소" in line:
+                        return True
+                    # 패턴 3: "<지역>의 <품목> 원산지"
+                    if line.endswith(" 원산지") and "의 " in line and not any(line.startswith(p) for p in allowed_prefixes):
+                        return True
+                    # 패턴 4: "<상태> <수산물> 원산지"
+                    if line.endswith(" 원산지") and any(line.startswith(p) for p in allowed_prefixes):
+                        return True
+                    return False
+
+                lines = [l.strip().lstrip("-•").strip().strip('"').strip("'") for l in response_content.splitlines()]
+                lines = [l for l in lines if _is_allowed(l)]
+                optimized_query = "\n".join(dict.fromkeys(lines))  # 중복 제거, 순서 유지
+
+                print(f"  - 최적화된 키워드(정규 질의):\n{optimized_query or '(empty)'}")
+                return optimized_query if optimized_query else query  # 비면 원본 질문 전달
+
             except Exception as e:
                 print(f"  - 쿼리 최적화 실패, 원본 쿼리 사용: {e}")
-                return query # 실패 시 원본 쿼리 반환
-
+                return query
 
         # Vector DB는 구체적인 정보 검색 질문으로 변환
         elif tool == "vector_db_search":
@@ -282,7 +335,7 @@ class DataGathererAgent:
         return raw_response.strip()
 
 
-    async def execute(self, tool: str, inputs: Dict[str, Any]) -> List[SearchResult]:
+    async def execute(self, tool: str, inputs: Dict[str, Any]) -> Tuple[List[SearchResult], str]:
         """단일 도구를 비동기적으로 실행하며, 실행 전 쿼리를 최적화합니다."""
         if tool not in self.tool_mapping:
             print(f"- 알 수 없는 도구: {tool}")
@@ -298,10 +351,11 @@ class DataGathererAgent:
 
         try:
             print(f"\n>> DataGatherer: '{tool}' 도구 실행 (쿼리: '{optimized_query}')")
-            return await self.tool_mapping[tool](**optimized_inputs)
+            result = await self.tool_mapping[tool](**optimized_inputs)
+            return result, optimized_query
         except Exception as e:
             print(f"- {tool} 실행 오류: {e}")
-            return []
+            return [], optimized_query
 
 
     async def execute_parallel(self, tasks: List[Dict[str, Any]]) -> Dict[str, List[SearchResult]]:
@@ -328,11 +382,12 @@ class DataGathererAgent:
             else:
                 print(f"  - {tool_name} 병렬 실행 완료: {len(result)}개 결과")
                 print(f"  - {tool_name} 병렬 실행 결과: {result[:3]}...")  # 처음 3개 결과만 출력
-                organized_results[f"{tool_name}_{i}"] = result
+                search_results, optimized_query = result  # 튜플 언패킹
+                organized_results[f"{tool_name}_{i}"] = search_results
 
         return organized_results
 
-    async def execute_parallel_streaming(self, tasks: List[Dict[str, Any]]):
+    async def execute_parallel_streaming(self, tasks: List[Dict[str, Any]], state: Dict[str, Any] = None):
         """여러 데이터 수집 작업을 병렬로 실행하되, 각 작업이 완료될 때마다 실시간으로 yield합니다."""
         print(f"\n>> DataGatherer: {len(tasks)}개 작업 스트리밍 병렬 실행 시작")
 
@@ -350,7 +405,7 @@ class DataGathererAgent:
 
             try:
                 print(f"  - {tool_name} 시작: {query}")
-                result = await self.execute(tool_name, inputs)
+                result, optimized_query = await self.execute(tool_name, inputs)
                 print(f"  - {tool_name} 완료: {len(result)}개 결과")
 
                 # 프론트엔드가 기대하는 형식으로 변환
@@ -371,7 +426,7 @@ class DataGathererAgent:
                 return {
                     "step": task_index + 1,
                     "tool_name": tool_name,
-                    "query": query,
+                    "query": optimized_query,
                     "results": formatted_results,
                     "original_results": result  # 원본 SearchResult 객체들도 보존
                 }
@@ -381,7 +436,7 @@ class DataGathererAgent:
                 return {
                     "step": task_index + 1,
                     "tool_name": tool_name,
-                    "query": query,
+                    "query": optimized_query,
                     "results": [],
                     "error": str(e),
                     "original_results": []
@@ -404,7 +459,8 @@ class DataGathererAgent:
                     "step": result["step"],
                     "tool_name": result["tool_name"],
                     "query": result["query"],
-                    "results": result["results"]
+                    "results": result["results"],
+                    "message_id": state.get("message_id") if state else None
                 }
             }
 
@@ -522,7 +578,7 @@ class DataGathererAgent:
                     score = result.get("score", 5.2)
 
                     search_results.append(SearchResult(
-                        source="vector_db",
+                        source="_search",
                         content=result.get("content", ""),
                         search_query=query,
                         title=full_title,
@@ -542,26 +598,73 @@ class DataGathererAgent:
             print(f"Vector DB 검색 오류: {e}")
 
     async def _graph_db_search(self, query: str, **kwargs) -> List[SearchResult]:
-        """Graph DB 검색 실행 - 오류 처리 강화"""
+        """Graph DB 검색 실행 - 포맷 불일치 방지 및 타임아웃 처리"""
         print(f"  - Graph DB 검색 시작: {query}")
-        try:
-            # 비동기 충돌 방지를 위해 ThreadPoolExecutor 사용
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(graph_db_search.invoke, {"query": query})
-                raw_results = future.result(timeout=20)  # 20초 타임아웃
+        import concurrent.futures
 
-            search_results = [
-                SearchResult(
-                    source="graph_db",
-                    content=res.get("content", ""),
-                    search_query=query,
-                    title=f"그래프 정보: {res.get('entity', '알 수 없음')}",
-                    score=res.get("confidence", 0.8),
-                    document_type="graph",
-                    url=f"그래프 DB {res.get('entity', '알 수 없음')}"
-                ) for res in raw_results[:5] if isinstance(res, dict)
-            ]
+        try:
+            # graph_db_search가 동기 함수라면
+            loop = asyncio.get_running_loop()
+            raw_results = await loop.run_in_executor(None, graph_db_search, query)
+            # 만약 langchain Tool일 경우:
+            # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            #     raw_results = executor.submit(graph_db_search.invoke, {"query": query}).result(timeout=20)
+
+            search_results: List[SearchResult] = []
+
+            if isinstance(raw_results, list):
+                # list of dict or list of str
+                for res in raw_results[:5]:
+                    if isinstance(res, dict):
+                        title = res.get("entity") or res.get("product") or "그래프 결과"
+                        content = res.get("content") or json.dumps(res, ensure_ascii=False)
+                        score = res.get("confidence") or res.get("score") or 0.8
+                    else:
+                        title = "그래프 결과"
+                        content = str(res)
+                        score = 0.8
+
+                    search_results.append(
+                        SearchResult(
+                            source="graph_db",
+                            content=content,
+                            search_query=query,
+                            title=f"그래프 정보: {title}",
+                            score=score,
+                            document_type="graph",
+                            url=""  # 빈 문자열로 통일 (None 쓰면 후단에서 깨지는 경우 있음)
+                        )
+                    )
+            elif isinstance(raw_results, dict):
+                title = raw_results.get("entity") or raw_results.get("product") or "그래프 결과"
+                content = raw_results.get("content") or json.dumps(raw_results, ensure_ascii=False)
+                score = raw_results.get("confidence") or raw_results.get("score") or 0.8
+                search_results.append(
+                    SearchResult(
+                        source="graph_db",
+                        content=content,
+                        search_query=query,
+                        title=f"그래프 정보: {title}",
+                        score=score,
+                        document_type="graph",
+                        url=""
+                    )
+                )
+            else:
+                # 문자열 summary 같은 경우
+                content = str(raw_results)
+                title = "그래프 검색 요약"
+                search_results.append(
+                    SearchResult(
+                        source="graph_db",
+                        content=content,
+                        search_query=query,
+                        title=title,
+                        score=0.6,
+                        document_type="graph",
+                        url=""
+                    )
+                )
 
             print(f"  - Graph DB 검색 완료: {len(search_results)}개 결과")
             return search_results
@@ -571,33 +674,43 @@ class DataGathererAgent:
             return []
         except Exception as e:
             print(f"Graph DB 검색 오류: {e}")
-            # 오류 시 빈 결과 반환
             return []
 
     async def _rdb_search(self, query: str, **kwargs) -> List[SearchResult]:
-        """RDB 검색 실행"""
+        """RDB 검색 실행 - 반환 표준화"""
         try:
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, rdb_search, query
-            )
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, rdb_search, query)
 
-            search_results = []
-            for result in results:
-                if isinstance(result, dict):
-                    search_result = SearchResult(
+            search_results: List[SearchResult] = []
+
+            for r in results:
+                # r이 dict가 아닐 수도 있음 → 안전 변환
+                if not isinstance(r, dict):
+                    try:
+                        r = dict(r)
+                    except Exception:
+                        r = {"raw": str(r)}
+
+                title = r.get("title") or r.get("food_name") or r.get("item_name") or "RDB 데이터"
+                content = r.get("content") or json.dumps(r, ensure_ascii=False)
+
+                search_results.append(
+                    SearchResult(
                         source="rdb_search",
-                        content=result.get("content", ""),
+                        content=content,
                         search_query=query,
-                        title=result.get("title", "RDB 데이터"),
-                        url=None,
-                        relevance_score=0.8,
-                        timestamp=datetime.now().isoformat(),
-                        document_type="database",
-                        metadata=result
+                        title=title,
+                        url="",                 # None 금지
+                        score=float(r.get("score", 0.9)),   # 필드명 score로 통일
+                        document_type=r.get("document_type", "database"),
+                        metadata=r
                     )
-                    search_results.append(search_result)
+                )
 
+            print(f"  - rdb_search 래퍼 반환: {len(search_results)}개")
             return search_results[:5]
+
         except Exception as e:
             print(f"RDB 검색 오류: {e}")
             return []
@@ -697,7 +810,7 @@ class ProcessorAgent:
         """
         primary_chunks_received = 0
         primary_content_length = 0
-        
+
         try:
             print(f"- Primary 모델로 스트리밍 시도 ({type(primary_model).__name__})")
             async for chunk in primary_model.astream(prompt):
@@ -705,14 +818,14 @@ class ProcessorAgent:
                 if hasattr(chunk, 'content') and chunk.content:
                     primary_content_length += len(chunk.content)
                 yield chunk
-            
+
             print(f"- Primary 스트리밍 완료: {primary_chunks_received}개 청크, {primary_content_length} 문자")
-            
+
             # 청크를 받았지만 내용이 비어있는 경우도 실패로 간주
             if primary_chunks_received == 0 or primary_content_length == 0:
                 print(f"- Primary 모델에서 유효한 내용이 생성되지 않음, fallback 실행")
                 raise Exception("No valid content generated")
-                
+
         except Exception as e:
             error_str = str(e).lower()
             rate_limit_indicators = ['429', 'quota', 'rate limit', 'exceeded', 'resource_exhausted', 'no valid content', 'no generation chunks']
@@ -737,7 +850,7 @@ class ProcessorAgent:
                 print(f"ProcessorAgent: 복구 불가능한 오류: {e}")
                 raise e
 
-    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None) -> Any:
+    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None, state: Dict[str, Any] = None) -> Any:
         """Orchestrator로부터 동기식 작업을 받아 처리합니다."""
         print(f"\n>> Processor 실행: {processor_type}")
 
@@ -751,7 +864,7 @@ class ProcessorAgent:
             # create_charts(section_data, section_title, generated_content)
             section_title = param2
             generated_content = param3
-            return await self._create_charts(data, section_title, generated_content, yield_callback)
+            return await self._create_charts(data, section_title, generated_content, yield_callback, state)
 
         else:
             return {"error": f"알 수 없는 처리 타입: {processor_type}"}
@@ -971,9 +1084,9 @@ class ProcessorAgent:
     2. **간결한 요약**: 정보를 단순히 나열하지 말고, 1~2 문단 이내의 간결하고 논리적인 핵심 요약문으로 재구성해주세요.
     3. **중복 제거**: 여러 문서에 걸쳐 반복되는 내용은 하나로 통합하여 제거하세요.
     4. **객관성 유지**: 데이터에 기반하여 객관적인 사실만을 전달해주세요.
-    5. **⭐ 출처 정보 보존**: 중요한 정보나 수치를 언급할 때 해당 정보의 출처를 [SOURCE:번호] 형식으로 표기하세요.
-    - **문서 ID 순서대로 0, 1, 2... 번호를 사용** (0부터 시작)
-    - 예시: "시장 규모가 증가했습니다 [SOURCE:0]", "매출이 상승했습니다 [SOURCE:1, 2]"
+    5. **⭐ 출처 정보 보존**: 중요한 정보나 수치를 언급할 때 해당 정보의 출처를 [SOURCE:번호1, 번호2, ...] 형식으로 표기하세요.
+    - **문서 ID 순서대로 1, 2... 번호를 사용** (1부터 시작)
+    - 예시: "시장 규모가 증가했습니다 [SOURCE:1]", "매출이 상승했습니다 [SOURCE:1, 2]"
     6. **⭐ 노션 스타일 마크다운 적극 활용**:
     - **중요한 키워드나 수치**: `**굵은 글씨**`로 강조
     - *일반적인 강조나 트렌드*: `*기울임체*`로 표현
@@ -1000,28 +1113,32 @@ class ProcessorAgent:
 
         # 섹션 시작 시 H2 헤더로 출력하고 매핑 정보 포함
         section_header = f"\n\n## {section_title}\n\n"
-        
+
+        # 🔥 핵심 수정: 섹션 매핑 정보를 섹션 헤더에 포함
+        section_header = f"\n\n## {section_title}\n\n"
+
         # 매핑 정보를 숨김 주석으로 추가 (프론트엔드에서 파싱할 수 있도록)
         if global_indexes:
             mapping_comment = f"<!--SECTION_MAPPING:{json.dumps(global_indexes)}-->"
             section_header = mapping_comment + section_header
-        
+            print(f"  - 섹션 매핑 정보 포함: {section_title} -> {global_indexes}")
+
         yield section_header
 
         if content_type == "synthesis":
             # ⭐ 수정: _synthesize_data_for_section 대신 직접 section_data에서 content 추출
             section_data_content = ""
-            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑
-            
+            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑 (1-based)
+
             for i, res in enumerate(section_data):
                 source_info = ""
-                
-                # 전체 데이터에서의 실제 인덱스 저장
+
+                # 전체 데이터에서의 실제 인덱스 저장 (1-based numbering)
                 if global_indexes and i < len(global_indexes):
-                    source_mapping[i] = global_indexes[i]
+                    source_mapping[i+1] = global_indexes[i]
                 else:
-                    source_mapping[i] = i  # fallback
-                
+                    source_mapping[i+1] = i  # fallback
+
                 # 출처 정보 추출
                 if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
                     if hasattr(res, 'url') and res.url:
@@ -1036,7 +1153,7 @@ class ProcessorAgent:
                     source_name = res.source if hasattr(res, 'source') else 'Unknown'
                     source_info = f"출처: {source_name}"
 
-                section_data_content += f"**데이터 {i}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n\n"
+                section_data_content += f"**데이터 {i+1}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n\n"
 
             prompt_template = """
     당신은 주어진 데이터를 바탕으로 전문가 수준의 보고서의 한 섹션을 작성하는 AI입니다.
@@ -1054,30 +1171,29 @@ class ProcessorAgent:
     3. **데이터 기반**: 참고 데이터에 있는 구체적인 수치, 사실, 인용구를 적극적으로 활용하여 내용을 구성하세요.
     4. **전문가적 문체**: 명확하고 간결하며 논리적인 전문가의 톤으로 글을 작성하세요.
     5. **⭐ 노션 스타일 마크다운 적극 활용 (매우 중요)**:
-    - **핵심 키워드나 중요한 수치**: `**굵은 글씨**`로 강조
-    - *일반적인 강조나 변화*: `*기울임체*`로 표현
-    - **주요 포인트나 결론**: `> 중요한 인사이트나 결론` 형태로 강조
-    - **목록이 필요한 경우**: `- 첫 번째 항목`, `- 두 번째 항목` 형태로 구조화
-    - **하위 분류가 있는 경우**: `  - 세부 항목` (들여쓰기 사용)
-    - **세부 카테고리**: `### 소제목` 활용
+    - **핵심 키워드나 중요한 수치**: **굵은 글씨**로 강조
+    - *일반적인 강조나 변화*: *기울임체*로 표현
+    - **주요 포인트나 결론**: > 중요한 인사이트나 결론 형태로 강조
+    - **목록이 필요한 경우**: - 첫 번째 항목, - 두 번째 항목 형태로 구조화
+    - **하위 분류가 있는 경우**:   - 세부 항목 (들여쓰기 사용)
+    - **세부 카테고리**: ### 소제목 활용
     - **단락 구분**: 내용이 바뀔 때마다 명확하게 단락을 나누어 공백 라인 삽입
-    6. **출처 표기**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호] 형식으로 출처를 표기하세요.
-    - 섹션 데이터 내에서 0, 1, 2... 번호를 사용하세요
-    - 예시: "**매출이 증가했습니다**" [SOURCE:0]
+    6. **출처 표기**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호1, 번호2, ...] 형식으로 출처를 표기하세요.
+    - 섹션 데이터 내에서 1, 2... 번호를 사용하세요(1부터 시작)
+    - 예시: "**매출이 증가했습니다**" [SOURCE:1]
 
     **구조화된 작성 예시**:
-    ```
-    **핵심 분석 결과**, 시장 규모는 전년 대비 **15% 성장**했습니다. [SOURCE:0]
+
+    **핵심 분석 결과**, 시장 규모는 전년 대비 **15% 성장**했습니다. [SOURCE:1]
 
     주요 성장 요인은 다음과 같습니다:
     - *디지털 전환 가속화*로 인한 수요 증가
-    - **정부 정책 지원**에 따른 투자 확대 [SOURCE:1]
+    - **정부 정책 지원**에 따른 투자 확대 [SOURCE:3]
     - 세부 지원책: 세제 혜택 및 보조금 확대
     - 투자 규모: **500억원** 규모의 지원 예산
     - 소비자 행동 변화로 인한 *새로운 니즈 창출*
 
     > 특히 주목할 점은 젊은 층의 소비 패턴 변화가 전체 시장 성장을 견인하고 있다는 것입니다. [SOURCE:2]
-    ```
 
     **보고서 섹션 내용**:
     """
@@ -1092,17 +1208,17 @@ class ProcessorAgent:
         else:  # "full_data_for_chart"
             # ⭐ 핵심 개선: 섹션별 선택된 데이터만 사용하여 출처 정보 준비
             section_data_with_sources = ""
-            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑
-            
+            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑 (1-based)
+
             for i, res in enumerate(section_data):  # section_data만 사용
                 source_info = ""
                 source_link = ""
-                
-                # 전체 데이터에서의 실제 인덱스 저장
+
+                # 전체 데이터에서의 실제 인덱스 저장 (1-based numbering)
                 if global_indexes and i < len(global_indexes):
-                    source_mapping[i] = global_indexes[i]
+                    source_mapping[i+1] = global_indexes[i]
                 else:
-                    source_mapping[i] = i  # fallback
+                    source_mapping[i+1] = i  # fallback
 
                 # Web search 결과인 경우
                 if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
@@ -1129,7 +1245,7 @@ class ProcessorAgent:
                     source_link = source_name
 
                 # ⭐ 핵심: 섹션 데이터 내에서의 인덱스 사용 (0, 1, 2...)
-                section_data_with_sources += f"**섹션 데이터 {i}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n- **출처_링크**: {source_link}\n\n"
+                section_data_with_sources += f"**섹션 데이터 {i+1}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n- **출처_링크**: {source_link}\n\n"
 
             prompt_template = """
     당신은 데이터 분석가이자 보고서 작성가입니다. 주어진 선택된 데이터를 분석하여, 텍스트 설명과 시각적 차트를 결합한 전문가 수준의 보고서 섹션을 작성합니다.
@@ -1145,23 +1261,23 @@ class ProcessorAgent:
     1. **간결성 유지**: 반드시 1~2 문단 이내로, 데이터에서 가장 중요한 인사이트와 분석 내용만 간결하게 요약하여 작성하세요.
     2. **제목 반복 금지**: 주어진 섹션 제목을 절대 반복해서 출력하지 마세요. 바로 본문 내용으로 시작해야 합니다.
     3. **데이터 기반**: 설명에 구체적인 수치, 사실, 통계 자료를 적극적으로 인용하여 신뢰도를 높이세요.
-    4. **⭐ 차트 마커 삽입**: 텍스트 설명의 흐름 상, 시각적 데이터가 필요한 적절한 위치에 `[GENERATE_CHART]` 마커를 한 줄에 단독으로 삽입하세요.
+    4. **⭐ 차트 마커 삽입**: 텍스트 설명의 흐름 상, 시각적 데이터가 필요한 적절한 위치에 [GENERATE_CHART] 마커를 한 줄에 단독으로 삽입하세요.
     5. **서술 계속**: 마커를 삽입한 후, 이어서 나머지 텍스트 설명을 자연스럽게 계속 작성하세요.
     6. **⭐ 노션 스타일 마크다운 적극 활용 (매우 중요)**:
-    - **핵심 데이터나 수치**: `**굵은 글씨**`로 강조
-    - *중요한 트렌드나 변화*: `*기울임체*`로 표현
-    - **주요 인사이트나 결론**: `> 중요한 발견사항이나 결론` 형태로 강조
-    - **분석 항목이 여러 개인 경우**: `- 첫 번째 분석`, `- 두 번째 분석` 형태로 구조화
-    - **세부 분석이 필요한 경우**: `### 세부 분석` 소제목 활용
-    - **차트 설명**: `> 아래 차트는 ~를 보여줍니다` 형태로 설명
+    - **핵심 데이터나 수치**: **굵은 글씨**로 강조
+    - *중요한 트렌드나 변화*: *기울임체*로 표현
+    - **주요 인사이트나 결론**: > 중요한 발견사항이나 결론 형태로 강조
+    - **분석 항목이 여러 개인 경우**: - 첫 번째 분석, - 두 번째 분석 형태로 구조화
+    - **세부 분석이 필요한 경우**: ### 세부 분석 소제목 활용
+    - **차트 설명**: > 아래 차트는 ~를 보여줍니다 형태로 설명
     - **단락 구분**: 분석 내용이 바뀔 때마다 명확하게 단락을 나누어 공백 라인 삽입
-    7. **⭐ 출처 표기 (매우 중요)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호] 형식으로 출처를 표기하세요.
-    - 섹션 데이터 내에서 0, 1, 2... 번호를 사용하세요 (0부터 시작)
-    - 예시: "**시장 규모가 10% 증가**했습니다" [SOURCE:0]
+    7. **⭐ 출처 표기 (매우 중요)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호1, 번호2, ...] 형식으로 출처를 표기하세요.
+    - 섹션 데이터 내에서 1, 2, 3... 번호를 사용하세요 (1부터 시작)
+    - 예시: **시장 규모가 10% 증가**했습니다. [SOURCE:1]
 
     **구조화된 작성 예시 (차트 포함)**:
-    ```
-    **데이터 분석 결과**, 전체 시장에서 **주요 3개 부문**이 차지하는 비중이 증가하고 있습니다. [SOURCE:0]
+
+    **데이터 분석 결과**, 전체 시장에서 **주요 3개 부문**이 차지하는 비중이 증가하고 있습니다. [SOURCE:1]
 
     ### 부문별 성장률 분석
     - *A 부문*: 전년 대비 **18% 성장** [SOURCE:1]
@@ -1176,7 +1292,6 @@ class ProcessorAgent:
     **주목할 점은** C 부문의 급격한 성장이 *신기술 도입*과 *소비자 선호 변화*에 기인한다는 것입니다. [SOURCE:2]
 
     > 이러한 트렌드는 향후 6개월간 지속될 것으로 예상되며, 전체 시장 구조에 중대한 변화를 가져올 것으로 전망됩니다.
-    ```
 
     **보고서 섹션 본문**:
     """
@@ -1224,14 +1339,14 @@ class ProcessorAgent:
 
         except Exception as e:
             print(f"- 섹션 스트리밍 오류 ({section_title}): {e}")
-            
+
             # 내용이 생성되지 않은 경우 OpenAI로 직접 재시도
             if "No generation chunks" in str(e) or "no valid content" in str(e).lower():
                 try:
                     print(f"- OpenAI로 직접 재시도: {section_title}")
                     total_content = ""
                     chunk_count = 0
-                    
+
                     async for chunk in self.llm_openai_4o.astream(prompt):
                         chunk_count += 1
                         if hasattr(chunk, 'content') and chunk.content:
@@ -1243,13 +1358,13 @@ class ProcessorAgent:
                             for i in range(0, len(chunk_text), 5):
                                 mini_chunk = chunk_text[i:i+5]
                                 yield mini_chunk
-                                
+
                     print(f"- OpenAI 재시도 완료: {section_title}, {chunk_count}개 청크, {len(total_content)} 문자")
-                    
+
                     if not total_content.strip():
                         print(f"- OpenAI 재시도도 실패, fallback 내용 생성")
                         raise Exception("OpenAI retry also failed")
-                        
+
                 except Exception as retry_error:
                     print(f"- OpenAI 재시도 실패: {retry_error}")
                     fallback_content = f"*'{section_title}' 섹션에 대한 상세한 분석을 생성하는 중 문제가 발생했습니다.*\n\n"
@@ -1259,7 +1374,7 @@ class ProcessorAgent:
                 yield error_content
 
 
-    async def _create_charts(self, section_data: List[SearchResult], section_title: str, generated_content: str = "", yield_callback=None) -> Dict[str, Any]:
+    async def _create_charts(self, section_data: List[SearchResult], section_title: str, generated_content: str = "", yield_callback=None, state: Dict[str, Any] = None) -> Dict[str, Any]:
         """⭐ 수정: 섹션별 선택된 데이터와 생성된 내용을 바탕으로 정확한 차트 생성"""
         print(f"  - 차트 데이터 생성: '{section_title}' (데이터 {len(section_data)}개)")
 
@@ -1384,14 +1499,12 @@ class ProcessorAgent:
 
                         # >> 웹 검색으로 추가 데이터 수집
                         try:
-                            # async generator를 올바르게 처리
                             additional_data = []
-                            async for result in data_gatherer.execute("web_search", {"query": search_query}):
-                                if hasattr(result, 'results') and result.results:
-                                    additional_data.extend(result.results)
-                                elif hasattr(result, 'data') and result.data:
-                                    additional_data.extend(result.data)
-                                
+                            web_results, _ = await data_gatherer.execute("web_search", {"query": search_query})
+                            vector_results, _ = await data_gatherer.execute("vector_db_search", {"query": search_query})
+                            additional_data.extend(web_results)
+                            additional_data.extend(vector_results)
+
                             if additional_data:
                                 print(f"  - 추가 데이터 수집 완료: {len(additional_data)}개")
 
@@ -1407,7 +1520,7 @@ class ProcessorAgent:
                                             result_dict = search_result
                                         else:
                                             continue  # 지원하지 않는 형식은 건너뛰기
-                                            
+
                                         formatted_result = {
                                             "title": result_dict.get("title", "제목 없음"),
                                             "content_preview": result_dict.get("content", "내용 없음")[:200] + "...",
@@ -1418,14 +1531,21 @@ class ProcessorAgent:
                                         }
                                         formatted_results.append(formatted_result)
 
-                                    # 검색 결과 이벤트 전송
+                                    # 검색 결과 이벤트 전송 (중간 검색 표시)
                                     await yield_callback({
                                         "type": "search_results",
                                         "data": {
                                             "step": f"chart_enhancement_{attempt}",
                                             "tool_name": "web_search",
                                             "query": search_query,
-                                            "results": formatted_results
+                                            "results": formatted_results,
+                                            "is_intermediate_search": True,
+                                            "section_context": {
+                                                "section_title": section_title,
+                                                "search_reason": "차트 데이터 부족으로 인한 추가 검색",
+                                                "attempt": attempt
+                                            },
+                                            "message_id": state.get("message_id") if state else None
                                         }
                                     })
 
@@ -1497,9 +1617,9 @@ class ProcessorAgent:
                             elif isinstance(obj, list):
                                 for item in obj:
                                     remove_callbacks(item)
-                        
+
                         remove_callbacks(chart_response)
-                        
+
                         print(f"  - 차트 생성 성공: {chart_response['type']} 타입, {len(datasets)}개 데이터셋 (시도 {attempt})")
                         return chart_response
                     else:
@@ -1518,13 +1638,8 @@ class ProcessorAgent:
 
                         try:
                             # async generator를 올바르게 처리
-                            additional_data = []
-                            async for result in data_gatherer.execute("web_search", {"query": fallback_query}):
-                                if hasattr(result, 'results') and result.results:
-                                    additional_data.extend(result.results)
-                                elif hasattr(result, 'data') and result.data:
-                                    additional_data.extend(result.data)
-                                    
+                            additional_data, _ = await data_gatherer.execute("web_search", {"query": fallback_query})
+
                             if additional_data:
                                 print(f"  - Fallback 추가 데이터 수집: {len(additional_data)}개")
                                 enhanced_data = current_data + additional_data

@@ -30,6 +30,7 @@ from .core.models.models import StreamingAgentState
 class StreamingAgentStateModel(BaseModel):
     original_query: str
     session_id: str
+    message_id: str | None = None
     flow_type: str | None = None
     plan: dict | None = None
     design: dict | None = None
@@ -50,6 +51,7 @@ class StreamingAgentStateModel(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     session_id: str | None = Field(default_factory=lambda: str(uuid.uuid4()))
+    message_id: str | None = Field(default_factory=lambda: str(uuid.uuid4()))
 
 # --- FastAPI 애플리케이션 설정 ---
 app = FastAPI(
@@ -92,6 +94,7 @@ async def stream_query(request: QueryRequest):
         state = StreamingAgentStateModel(
             original_query=request.query,
             session_id=request.session_id,
+            message_id=request.message_id,
             conversation_id=request.session_id,
             user_id="default_user"
         )

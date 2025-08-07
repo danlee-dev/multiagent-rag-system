@@ -30,9 +30,19 @@ export default function Home() {
 
   // Claude 스타일 실시간 검색 결과 상태
   const [currentSearchResults, setCurrentSearchResults] = useState([]);
+
+  // 🔍 디버깅: currentSearchResults 변경사항 추적
+  const setCurrentSearchResultsDebug = (newResults) => {
+    console.log("🔍 currentSearchResults 변경:", {
+      이전: currentSearchResults.length,
+      새로운: Array.isArray(newResults) ? newResults.length : "함수",
+      스택: new Error().stack?.split('\n')[2]?.trim()
+    });
+    setCurrentSearchResults(newResults);
+  };
   const [searchResultsVisible, setSearchResultsVisible] = useState({});
   const [conversationSearchResults, setConversationSearchResults] = useState({}); // 대화별 검색 결과
-  
+
   // 섹션별 매핑 정보 상태 추가
   const [sectionMappings, setSectionMappings] = useState({});
 
@@ -57,21 +67,48 @@ export default function Home() {
     const savedConversations = localStorage.getItem("chatConversations");
     if (savedConversations) {
       try {
-        setConversations(JSON.parse(savedConversations));
+        const parsedConversations = JSON.parse(savedConversations);
+        setConversations(parsedConversations);
+
+        // ✅ 현재 대화가 있으면 검색 결과도 복원
+        if (currentConversation.length > 0) {
+          const restoredSearchResults = [];
+          currentConversation.forEach(message => {
+            if (message.searchResults && Array.isArray(message.searchResults)) {
+              message.searchResults.forEach(result => {
+                restoredSearchResults.push({
+                  ...result,
+                  messageId: String(message.id)
+                });
+              });
+            }
+          });
+          if (restoredSearchResults.length > 0) {
+            setCurrentSearchResultsDebug(restoredSearchResults);
+            console.log(`페이지 로드 시 검색 결과 복원: ${restoredSearchResults.length}개`);
+          }
+        }
       } catch (error) {
         console.error("대화 히스토리 로드 오류:", error);
         setConversations([]);
       }
     }
 
-    // 검색 결과도 로컬 스토리지에서 로드
-    const savedSearchResults = localStorage.getItem("currentSearchResults");
-    if (savedSearchResults) {
+    // 🚫 검색 결과 로컬 스토리지 복원 제거 - 세션별 관리로 변경
+    // 검색 결과는 각 세션마다 독립적으로 관리되므로 전역 복원 불필요
+    console.log("검색 결과 전역 복원 건너뜀 - 세션별 관리");
+
+    // ✅ 페이지 로드 시 localStorage에서 검색 결과 복원
+    const savedCurrentSearchResults = localStorage.getItem("currentSearchResults");
+    if (savedCurrentSearchResults) {
       try {
-        const searchResults = JSON.parse(savedSearchResults);
-        setCurrentSearchResults(searchResults);
+        const parsedSearchResults = JSON.parse(savedCurrentSearchResults);
+        if (Array.isArray(parsedSearchResults) && parsedSearchResults.length > 0) {
+          setCurrentSearchResultsDebug(parsedSearchResults);
+          console.log(`페이지 로드 시 localStorage에서 검색 결과 복원: ${parsedSearchResults.length}개`);
+        }
       } catch (error) {
-        console.error("검색 결과 로드 오류:", error);
+        console.error("검색 결과 복원 오류:", error);
       }
     }
 
@@ -81,6 +118,33 @@ export default function Home() {
         setSearchResultsVisible(JSON.parse(savedSearchVisible));
       } catch (error) {
         console.error("검색 결과 표시 상태 로드 오류:", error);
+      }
+    }
+
+    // conversationSearchResults 로드
+    const savedConversationSearchResults = localStorage.getItem("conversationSearchResults");
+    if (savedConversationSearchResults) {
+      try {
+        setConversationSearchResults(JSON.parse(savedConversationSearchResults));
+        console.log("대화별 검색 결과 복원 완료");
+      } catch (error) {
+        console.error("대화별 검색 결과 로드 오류:", error);
+      }
+    }
+
+    // 스트리밍 중에 저장된 대화 복원
+    const savedStreamingConversation = localStorage.getItem("currentStreamingConversation");
+    if (savedStreamingConversation) {
+      try {
+        const { messages, isStreaming } = JSON.parse(savedStreamingConversation);
+        if (isStreaming && Array.isArray(messages) && messages.length > 0) {
+          setCurrentConversation(messages);
+          setIsStreaming(true);
+          console.log("스트리밍 중이던 대화 복원됨:", messages.length, "개 메시지");
+        }
+      } catch (error) {
+        console.error("스트리밍 대화 복원 오류:", error);
+        localStorage.removeItem("currentStreamingConversation");
       }
     }
   }, []);  // 대화 히스토리 저장
@@ -106,7 +170,7 @@ export default function Home() {
     setSourcesData(null);
     setSourcesPanelVisible(false);
     // 새 채팅 시작할 때만 검색 결과 초기화
-    setCurrentSearchResults([]);
+    setCurrentSearchResultsDebug([]);
     setSearchResultsVisible({});
     setConversationSearchResults({});
     // 로컬 스토리지에서도 제거
@@ -125,12 +189,27 @@ export default function Home() {
     setQuery("");
     setSourcesData(null);
     setSourcesPanelVisible(false);
-    // 기존 대화 로드할 때만 검색 결과 초기화
-    setCurrentSearchResults([]);
+
+    // ✅ 검색 결과 복원: 메시지에 저장된 searchResults를 currentSearchResults로 복원
+    const restoredSearchResults = [];
+    if (conv.messages) {
+      conv.messages.forEach(message => {
+        if (message.searchResults && Array.isArray(message.searchResults)) {
+          // 각 검색 결과에 messageId 추가
+          message.searchResults.forEach(result => {
+            restoredSearchResults.push({
+              ...result,
+              messageId: String(message.id)
+            });
+          });
+        }
+      });
+    }
+
+    setCurrentSearchResultsDebug(restoredSearchResults);
+    console.log(`대화 ${conv.id} 로드 완료 - 검색 결과 ${restoredSearchResults.length}개 복원`);
+
     setSearchResultsVisible({});
-    // 로컬 스토리지에서도 제거
-    localStorage.removeItem("currentSearchResults");
-    localStorage.removeItem("searchResultsVisible");
   };
 
   // 출처 패널 토글
@@ -188,7 +267,10 @@ export default function Home() {
     processedChartIds.current.clear();
     setStatusMessage("생각하는 중...");
     setSourcesData(null); // 새 요청 시 출처 데이터 초기화
-    // 검색 결과는 유지 - 새 쿼리에서도 이전 검색 박스 보존
+
+    // 🆕 Claude 스타일: 새로운 질문 시작할 때 현재 검색 결과 초기화 (세션별 관리)
+    setCurrentSearchResultsDebug([]);
+    console.log("🔄 새 질문 시작: 검색 결과 초기화 (세션별 관리)");
 
     // 빈 어시스턴트 메시지 추가 (스트리밍용)
     const assistantMessage = {
@@ -203,12 +285,27 @@ export default function Home() {
 
     setCurrentConversation((prev) => [...prev, assistantMessage]);
 
+    // 🔥 핵심 수정: 스트리밍 시작 즉시 현재 대화 상태를 localStorage에 저장
+    const tempConversationWithNewMessages = [...currentConversation, userMessage, assistantMessage];
+    const tempConversationData = {
+      id: conversationId || Date.now().toString(),
+      title: currentQuery.slice(0, 30) + (currentQuery.length > 30 ? "..." : ""),
+      messages: tempConversationWithNewMessages,
+      lastUpdated: new Date().toISOString(),
+      isStreaming: true, // 🆕 스트리밍 상태 표시
+    };
+
+    // 임시 대화 데이터를 localStorage에 저장 (스트리밍 중 복원용)
+    localStorage.setItem("currentStreamingConversation", JSON.stringify(tempConversationData));
+    console.log("🔄 스트리밍 중 대화 상태 저장:", tempConversationData.id);
+
     try {
       console.log("API_BASE_URL 값:", API_BASE_URL);
       console.log("API 요청 URL:", `${API_BASE_URL}/query/stream`);
       console.log("요청 데이터:", {
         query: currentQuery,
         session_id: conversationId || undefined,
+        message_id: assistantMessage.id, // 🆕 메시지 ID 추가
       });
 
       console.log("fetch 요청 시작!");
@@ -223,6 +320,7 @@ export default function Home() {
         body: JSON.stringify({
           query: currentQuery,
           session_id: conversationId || undefined,
+          message_id: String(assistantMessage.id), // 🆕 메시지 ID를 문자열로 변환
         }),
       }).catch(error => {
         console.error("fetch 요청 자체가 실패:", error);
@@ -329,13 +427,26 @@ export default function Home() {
                 case "search_results":
                   // Claude 스타일 실시간 검색 결과 표시
                   console.log("검색 결과 받음:", data); // 디버깅 로그
+
+                  // 🆕 중간 검색 여부 확인
+                  const isIntermediateSearch = data.is_intermediate_search || false;
+                  const sectionContext = data.section_context || null;
+
+                  if (isIntermediateSearch && sectionContext) {
+                    console.log("중간 검색 감지:", sectionContext);
+                  }
+
                   const searchResultData = {
                     step: data.step,
                     tool_name: data.tool_name || "unknown",
                     query: data.query || "",
                     results: data.results,
                     timestamp: new Date().toISOString(),
-                    conversationId: conversationId || data.session_id || Date.now().toString()
+                    conversationId: conversationId || data.session_id || Date.now().toString(),
+                    messageId: data.message_id || assistantMessage.id, // 🆕 메시지 ID 추가
+                    // 🆕 중간 검색 정보 추가
+                    isIntermediateSearch: isIntermediateSearch,
+                    sectionContext: sectionContext
                   };
                   console.log("처리된 검색 데이터:", searchResultData); // 디버깅 로그
 
@@ -352,10 +463,44 @@ export default function Home() {
                     return newResults;
                   });
 
-                  setCurrentSearchResults(prev => {
+                  // 🆕 모든 검색 결과를 currentSearchResults에 추가 (메시지별 필터링은 렌더링 시 처리)
+                  setCurrentSearchResultsDebug(prev => {
                     const newResults = [...prev, searchResultData];
-                    // 로컬 스토리지에 저장
+
+                    // 로컬 스토리지에는 모든 검색 결과 저장
                     localStorage.setItem("currentSearchResults", JSON.stringify(newResults));
+                    console.log(`🔍 검색 결과 추가 (총 ${newResults.length}개):`, searchResultData);
+
+                    // ✅ 즉시 메시지에 검색 결과 저장 (새로고침 대비)
+                    setCurrentConversation(prevMessages => {
+                      return prevMessages.map(msg => {
+                        if (msg.id === assistantMessage.id && msg.type === "assistant") {
+                          // 현재 메시지의 모든 검색 결과 수집 (디버깅 강화)
+                          const messageSearchResults = newResults.filter(result => {
+                            // 🔥 숫자와 문자열 모두 처리하도록 수정
+                            const resultMsgId = String(result.messageId);
+                            const assistantMsgId = String(assistantMessage.id);
+                            const match = resultMsgId === assistantMsgId;
+                            console.log(`🔍 검색 결과 매칭 확인:`, {
+                              resultMessageId: result.messageId,
+                              resultMsgIdString: resultMsgId,
+                              assistantMessageId: assistantMessage.id,
+                              assistantMsgIdString: assistantMsgId,
+                              match: match
+                            });
+                            return match;
+                          });
+                          console.log(`🔍 메시지 ${assistantMessage.id}에 검색 결과 저장: ${messageSearchResults.length}개`);
+                          console.log(`🔍 전체 검색 결과:`, newResults.map(r => ({ messageId: r.messageId, query: r.query })));
+                          return {
+                            ...msg,
+                            searchResults: messageSearchResults
+                          };
+                        }
+                        return msg;
+                      });
+                    });
+
                     return newResults;
                   });
 
@@ -431,11 +576,22 @@ export default function Home() {
                 case "section_mapping":
                   // 섹션별 매핑 정보 저장
                   console.log("섹션 매핑 정보 받음:", data);
+                  console.log("섹션 제목:", data.section_title);
+                  console.log("매핑 데이터:", data.section_to_global_mapping);
+                  console.log("데이터 타입:", typeof data.section_to_global_mapping);
+                  console.log("배열 여부:", Array.isArray(data.section_to_global_mapping));
+
                   const mappingKey = `${conversationId || data.session_id || Date.now()}-${data.section_title}`;
-                  setSectionMappings(prev => ({
-                    ...prev,
-                    [mappingKey]: data.section_to_global_mapping
-                  }));
+                  console.log("생성된 매핑 키:", mappingKey);
+
+                  setSectionMappings(prev => {
+                    const newMappings = {
+                      ...prev,
+                      [mappingKey]: data.section_to_global_mapping
+                    };
+                    console.log("업데이트된 전체 매핑:", newMappings);
+                    return newMappings;
+                  });
                   break;
 
                 case "section_start":
@@ -528,37 +684,28 @@ export default function Home() {
 
                 case "final_complete":
                   setStatusMessage("");
-                  // 스트리밍 완료 - 최종 메시지 업데이트 (출처 정보 보존)
+                  // 스트리밍 완료 - 최종 메시지 업데이트 (검색 결과는 이미 실시간으로 저장됨)
                   setCurrentConversation((prev) => {
-                    const currentConvId = conversationId || data.session_id || Date.now().toString();
-
-                    // 검색 결과는 currentSearchResults를 우선 사용 (스트리밍 중 수집된 것)
-                    // conversationSearchResults는 백업용
-                    let messageSearchResults = [];
-                    if (currentSearchResults && currentSearchResults.length > 0) {
-                      messageSearchResults = [...currentSearchResults];
-                    } else if (conversationSearchResults[currentConvId] && conversationSearchResults[currentConvId].length > 0) {
-                      messageSearchResults = [...conversationSearchResults[currentConvId]];
-                    }
-
-                    console.log("final_complete - messageSearchResults:", messageSearchResults); // 디버깅 로그
-                    console.log("final_complete - currentSearchResults:", currentSearchResults); // 디버깅 로그
-                    console.log("final_complete - conversationSearchResults:", conversationSearchResults); // 디버깅 로그
-
                     const newConversation = prev.map((msg) =>
                       msg.id === assistantMessage.id
                         ? {
                             ...msg,
-                            // content는 이미 실시간으로 업데이트되었으므로 그대로 유지
+                            // 기존 searchResults 보존하면서 다른 속성들만 업데이트
                             charts: finalCharts,
                             isStreaming: false,
                             sources: finalSources, // 최종 출처 정보 저장
-                            searchResults: messageSearchResults, // 해당 메시지의 검색 결과 저장
                           }
                         : msg
                     );
 
-                    console.log("final_complete - 업데이트된 메시지:", newConversation.find(m => m.id === assistantMessage.id)); // 디버깅 로그
+                    // 디버깅: final_complete 후 searchResults 확인
+                    const updatedMessage = newConversation.find(m => m.id === assistantMessage.id);
+                    console.log("final_complete - 최종 메시지 상태:", {
+                      messageId: assistantMessage.id,
+                      hasSearchResults: !!updatedMessage?.searchResults,
+                      searchResultsLength: updatedMessage?.searchResults?.length || 0,
+                      isStreaming: updatedMessage?.isStreaming
+                    });
 
                     // 대화 히스토리 업데이트
                     const conversationData = {
@@ -576,14 +723,13 @@ export default function Home() {
                     updatedConversations.unshift(conversationData);
                     saveConversations(updatedConversations.slice(0, 50));
 
+                    // 스트리밍 완료 후 임시 저장된 대화 정리
+                    localStorage.removeItem('currentStreamingConversation');
+
                     return newConversation;
                   });
 
-                  // 🔧 검색 결과 초기화를 짧은 지연 후 실행하여 렌더링 완료를 기다림
-                  setTimeout(() => {
-                    setCurrentSearchResults([]);
-                    console.log("검색 결과 초기화 완료 - 메시지에 저장된 검색 결과는 유지됨");
-                  }, 100);
+                  console.log("검색 결과 유지됨 - Claude 스타일 지속성 적용");
 
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
@@ -592,6 +738,8 @@ export default function Home() {
                 case "error":
                   setStatusMessage(`오류: ${data.message}`);
                   setIsStreaming(false);
+                  // 에러 발생 시 임시 저장된 대화 정리
+                  localStorage.removeItem('currentStreamingConversation');
                   return;
 
                 case "result":
@@ -617,6 +765,8 @@ export default function Home() {
       console.error("========================");
       setStatusMessage(`오류: ${error.message}`);
       setIsStreaming(false);
+      // API 오류 발생 시 임시 저장된 대화 정리
+      localStorage.removeItem('currentStreamingConversation');
     }
   };
 
@@ -705,16 +855,53 @@ export default function Home() {
 
       // ✅ 수정: [SOURCE:번호] 형식이 있는 경우 SourceRenderer 사용
       if (part.includes('[SOURCE:')) {
-        // 현재 메시지의 섹션 매핑 정보 찾기 (현재는 간단히 모든 매핑 전달)
-        const currentMappings = Object.values(sectionMappings).flat();
-        
+        // 🔥 핵심 수정: 현재 텍스트 부분에서 섹션 제목 추출하여 정확한 매핑 찾기
+        let currentSectionMapping = [];
+
+        // 1. 현재 part에서 가장 가까운 섹션 헤더 찾기 (## 제목)
+        const content = message.content || "";
+        const partIndex = content.indexOf(part);
+        let nearestSectionTitle = "";
+
+        if (partIndex !== -1) {
+          // 현재 part 이전의 텍스트에서 가장 마지막 ## 헤더 찾기
+          const beforePart = content.substring(0, partIndex);
+          const sectionHeaders = beforePart.match(/## (.+)/g);
+          if (sectionHeaders && sectionHeaders.length > 0) {
+            const lastHeader = sectionHeaders[sectionHeaders.length - 1];
+            nearestSectionTitle = lastHeader.replace(/^## /, '').trim();
+          }
+        }
+
+        // 2. 섹션 제목으로 매핑 정보 찾기
+        if (nearestSectionTitle) {
+          for (const [mappingKey, mapping] of Object.entries(sectionMappings)) {
+            // mappingKey 형태: "conversationId-섹션제목"
+            if (mappingKey.includes(nearestSectionTitle)) {
+              currentSectionMapping = mapping;
+              console.log(`정확한 섹션 매핑 찾음: ${nearestSectionTitle} -> ${JSON.stringify(mapping)}`);
+              break;
+            }
+          }
+        }
+
+        // 3. 매핑을 찾지 못한 경우 기본값 사용
+        if (currentSectionMapping.length === 0) {
+          // 가장 최근 매핑 사용 (fallback)
+          const mappingValues = Object.values(sectionMappings);
+          if (mappingValues.length > 0) {
+            currentSectionMapping = mappingValues[mappingValues.length - 1];
+            console.log(`기본 매핑 사용: ${JSON.stringify(currentSectionMapping)}`);
+          }
+        }
+
         return (
           <SourceRenderer
             key={`source-${index}`}
             content={part}
             sources={sources} // 실시간 sources 전달
             isStreaming={message.isStreaming} // 스트리밍 상태도 전달
-            sectionMappings={currentMappings} // 매핑 정보 전달
+            sectionMappings={currentSectionMapping} // 🔥 정확한 섹션 매핑 전달
           />
         );
       }
@@ -751,7 +938,7 @@ export default function Home() {
       </div>
     );
   };
-  
+
   // textarea 자동 높이 조절
   const adjustTextareaHeight = useCallback(() => {
     if (textareaRef.current) {
@@ -896,7 +1083,7 @@ export default function Home() {
                         <div className="claude-search-results">
                           {console.log("렌더링 중인 완료된 메시지 검색 결과:", message.searchResults)} {/* 디버깅 로그 */}
                           {message.searchResults.map((searchData, index) => (
-                            <div key={`search-${searchData.step}-${index}`} className="search-result-section">
+                            <div key={`search-${searchData.step}-${index}`} className={`search-result-section ${searchData.isIntermediateSearch ? 'intermediate-search' : ''}`}>
                               <div
                                 className="search-result-header"
                                 onClick={() => setSearchResultsVisible(prev => {
@@ -910,12 +1097,26 @@ export default function Home() {
                               >
                                 <div className="search-info">
                                   <span className="search-tool">{searchData.tool_name}</span>
+                                  {/* 🆕 중간 검색 표시 */}
+                                  {searchData.isIntermediateSearch && searchData.sectionContext && (
+                                    <span className="intermediate-badge">
+                                      📊 {searchData.sectionContext.section_title}
+                                    </span>
+                                  )}
                                   {searchData.query && (
                                     <span className="search-query">
-                                      "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
+                                      "{searchResultsVisible[`${message.id}-${searchData.step}-${index}`]
+                                        ? searchData.query
+                                        : (searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query)}"
                                     </span>
                                   )}
                                   <span className="result-count">{searchData.results.length}개 결과</span>
+                                  {/* 🆕 중간 검색 이유 표시 */}
+                                  {searchData.isIntermediateSearch && searchData.sectionContext && (
+                                    <span className="search-reason">
+                                      {searchData.sectionContext.search_reason}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="toggle-icon">
                                   {searchResultsVisible[`${message.id}-${searchData.step}-${index}`] ? '▼' : '▶'}
@@ -939,8 +1140,8 @@ export default function Home() {
                                         </div>
                                       )}
                                       <div className="result-meta">
-                                        <span>관련성: {(result.score * 100).toFixed(0)}%</span>
-                                        <span>타입: {result.document_type}</span>
+                                        <span>관련성: {((result.score || result.relevance_score || 0) * 100).toFixed(0)}%</span>
+                                        <span>타입: {result.document_type || result.type || 'unknown'}</span>
                                       </div>
                                     </div>
                                   ))}
@@ -951,11 +1152,11 @@ export default function Home() {
                         </div>
                       )}
 
-                      {/* 스트리밍 중인 어시스턴트 메시지에서만 실시간 검색 결과 표시 */}
+                      {/* 🆕 현재 스트리밍 중인 메시지에서만 실시간 검색 결과 표시 */}
                       {message.type === "assistant" && message.isStreaming && isStreaming && currentSearchResults.length > 0 && (
                         <div className="claude-search-results">
                           {currentSearchResults.map((searchData, index) => (
-                            <div key={`search-${searchData.step}-${index}`} className="search-result-section">
+                            <div key={`search-${searchData.step}-${index}`} className={`search-result-section ${searchData.isIntermediateSearch ? 'intermediate-search' : ''}`}>
                               <div
                                 className="search-result-header"
                                 onClick={() => setSearchResultsVisible(prev => {
@@ -969,12 +1170,26 @@ export default function Home() {
                               >
                                 <div className="search-info">
                                   <span className="search-tool">{searchData.tool_name}</span>
+                                  {/* 🆕 중간 검색 표시 */}
+                                  {searchData.isIntermediateSearch && searchData.sectionContext && (
+                                    <span className="intermediate-badge">
+                                      📊 {searchData.sectionContext.section_title}
+                                    </span>
+                                  )}
                                   {searchData.query && (
                                     <span className="search-query">
-                                      "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
+                                      "{searchResultsVisible[`${message.id}-${searchData.step}-${index}`]
+                                        ? searchData.query
+                                        : (searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query)}"
                                     </span>
                                   )}
                                   <span className="result-count">{searchData.results.length}개 결과</span>
+                                  {/* 🆕 중간 검색 이유 표시 */}
+                                  {searchData.isIntermediateSearch && searchData.sectionContext && (
+                                    <span className="search-reason">
+                                      {searchData.sectionContext.search_reason}
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="toggle-icon">
                                   {searchResultsVisible[`current-${searchData.step}-${index}`] ? '▼' : '▶'}
@@ -998,8 +1213,8 @@ export default function Home() {
                                         </div>
                                       )}
                                       <div className="result-meta">
-                                        <span>관련성: {(result.score * 100).toFixed(0)}%</span>
-                                        <span>타입: {result.document_type}</span>
+                                        <span>관련성: {((result.score || result.relevance_score || 0) * 100).toFixed(0)}%</span>
+                                        <span>타입: {result.document_type || result.type || 'unknown'}</span>
                                       </div>
                                     </div>
                                   ))}
