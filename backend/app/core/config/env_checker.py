@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
 
 def check_api_keys():
@@ -11,6 +10,7 @@ def check_api_keys():
     """
     print("\n>> API 키 환경변수 체크 시작")
     print("=" * 50)
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
     required_keys = ["OPENAI_API_KEY", "SERPER_API_KEY", "LANGSMITH_API_KEY", "GOOGLE_API_KEY", "COHERE_API_KEY"]
 

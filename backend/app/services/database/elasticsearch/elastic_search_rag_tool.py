@@ -67,7 +67,7 @@ class MultiIndexRAGSearchEngine:
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
         )
         # SentenceTransformer 안전한 초기화 (meta 장치 문제 완전 회피)
-        
+
         # if not hf_model:
         #     try:
         #         print(">> SentenceTransformer 모델 로드 시작...")
@@ -93,7 +93,7 @@ class MultiIndexRAGSearchEngine:
         #             self.hf_model = None
         # else:
         self.hf_model = hf_model
-            
+
         self.TEXT_INDEX = "bge_text"
         self.TABLE_INDEX = "bge_table"
         self.config = config
@@ -379,29 +379,26 @@ class MultiIndexRAGSearchEngine:
             for hit in hits:
                 source = hit["_source"]
                 metadata = source.get("meta_data", {})
-                
+
                 # 문서 제목/출처 정보 추출 개선
                 doc_title = source.get("name", "")
                 if not doc_title and metadata:
                     doc_title = metadata.get("document_title", metadata.get("file_name", metadata.get("title", f"Document {len(results)+1}")))
-                
-                # 출처 URL 정보 설정
-                source_url = doc_title
-                if metadata.get("url"):
-                    source_url = metadata["url"]
-                elif metadata.get("source"):
-                    source_url = metadata["source"] 
-                elif metadata.get("file_name"):
-                    source_url = f"문서: {metadata['file_name']}"
-                
+
+                # document_link와 page_number 추출
+                doc_link = metadata.get("document_link", "")
+                page_number = metadata.get("page_number", [])
+
                 results.append({
+
                     "score": hit["_score"],
                     "page_content": source.get("page_content", ""),
                     "name": doc_title,
                     "meta_data": metadata,
                     "search_type": "dense",
                     "_index": index,
-                    "source_url": source_url  # 출처 정보 추가
+                    "doc_link": doc_link,  # 문서 링크 추가
+                    "page_number": page_number  # 페이지 번호 추가
                 })
         except Exception as e:
             print(f"Dense 검색 오류({index}): {e}")
@@ -418,21 +415,16 @@ class MultiIndexRAGSearchEngine:
             for hit in hits:
                 source = hit["_source"]
                 metadata = source.get("meta_data", {})
-                
+
                 # 문서 제목/출처 정보 추출 개선
                 doc_title = source.get("name", "")
                 if not doc_title and metadata:
                     doc_title = metadata.get("document_title", metadata.get("file_name", metadata.get("title", f"Document {len(results)+1}")))
-                
-                # 출처 URL 정보 설정
-                source_url = doc_title
-                if metadata.get("url"):
-                    source_url = metadata["url"]
-                elif metadata.get("source"):
-                    source_url = metadata["source"] 
-                elif metadata.get("file_name"):
-                    source_url = f"문서: {metadata['file_name']}"
-                
+
+                # document_link와 page_number 추출
+                doc_link = metadata.get("document_link", "")
+                page_number = metadata.get("page_number", [])
+
                 results.append({
                     "score": hit["_score"],
                     "page_content": source.get("page_content", ""),
@@ -440,7 +432,8 @@ class MultiIndexRAGSearchEngine:
                     "meta_data": metadata,
                     "search_type": "sparse",
                     "_index": index,
-                    "source_url": source_url  # 출처 정보 추가
+                    "doc_link": doc_link,  # 문서 링크 추가
+                    "page_number": page_number  # 페이지 번호 추가
                 })
         except Exception as e:
             print(f"Sparse 검색 오류({index}): {e}")

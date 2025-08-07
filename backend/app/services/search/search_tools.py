@@ -288,22 +288,6 @@ def vector_db_search(query: str, top_k = 50) -> List:
 
         # Google API Key 사용 (OpenAI가 아님)
         google_api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-        if not google_api_key:
-            print("- Google API Key가 없어 Mock DB로 대체")
-            # Mock DB 사용
-            mock_db = create_mock_vector_db()
-            results = mock_db.similarity_search(query, k=top_k)
-            formatted_results = []
-            for i, doc in enumerate(results):
-                formatted_results.append({
-                    "content": doc.page_content,
-                    "title": f"Mock Document {i+1}",
-                    "document_id": f"mock_{i+1}",
-                    "similarity_score": 0.8 - (i * 0.1),
-                    "metadata": doc.metadata,
-                    "source_url": f"Mock Document {i+1}"  # Mock 출처 정보 추가
-                })
-            return formatted_results
 
         search_engine = MultiIndexRAGSearchEngine(google_api_key=google_api_key, config=config)
 
@@ -325,13 +309,11 @@ def vector_db_search(query: str, top_k = 50) -> List:
             content = doc.get('page_content', doc.get('content', ''))
             metadata = doc.get('meta_data', doc.get('metadata', {}))
             similarity = doc.get('score', doc.get('similarity_score', 0.7))
-
+            relavance = doc.get('relevance_score', similarity)  # relevance_score가 없으면 similarity로 대체
+            rerank_score = doc.get('rerank_score', 0.0)
             # 출처 정보 더 명확히 포함
-            source_info = metadata.get('source', 'Vector DB Document')
-            if 'url' in metadata:
-                source_info = metadata['url']
-            elif 'file_name' in metadata:
-                source_info = f"문서: {metadata['file_name']}"
+            source_info = metadata.get('document_link', 'Vector DB')
+            page_number = metadata.get('page_number', 'N/A')
 
             formatted_result = {
                 "content": content,
@@ -339,7 +321,10 @@ def vector_db_search(query: str, top_k = 50) -> List:
                 "document_id": f"doc_{i+1}",
                 "similarity_score": similarity,
                 "metadata": metadata,
-                "source_url": source_info  # 출처 정보 추가
+                "source_url": source_info,  # 출처 정보 추가
+                "page_number": page_number,  # 페이지 번호 추가
+                "relevance_score": relavance,
+                "score": rerank_score
             }
             processed_docs.append(formatted_result)
 

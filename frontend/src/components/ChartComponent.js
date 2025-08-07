@@ -417,6 +417,8 @@ const chartComponents = {
 };
 
 // 고급 옵션 설정
+// ChartComponent.js에서 getAdvancedOptions 함수 수정
+
 const getAdvancedOptions = (chartType, chartConfig) => {
   const baseOptions = {
     responsive: true,
@@ -452,56 +454,7 @@ const getAdvancedOptions = (chartType, chartConfig) => {
             family: "'Inter', sans-serif",
           },
           color: "#374151",
-          generateLabels: function (chart) {
-            let original;
-            try {
-              const chartType = chart.config.type;
-              const overrides = ChartJS.overrides[chartType];
-              if (
-                overrides &&
-                overrides.plugins &&
-                overrides.plugins.legend &&
-                overrides.plugins.legend.labels
-              ) {
-                original = overrides.plugins.legend.labels.generateLabels;
-              }
-            } catch (error) {
-              console.warn("generateLabels 함수를 찾을 수 없습니다:", error);
-            }
-
-
-            if (!original || typeof original !== "function") {
-              original = ChartJS.defaults.plugins.legend.labels.generateLabels;
-            }
-
-            const labels = original.call(this, chart);
-
-
-            if (
-              [
-                "pie",
-                "doughnut",
-                "donut",
-                "gauge",
-                "polarArea",
-                "polar",
-              ].includes(chartType)
-            ) {
-              labels.forEach((label, index) => {
-                if (
-                  chart.data.datasets[0] &&
-                  chart.data.datasets[0].data[index] !== undefined
-                ) {
-                  const value = chart.data.datasets[0].data[index];
-                  label.text = `${label.text}: ${value}${
-                    chartConfig.unit || ""
-                  }`;
-                }
-              });
-            }
-
-            return labels;
-          },
+          // 기본 라벨 생성 함수 사용
         },
       },
       tooltip: {
@@ -522,41 +475,7 @@ const getAdvancedOptions = (chartType, chartConfig) => {
           size: 13,
           weight: "400",
         },
-        filter: function (tooltipItem, data) {
-          return tooltipItem.parsed !== null;
-        },
-        callbacks: {
-          title: function (tooltipItems) {
-            return tooltipItems[0].label || "";
-          },
-          label: function (context) {
-            let label = context.dataset.label || "";
-            if (label) {
-              label += ": ";
-            }
-            label += new Intl.NumberFormat("ko-KR").format(
-              context.parsed.y || context.parsed
-            );
-            if (chartConfig.unit) {
-              label += chartConfig.unit;
-            }
-            return label;
-          },
-          afterLabel: function (context) {
-            if (
-              chartType === "pie" ||
-              chartType === "doughnut" ||
-              chartType === "donut" ||
-              chartType === "gauge"
-            ) {
-              const dataset = context.dataset;
-              const total = dataset.data.reduce((a, b) => a + b, 0);
-              const percentage = ((context.parsed / total) * 100).toFixed(1);
-              return `비율: ${percentage}%`;
-            }
-            return "";
-          },
-        },
+        // 기본 툴팁 사용 (콜백 함수 제거)
       },
     },
     interaction: {
@@ -564,530 +483,14 @@ const getAdvancedOptions = (chartType, chartConfig) => {
       mode: "index",
     },
     hover: {
-      animationDuration: 100, // 300ms -> 100ms로 단축
+      animationDuration: 100,
     },
   };
 
-  // 차트 타입별 특수 옵션
-  switch (chartType) {
-    case "line":
-    case "area":
-    case "timeseries":
-    case "timeline":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-              drawBorder: false,
-              tickColor: "transparent",
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              padding: 12,
-              maxRotation: 0,
-            },
-            border: {
-              display: false,
-            },
-          },
-          y: {
-            beginAtZero: true,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-              drawBorder: false,
-              tickColor: "transparent",
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              padding: 12,
-              callback: function (value) {
-                return new Intl.NumberFormat("ko-KR").format(value);
-              },
-            },
-            border: {
-              display: false,
-            },
-          },
-        },
-        elements: {
-          line: {
-            tension: 0.4,
-            borderWidth: 3,
-            borderCapStyle: "round",
-            borderJoinStyle: "round",
-          },
-          point: {
-            radius: 6,
-            hoverRadius: 8,
-            borderWidth: 3,
-            backgroundColor: "#FFFFFF",
-            hoverBorderWidth: 4,
-          },
-        },
-      };
+  // 나머지 차트 타입별 옵션들은 그대로...
 
-    case "bar":
-    case "column":
-    case "horizontalBar":
-    case "stacked":
-    case "funnel":
-    case "waterfall":
-    case "gantt":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            grid: {
-              display: chartType === "horizontalBar" || chartType === "gantt",
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              padding: 12,
-              maxRotation:
-                chartType === "horizontalBar" || chartType === "gantt" ? 0 : 45,
-            },
-            border: {
-              display: false,
-            },
-          },
-          y: {
-            beginAtZero: true,
-            grid: {
-              display: chartType !== "horizontalBar" && chartType !== "gantt",
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-              drawBorder: false,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              padding: 12,
-              callback: function (value) {
-                return new Intl.NumberFormat("ko-KR").format(value);
-              },
-            },
-            border: {
-              display: false,
-            },
-          },
-        },
-        indexAxis:
-          chartType === "horizontalBar" || chartType === "gantt" ? "y" : "x",
-        elements: {
-          bar: {
-            borderRadius: {
-              topLeft: 8,
-              topRight: 8,
-              bottomLeft: 0,
-              bottomRight: 0,
-            },
-            borderSkipped: false,
-            borderWidth: 0,
-          },
-        },
-      };
-
-    case "pie":
-    case "doughnut":
-    case "donut":
-    case "gauge":
-      return {
-        ...baseOptions,
-        cutout:
-          chartType === "doughnut" ||
-          chartType === "donut" ||
-          chartType === "gauge"
-            ? "65%"
-            : 0,
-        circumference: chartType === "gauge" ? 180 : 360,
-        rotation: chartType === "gauge" ? 270 : 0,
-        plugins: {
-          ...baseOptions.plugins,
-          legend: {
-            ...baseOptions.plugins.legend,
-            position: "right",
-            labels: {
-              ...baseOptions.plugins.legend.labels,
-              padding: 25,
-              boxWidth: 15,
-              boxHeight: 15,
-            },
-          },
-        },
-        elements: {
-          arc: {
-            borderWidth: 4,
-            borderColor: "#FFFFFF",
-            hoverBorderWidth: 6,
-            borderAlign: "inner",
-          },
-        },
-      };
-
-    case "radar":
-      return {
-        ...baseOptions,
-        scales: {
-          r: {
-            beginAtZero: true,
-            grid: {
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            pointLabels: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#374151",
-            },
-            ticks: {
-              display: false,
-            },
-          },
-        },
-        elements: {
-          line: {
-            borderWidth: 3,
-            tension: 0.1,
-          },
-          point: {
-            radius: 4,
-            hoverRadius: 6,
-            borderWidth: 2,
-          },
-        },
-      };
-
-    case "scatter":
-    case "bubble":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            type: "linear",
-            position: "bottom",
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-          y: {
-            beginAtZero: true,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-        elements: {
-          point: {
-            radius: 6,
-            hoverRadius: 8,
-            borderWidth: 2,
-          },
-        },
-      };
-
-    case "polarArea":
-    case "polar":
-      return {
-        ...baseOptions,
-        scales: {
-          r: {
-            beginAtZero: true,
-            grid: {
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            pointLabels: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#374151",
-            },
-          },
-        },
-      };
-
-    case "mixed":
-    case "combo":
-    case "multiline":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-              drawBorder: false,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              padding: 12,
-            },
-          },
-          y: {
-            type: "linear",
-            display: true,
-            position: "left",
-            beginAtZero: true,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-          y1: {
-            type: "linear",
-            display: true,
-            position: "right",
-            beginAtZero: true,
-            grid: {
-              drawOnChartArea: false,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-      };
-
-    case "stackedarea":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-          y: {
-            stacked: true,
-            beginAtZero: true,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-        interaction: {
-          mode: "index",
-          intersect: false,
-        },
-      };
-
-    case "groupedbar":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            grid: {
-              display: false,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-              maxRotation: 45,
-            },
-          },
-          y: {
-            beginAtZero: true,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-              lineWidth: 1,
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-        plugins: {
-          ...baseOptions.plugins,
-          legend: {
-            ...baseOptions.plugins.legend,
-            position: "top",
-          },
-        },
-      };
-
-    case "heatmap":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            type: "category",
-            grid: {
-              display: false,
-            },
-            ticks: {
-              font: {
-                size: 11,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-          y: {
-            type: "category",
-            grid: {
-              display: false,
-            },
-            ticks: {
-              font: {
-                size: 11,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-        elements: {
-          bar: {
-            borderWidth: 1,
-            borderColor: "#FFFFFF",
-          },
-        },
-      };
-
-    case "candlestick":
-      return {
-        ...baseOptions,
-        scales: {
-          x: {
-            type: "time",
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-          y: {
-            beginAtZero: false,
-            grid: {
-              display: true,
-              color: "rgba(156, 163, 175, 0.3)",
-            },
-            ticks: {
-              font: {
-                size: 12,
-                weight: "500",
-                family: "'Inter', sans-serif",
-              },
-              color: "#6B7280",
-            },
-          },
-        },
-      };
-
-    default:
-      return baseOptions;
-  }
+  return baseOptions;
 };
-
 
 const preprocessAdvancedChartData = (chartType, data, chartConfig) => {
   if (!data || typeof data !== "object") {
@@ -1631,45 +1034,112 @@ export function ChartComponent({ chartConfig }) {
 
 
   const advancedOptions = getAdvancedOptions(chartType, chartConfig);
+  
+  // 백엔드에서 오는 차트 옵션에서 문제가 되는 콜백 함수들 제거
+  const cleanChartOptions = JSON.parse(JSON.stringify(chartConfig.options || {}));
+  
+  // 콜백 함수들을 안전하게 제거
+  const removeCallbacks = (obj) => {
+    if (typeof obj !== 'object' || obj === null) return obj;
+    
+    for (const key in obj) {
+      if (obj.hasOwnProperty(key)) {
+        if (key === 'callbacks' || key === 'generateLabels') {
+          delete obj[key];
+        } else if (typeof obj[key] === 'string' && obj[key].includes('function')) {
+          delete obj[key];
+        } else if (typeof obj[key] === 'object') {
+          removeCallbacks(obj[key]);
+        }
+      }
+    }
+    return obj;
+  };
+  
+  removeCallbacks(cleanChartOptions);
+  
   const finalOptions = {
     ...advancedOptions,
-    ...chartConfig.options,
+    ...cleanChartOptions,
     plugins: {
       ...advancedOptions.plugins,
-      ...chartConfig.options?.plugins,
+      ...cleanChartOptions.plugins,
     },
     scales: {
       ...advancedOptions.scales,
-      ...chartConfig.options?.scales,
+      ...cleanChartOptions.scales,
     },
   };
 
   console.log("최종 처리된 데이터:", processedData);
 
-  return (
-    <div
-      className="enhanced-chart-container"
-      style={{
-        position: "relative",
-        height: "500px",
-        width: "100%",
-        padding: "24px",
-        backgroundColor: "#FFFFFF",
-        borderRadius: "16px",
-        boxShadow:
-          "0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
-        border: "1px solid rgba(229, 231, 235, 0.8)",
-        marginBottom: "32px",
-        backdropFilter: "blur(8px)",
-        fontFamily:
-          "'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif",
-      }}
-    >
-      <ChartTypeComponent
-        options={finalOptions}
-        data={processedData}
-        key={chartId}
-      />
-    </div>
-  );
+  // 차트 렌더링을 try-catch로 감싸서 오류 발생 시 fallback 표시
+  try {
+    return (
+      <div
+        className="enhanced-chart-container"
+        style={{
+          position: "relative",
+          height: "500px",
+          width: "100%",
+          padding: "24px",
+          backgroundColor: "#FFFFFF",
+          borderRadius: "16px",
+          boxShadow:
+            "0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
+          border: "1px solid rgba(229, 231, 235, 0.8)",
+          marginBottom: "32px",
+          backdropFilter: "blur(8px)",
+          fontFamily:
+            "'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif",
+        }}
+      >
+        <ChartTypeComponent
+          options={finalOptions}
+          data={processedData}
+          key={chartId}
+        />
+      </div>
+    );
+  } catch (renderError) {
+    console.error("차트 렌더링 오류:", renderError);
+    return (
+      <div
+        className="chart-error"
+        style={{
+          padding: "24px",
+          textAlign: "center",
+          color: "#DC2626",
+          border: "2px solid #FCA5A5",
+          borderRadius: "12px",
+          backgroundColor: "#FEF2F2",
+          fontFamily: "'Inter', sans-serif",
+          fontSize: "14px",
+          fontWeight: "500",
+        }}
+      >
+        차트 렌더링 중 오류가 발생했습니다.
+        <br />
+        <small style={{ color: "#7F1D1D", fontSize: "12px" }}>
+          {renderError.message}
+        </small>
+        <br />
+        <button 
+          onClick={() => window.location.reload()} 
+          style={{
+            marginTop: "10px",
+            padding: "8px 16px",
+            backgroundColor: "#DC2626",
+            color: "white",
+            border: "none",
+            borderRadius: "6px",
+            cursor: "pointer",
+            fontSize: "12px"
+          }}
+        >
+          페이지 새로고침
+        </button>
+      </div>
+    );
+  }
 }

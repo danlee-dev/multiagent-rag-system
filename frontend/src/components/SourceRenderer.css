@@ -1,0 +1,266 @@
+.source-renderer {
+  display: inline;
+  line-height: 1.6;
+  word-break: keep-all;
+}
+
+.source-container {
+  display: inline-block;
+  position: relative;
+  white-space: nowrap;
+}
+
+.source-button {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background-color: transparent;
+  color: #10a37f;
+  border: 1px solid #10a37f;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  margin: 0 2px;
+  vertical-align: super;
+  line-height: 18px;
+  text-align: center;
+  transition: all 0.2s ease;
+  position: relative;
+  top: -2px;
+}
+
+.source-button:hover {
+  background-color: #10a37f;
+  color: white;
+  transform: scale(1.1);
+  box-shadow: 0 2px 8px rgba(16, 163, 127, 0.3);
+}
+
+.source-tooltip {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  border: 1px solid #e5e7eb;
+  max-width: 320px;
+  min-width: 200px;
+  padding: 0;
+  font-size: 14px;
+  pointer-events: auto;
+}
+
+.source-tooltip::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 6px solid transparent;
+}
+
+/* 위쪽에 표시될 때 (기본) - 아래쪽 화살표 */
+.source-tooltip.show-above::after {
+  top: 100%;
+  border-top-color: white;
+}
+
+/* 아래쪽에 표시될 때 - 위쪽 화살표 */
+.source-tooltip.show-below::after {
+  bottom: 100%;
+  border-bottom-color: white;
+}
+
+.source-tooltip-header {
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.source-tooltip-header h4 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #111827;
+  line-height: 1.3;
+}
+
+.source-url {
+  font-size: 12px;
+  color: #6b7280;
+  font-weight: 400;
+}
+
+.source-tooltip-content {
+  padding: 8px 16px;
+  color: #374151;
+  font-size: 13px;
+  line-height: 1.4;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.source-tooltip-footer {
+  padding: 8px 16px 12px;
+  border-top: 1px solid #f3f4f6;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.source-link {
+  color: #10a37f;
+  text-decoration: none;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+}
+
+.source-link:hover {
+  background-color: rgba(16, 163, 127, 0.1);
+  text-decoration: none;
+}
+
+.source-type {
+  display: inline-block;
+  background-color: #f3f4f6;
+  color: #6b7280;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* 다크 모드 대응 */
+@media (prefers-color-scheme: dark) {
+  .source-button {
+    background-color: transparent;
+    color: #10a37f;
+    border: 1px solid #10a37f;
+  }
+
+  .source-button:hover {
+    background-color: #10a37f;
+    color: white;
+  }
+
+  .source-tooltip {
+    background: #1f2937;
+    border-color: #374151;
+    color: #f9fafb;
+  }
+
+  .source-tooltip.show-above::after {
+    border-top-color: #1f2937;
+  }
+
+  .source-tooltip.show-below::after {
+    border-bottom-color: #1f2937;
+  }
+
+  .source-tooltip-header {
+    border-bottom-color: #374151;
+  }
+
+  .source-tooltip-header h4 {
+    color: #f9fafb;
+  }
+
+  .source-url {
+    color: #9ca3af;
+  }
+
+  .source-tooltip-content {
+    color: #d1d5db;
+  }
+
+  .source-tooltip-footer {
+    border-top-color: #374151;
+  }
+
+  .source-type {
+    background-color: #374151;
+    color: #9ca3af;
+  }
+}
+
+/* 로딩 상태 버튼 - 기존 디자인과 일관성 유지 */
+.source-button.loading {
+  background: linear-gradient(90deg,
+    rgba(16, 163, 127, 0.1),
+    rgba(16, 163, 127, 0.3),
+    rgba(16, 163, 127, 0.1)
+  );
+  background-size: 200% 100%;
+  animation: sourceShimmer 2s infinite;
+  border: 1px solid rgba(16, 163, 127, 0.5);
+  color: rgba(16, 163, 127, 0.7);
+  cursor: default;
+}
+
+/* 데이터 없는 상태 - 비활성화 스타일 */
+.source-button.no-data {
+  background-color: transparent;
+  border: 1px solid #d1d5db;
+  color: #9ca3af;
+  cursor: default;
+}
+
+/* 로딩 애니메이션 */
+@keyframes sourceShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* 로딩/비활성 상태에서 호버 효과 비활성화 */
+.source-button.loading:hover,
+.source-button.no-data:hover {
+  transform: none;
+  box-shadow: none;
+  background-color: transparent;
+  scale: 1;
+}
+
+.source-button.loading:hover {
+  background: linear-gradient(90deg,
+    rgba(16, 163, 127, 0.1),
+    rgba(16, 163, 127, 0.3),
+    rgba(16, 163, 127, 0.1)
+  );
+  background-size: 200% 100%;
+  animation: sourceShimmer 2s infinite;
+  color: rgba(16, 163, 127, 0.7);
+}
+
+/* 다크 모드에서 로딩 상태 */
+@media (prefers-color-scheme: dark) {
+  .source-button.loading {
+    background: linear-gradient(90deg,
+      rgba(16, 163, 127, 0.15),
+      rgba(16, 163, 127, 0.35),
+      rgba(16, 163, 127, 0.15)
+    );
+    background-size: 200% 100%;
+    border: 1px solid rgba(16, 163, 127, 0.6);
+    color: rgba(16, 163, 127, 0.8);
+  }
+
+  .source-button.no-data {
+    background-color: transparent;
+    border: 1px solid #4b5563;
+    color: #6b7280;
+  }
+
+  .source-button.loading:hover {
+    background: linear-gradient(90deg,
+      rgba(16, 163, 127, 0.15),
+      rgba(16, 163, 127, 0.35),
+      rgba(16, 163, 127, 0.15)
+    );
+    background-size: 200% 100%;
+    color: rgba(16, 163, 127, 0.8);
+  }
+}

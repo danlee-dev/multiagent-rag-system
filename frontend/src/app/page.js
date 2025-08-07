@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import { ChartComponent } from "../components/ChartComponent";
 import SourcesPanel from "../components/SourcesPanel";
+import SourceRenderer from "../components/SourceRenderer";
 import "./globals.css";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -31,6 +32,9 @@ export default function Home() {
   const [currentSearchResults, setCurrentSearchResults] = useState([]);
   const [searchResultsVisible, setSearchResultsVisible] = useState({});
   const [conversationSearchResults, setConversationSearchResults] = useState({}); // 대화별 검색 결과
+  
+  // 섹션별 매핑 정보 상태 추가
+  const [sectionMappings, setSectionMappings] = useState({});
 
   // 스크롤 관리
   const messagesEndRef = useRef(null);
@@ -287,6 +291,17 @@ export default function Home() {
 
                 case "chart":
                   finalCharts.push(data.chart_data);
+                  // 차트가 생성되는 즉시 UI 업데이트
+                  setCurrentConversation((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessage.id
+                        ? {
+                            ...msg,
+                            charts: [...finalCharts],
+                          }
+                        : msg
+                    )
+                  );
                   break;
 
                 case "plan":
@@ -364,7 +379,7 @@ export default function Home() {
                       content: result.content_preview,
                       url: result.url,
                       source_type: result.source,
-                      relevance_score: result.relevance_score,
+                      score: result.score,
                       document_type: result.document_type
                     }))
                   };
@@ -372,47 +387,102 @@ export default function Home() {
                   setSourcesData(tempSources);
                   break;
 
-                case "section_start":
-                  finalContent += `\n\n## ${data.title}\n\n`;
+                case "section_header":
+                  // 섹션 헤더를 별도 배열로 관리하여 올바른 마크다운 형식 유지
+                  setCurrentConversation((prev) => {
+                    const updated = [...prev];
+                    if (updated.length > 0 && updated[updated.length - 1].id === assistantMessage.id) {
+                      const lastMessage = updated[updated.length - 1];
+                      // 섹션 헤더를 별도 배열로 관리
+                      if (!lastMessage.sectionHeaders) {
+                        lastMessage.sectionHeaders = [];
+                      }
+                      lastMessage.sectionHeaders.push({
+                        id: `header-${Date.now()}-${Math.random()}`,
+                        title: data.title,
+                        timestamp: Date.now()
+                      });
+                      // 현재 content에 임시로 헤더 추가 (렌더링에서 별도 처리할 예정)
+                      return updated.map((msg) =>
+                        msg.id === assistantMessage.id
+                          ? { ...msg, content: finalContent }
+                          : msg
+                      );
+                    }
+                    return updated;
+                  });
+                  break;
+
+                case "sources":
+                  // 실시간 출처 정보 업데이트 (즉시 버튼으로 전환)
+                  console.log("실시간 출처 데이터 받음:", data);
+                  setSourcesData(data);
+
+                  // 현재 스트리밍 중인 메시지에도 출처 정보 추가
                   setCurrentConversation((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantMessage.id
-                        ? { ...msg, content: finalContent }
+                        ? { ...msg, sources: data }
+                        : msg
+                    )
+                  );
+                  break;
+
+                case "section_mapping":
+                  // 섹션별 매핑 정보 저장
+                  console.log("섹션 매핑 정보 받음:", data);
+                  const mappingKey = `${conversationId || data.session_id || Date.now()}-${data.section_title}`;
+                  setSectionMappings(prev => ({
+                    ...prev,
+                    [mappingKey]: data.section_to_global_mapping
+                  }));
+                  break;
+
+                case "section_start":
+                  // 섹션 시작 시 적절한 마크다운 헤더와 간격 추가
+                  const sectionHeader = `\n\n## ${data.title}\n\n`;
+                  finalContent += sectionHeader;
+                  setCurrentConversation((prev) =>
+                    prev.map((msg) =>
+                      msg.id === assistantMessage.id
+                        ? {
+                            ...msg,
+                            content: (msg.content || "") + sectionHeader,
+                            isStreaming: true
+                          }
                         : msg
                     )
                   );
                   break;
 
                 case "content":
-                  // SimpleAnswerer의 스트리밍 답변 처리
+                  // 실시간 스트리밍: 청크를 즉시 기존 내용에 추가
                   finalContent += data.chunk;
                   setCurrentConversation((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantMessage.id
-                        ? { ...msg, content: finalContent }
+                        ? {
+                            ...msg,
+                            content: finalContent,
+                            isStreaming: true
+                          }
                         : msg
                     )
                   );
                   break;
 
-                case "content_chunk":
-                  // 최종 보고서 및 기타 컨텐츠 표시 (context integration 제외)
-                  finalContent += data.chunk;
-                  setCurrentConversation((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessage.id
-                        ? { ...msg, content: finalContent }
-                        : msg
-                    )
-                  );
-                  break;
 
                 case "section_end":
-                  finalContent += "\n\n";
+                  const sectionEnd = "\n\n";
+                  finalContent += sectionEnd;
                   setCurrentConversation((prev) =>
                     prev.map((msg) =>
                       msg.id === assistantMessage.id
-                        ? { ...msg, content: finalContent }
+                        ? {
+                            ...msg,
+                            content: (msg.content || "") + sectionEnd,
+                            isStreaming: true
+                          }
                         : msg
                     )
                   );
@@ -430,15 +500,17 @@ export default function Home() {
                     processedChartIds.current.add(chartId);
                     finalCharts.push(data.chart_data);
                     const chartIndex = processedChartIds.current.size - 1;
-                    finalContent += `\n\n[CHART-PLACEHOLDER-${chartIndex}]\n\n`;
+                    const chartPlaceholder = `\n\n[CHART-PLACEHOLDER-${chartIndex}]\n\n`;
+                    finalContent += chartPlaceholder;
 
                     setCurrentConversation((prev) =>
                       prev.map((msg) =>
                         msg.id === assistantMessage.id
                           ? {
                               ...msg,
-                              content: finalContent,
+                              content: (msg.content || "") + chartPlaceholder,
                               charts: [...finalCharts],
+                              isStreaming: true
                             }
                           : msg
                       )
@@ -459,13 +531,25 @@ export default function Home() {
                   // 스트리밍 완료 - 최종 메시지 업데이트 (출처 정보 보존)
                   setCurrentConversation((prev) => {
                     const currentConvId = conversationId || data.session_id || Date.now().toString();
-                    const messageSearchResults = conversationSearchResults[currentConvId] || currentSearchResults;
+
+                    // 검색 결과는 currentSearchResults를 우선 사용 (스트리밍 중 수집된 것)
+                    // conversationSearchResults는 백업용
+                    let messageSearchResults = [];
+                    if (currentSearchResults && currentSearchResults.length > 0) {
+                      messageSearchResults = [...currentSearchResults];
+                    } else if (conversationSearchResults[currentConvId] && conversationSearchResults[currentConvId].length > 0) {
+                      messageSearchResults = [...conversationSearchResults[currentConvId]];
+                    }
+
+                    console.log("final_complete - messageSearchResults:", messageSearchResults); // 디버깅 로그
+                    console.log("final_complete - currentSearchResults:", currentSearchResults); // 디버깅 로그
+                    console.log("final_complete - conversationSearchResults:", conversationSearchResults); // 디버깅 로그
 
                     const newConversation = prev.map((msg) =>
                       msg.id === assistantMessage.id
                         ? {
                             ...msg,
-                            content: finalContent,
+                            // content는 이미 실시간으로 업데이트되었으므로 그대로 유지
                             charts: finalCharts,
                             isStreaming: false,
                             sources: finalSources, // 최종 출처 정보 저장
@@ -473,6 +557,8 @@ export default function Home() {
                           }
                         : msg
                     );
+
+                    console.log("final_complete - 업데이트된 메시지:", newConversation.find(m => m.id === assistantMessage.id)); // 디버깅 로그
 
                     // 대화 히스토리 업데이트
                     const conversationData = {
@@ -493,8 +579,11 @@ export default function Home() {
                     return newConversation;
                   });
 
-                  // 현재 스트리밍용 검색 결과 초기화 (다음 질문을 위해)
-                  setCurrentSearchResults([]);
+                  // 🔧 검색 결과 초기화를 짧은 지연 후 실행하여 렌더링 완료를 기다림
+                  setTimeout(() => {
+                    setCurrentSearchResults([]);
+                    console.log("검색 결과 초기화 완료 - 메시지에 저장된 검색 결과는 유지됨");
+                  }, 100);
 
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
@@ -553,12 +642,38 @@ export default function Home() {
   };
 
   // 메시지 렌더링 (차트 포함)
+  // renderMessageContent 함수 수정
   const renderMessageContent = (message) => {
     const content = message.content || "";
     const charts = message.charts || [];
+    const sectionHeaders = message.sectionHeaders || [];
+
+    // ✅ 수정: 실시간 출처 데이터 우선 사용
+    let sources = [];
+    if (message.sources) {
+      // 완료된 메시지의 출처 사용
+      if (Array.isArray(message.sources)) {
+        sources = message.sources;
+      } else if (message.sources.sources && Array.isArray(message.sources.sources)) {
+        sources = message.sources.sources;
+      }
+    } else if (message.isStreaming && sourcesData && sourcesData.sources) {
+      // 🔥 스트리밍 중에는 전역 sourcesData 사용
+      sources = sourcesData.sources;
+    }
+
+    console.log("렌더링할 출처 정보:", sources); // 디버깅용
+
+    // 섹션 헤더들을 먼저 렌더링
+    const headerElements = sectionHeaders.map((header) => (
+      <div key={header.id} className="section-header">
+        <h2 className="section-title">{header.title}</h2>
+      </div>
+    ));
+
     const parts = content.split(/(\[CHART-PLACEHOLDER-\d+\])/g);
 
-    return parts.map((part, index) => {
+    const contentElements = parts.map((part, index) => {
       const match = part.match(/\[CHART-PLACEHOLDER-(\d+)\]/);
       if (match) {
         const chartIndex = parseInt(match[1], 10);
@@ -587,26 +702,56 @@ export default function Home() {
           );
         }
       }
-      return (
-        <ReactMarkdown
-          key={`md-${index}`}
-          remarkPlugins={[remarkGfm]}
-          rehypePlugins={[rehypeRaw]}
-          components={{
-            table: ({ node, ...props }) => (
-              <div className="table-container">
-                <table {...props} />
-              </div>
-            ),
-            img: () => null,
-          }}
-        >
-          {part}
-        </ReactMarkdown>
-      );
-    });
-  };
 
+      // ✅ 수정: [SOURCE:번호] 형식이 있는 경우 SourceRenderer 사용
+      if (part.includes('[SOURCE:')) {
+        // 현재 메시지의 섹션 매핑 정보 찾기 (현재는 간단히 모든 매핑 전달)
+        const currentMappings = Object.values(sectionMappings).flat();
+        
+        return (
+          <SourceRenderer
+            key={`source-${index}`}
+            content={part}
+            sources={sources} // 실시간 sources 전달
+            isStreaming={message.isStreaming} // 스트리밍 상태도 전달
+            sectionMappings={currentMappings} // 매핑 정보 전달
+          />
+        );
+      }
+
+      // 일반 마크다운 렌더링 (헤더 크기 보존)
+      const cleanPart = part; // 헤더 제거하지 않고 그대로 유지
+      if (cleanPart.trim()) {
+        return (
+          <ReactMarkdown
+            key={`md-${index}`}
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={[rehypeRaw]}
+            components={{
+              table: ({ node, ...props }) => (
+                <div className="table-container">
+                  <table {...props} />
+                </div>
+              ),
+              img: () => null,
+            }}
+          >
+            {cleanPart}
+          </ReactMarkdown>
+        );
+      }
+      return null;
+    }).filter(Boolean); // null 요소 제거
+
+    // 헤더와 컨텐츠를 함께 반환
+    return (
+      <div className="message-content-wrapper">
+        {headerElements}
+        {contentElements}
+      </div>
+    );
+  };
+  
   // textarea 자동 높이 조절
   const adjustTextareaHeight = useCallback(() => {
     if (textareaRef.current) {
@@ -747,8 +892,9 @@ export default function Home() {
                     )}
                     <div className="message-content">
                       {/* 완료된 어시스턴트 메시지 위에 해당 검색 결과 먼저 표시 */}
-                      {message.type === "assistant" && !message.isStreaming && message.searchResults && (
+                      {message.type === "assistant" && !message.isStreaming && message.searchResults && message.searchResults.length > 0 && (
                         <div className="claude-search-results">
+                          {console.log("렌더링 중인 완료된 메시지 검색 결과:", message.searchResults)} {/* 디버깅 로그 */}
                           {message.searchResults.map((searchData, index) => (
                             <div key={`search-${searchData.step}-${index}`} className="search-result-section">
                               <div
@@ -793,7 +939,66 @@ export default function Home() {
                                         </div>
                                       )}
                                       <div className="result-meta">
-                                        <span>관련성: {(result.relevance_score * 100).toFixed(0)}%</span>
+                                        <span>관련성: {(result.score * 100).toFixed(0)}%</span>
+                                        <span>타입: {result.document_type}</span>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {/* 스트리밍 중인 어시스턴트 메시지에서만 실시간 검색 결과 표시 */}
+                      {message.type === "assistant" && message.isStreaming && isStreaming && currentSearchResults.length > 0 && (
+                        <div className="claude-search-results">
+                          {currentSearchResults.map((searchData, index) => (
+                            <div key={`search-${searchData.step}-${index}`} className="search-result-section">
+                              <div
+                                className="search-result-header"
+                                onClick={() => setSearchResultsVisible(prev => {
+                                  const newVisible = {
+                                    ...prev,
+                                    [`current-${searchData.step}-${index}`]: !prev[`current-${searchData.step}-${index}`]
+                                  };
+                                  localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
+                                  return newVisible;
+                                })}
+                              >
+                                <div className="search-info">
+                                  <span className="search-tool">{searchData.tool_name}</span>
+                                  {searchData.query && (
+                                    <span className="search-query">
+                                      "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
+                                    </span>
+                                  )}
+                                  <span className="result-count">{searchData.results.length}개 결과</span>
+                                </div>
+                                <div className="toggle-icon">
+                                  {searchResultsVisible[`current-${searchData.step}-${index}`] ? '▼' : '▶'}
+                                </div>
+                              </div>
+
+                              {searchResultsVisible[`current-${searchData.step}-${index}`] && (
+                                <div className="search-result-list">
+                                  {searchData.results.map((result, resultIndex) => (
+                                    <div key={resultIndex} className="search-result-item">
+                                      <div className="result-header">
+                                        <span className="result-title">{result.title}</span>
+                                        <span className="result-source">{result.source}</span>
+                                      </div>
+                                      <div className="result-preview">{result.content_preview}</div>
+                                      {result.url && (
+                                        <div className="result-url">
+                                          <a href={result.url} target="_blank" rel="noopener noreferrer">
+                                            {result.url}
+                                          </a>
+                                        </div>
+                                      )}
+                                      <div className="result-meta">
+                                        <span>관련성: {(result.score * 100).toFixed(0)}%</span>
                                         <span>타입: {result.document_type}</span>
                                       </div>
                                     </div>
@@ -842,65 +1047,6 @@ export default function Home() {
                     <div className="pulse-dot"></div>
                     <span>{statusMessage}</span>
                   </div>
-                </div>
-              )}
-
-              {/* 현재 스트리밍 중인 검색 결과만 임시 표시 */}
-              {isStreaming && currentSearchResults.length > 0 && (
-                <div className="claude-search-results">
-                  {currentSearchResults.map((searchData, index) => (
-                    <div key={`search-${searchData.step}-${index}`} className="search-result-section">
-                      <div
-                        className="search-result-header"
-                        onClick={() => setSearchResultsVisible(prev => {
-                          const newVisible = {
-                            ...prev,
-                            [`current-${searchData.step}-${index}`]: !prev[`current-${searchData.step}-${index}`]
-                          };
-                          localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
-                          return newVisible;
-                        })}
-                      >
-                        <div className="search-info">
-                          <span className="search-tool">{searchData.tool_name}</span>
-                          {searchData.query && (
-                            <span className="search-query">
-                              "{searchData.query.length > 50 ? searchData.query.substring(0, 50) + '...' : searchData.query}"
-                            </span>
-                          )}
-                          <span className="result-count">{searchData.results.length}개 결과</span>
-                        </div>
-                        <div className="toggle-icon">
-                          {searchResultsVisible[`current-${searchData.step}-${index}`] ? '▼' : '▶'}
-                        </div>
-                      </div>
-
-                      {searchResultsVisible[`current-${searchData.step}-${index}`] && (
-                        <div className="search-result-list">
-                          {searchData.results.map((result, resultIndex) => (
-                            <div key={resultIndex} className="search-result-item">
-                              <div className="result-header">
-                                <span className="result-title">{result.title}</span>
-                                <span className="result-source">{result.source}</span>
-                              </div>
-                              <div className="result-preview">{result.content_preview}</div>
-                              {result.url && (
-                                <div className="result-url">
-                                  <a href={result.url} target="_blank" rel="noopener noreferrer">
-                                    {result.url}
-                                  </a>
-                                </div>
-                              )}
-                              <div className="result-meta">
-                                <span>관련성: {(result.relevance_score * 100).toFixed(0)}%</span>
-                                <span>타입: {result.document_type}</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))}
                 </div>
               )}
             </>

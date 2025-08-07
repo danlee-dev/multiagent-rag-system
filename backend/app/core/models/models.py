@@ -45,9 +45,10 @@ class SearchResult(BaseModel):
     # Claude 스타일 UI를 위한 추가 필드들
     title: str = Field(default="", description="문서 제목 또는 결과 제목")
     url: Optional[str] = Field(default=None, description="원본 URL")
-    relevance_score: float = Field(default=0.7, description="관련성 점수")
+    score: float = Field(default=0.7, description="관련성 점수")
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
 
     # 메타데이터는 호환성을 위해 유지
     @property
