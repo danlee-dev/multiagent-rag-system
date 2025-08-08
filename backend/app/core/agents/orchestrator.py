@@ -299,6 +299,8 @@ class OrchestratorAgent:
                 raise ValueError("Valid JSON plan not found in response")
 
             print(f"  - 지능형 단계별 계획 생성 완료: {plan.get('title', '제목 없음')}")
+            print("  - 계획 JSON:")
+            print(json.dumps(plan, ensure_ascii=False, indent=2))
             state["plan"] = plan
 
         except Exception as e:
