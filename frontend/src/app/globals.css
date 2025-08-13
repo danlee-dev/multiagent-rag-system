@@ -1250,3 +1250,136 @@ button:focus-visible,
   border-color: #ffb84d;
   box-shadow: 0 6px 16px rgba(255, 140, 0, 0.2);
 }
+
+/*
+     실시간 생각 스트리밍 UI
+      */
+
+.thinking-stream {
+  margin: 16px 0;
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
+  background-color: #262626;
+  overflow: hidden;
+  transition: all 0.3s ease;
+}
+
+.thinking-stream:hover {
+  border-color: var(--primary-color);
+  box-shadow: 0 4px 12px rgba(16, 163, 127, 0.1);
+}
+
+.thinking-stream-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  cursor: pointer;
+  background-color: rgba(16, 163, 127, 0.05);
+  border-bottom: 1px solid var(--border-light);
+  transition: background-color 0.2s ease;
+}
+
+.thinking-stream-header:hover {
+  background-color: rgba(16, 163, 127, 0.1);
+}
+
+.thinking-stream-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.thinking-stream-toggle {
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: transform 0.2s ease;
+}
+
+.thinking-stream-content {
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.thinking-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 16px;
+  transition: background-color 0.2s ease;
+  animation: slideIn 0.3s ease-out;
+}
+
+.thinking-step:hover {
+  background-color: rgba(255, 255, 255, 0.02);
+}
+
+.thinking-step.completed {
+  opacity: 0.8;
+}
+
+.step-indicator {
+  width: 16px;
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.thinking-step:not(.completed) .step-indicator {
+  color: var(--primary-color);
+  animation: pulse 2s infinite;
+}
+
+.thinking-step.completed .step-indicator {
+  color: #22c55e;
+}
+
+.step-content {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.step-message {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.4;
+  flex: 1;
+}
+
+.step-time {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}

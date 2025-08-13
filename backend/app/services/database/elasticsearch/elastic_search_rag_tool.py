@@ -121,8 +121,8 @@ class MultiIndexRAGSearchEngine:
         # Lazy loading: 모델은 실제 사용시에만 로드
         self._hf_model = hf_model  # None으로 저장
         self._reranker = None
-        self.TEXT_INDEX = "bge_text"
-        self.TABLE_INDEX = "bge_table"
+        self.TEXT_INDEX = "page_text"
+        self.TABLE_INDEX = "page_table"
         self.config = config
         self.HYBRID_ALPHA = config.HYBRID_ALPHA
         self.TOP_K_RETRIEVAL = config.TOP_K_RETRIEVAL
@@ -145,14 +145,14 @@ class MultiIndexRAGSearchEngine:
                 self.synonym_dict = json.load(f)
         else:
             self.synonym_dict = {}
-    
+
     @property
     def hf_model(self):
         """임베딩 모델을 lazy loading으로 가져오기"""
         if self._hf_model is None:
             self._hf_model = get_hf_model()
         return self._hf_model
-    
+
     @property
     def reranker(self):
         """리랭킹 모델을 lazy loading으로 가져오기"""
@@ -641,7 +641,7 @@ class MultiIndexRAGSearchEngine:
             }
         }
 
-def search(query: str, top_k: int = 50):
+def search(query: str, top_k: int = 20):
     """
     주어진 쿼리(query)로 멀티 인덱스 RAG 검색을 수행하고,
     상위 top_k개의 결과를 VectorDB.json 파일로 저장하며,

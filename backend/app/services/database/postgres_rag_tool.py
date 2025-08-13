@@ -679,109 +679,188 @@ def postgres_rdb_search(query: str) -> str:
             print(f">> RDB에서 '{query}' 관련 데이터 없음")
             return f"PostgreSQL 검색 결과: '{query}'와 관련된 데이터를 찾을 수 없습니다."
 
-        summary = f"PostgreSQL 검색 결과 (총 {search_results['total_results']}건):\n\n"
+        # LLM이 이해하기 쉬운 구조화된 형태로 변경
+        structured_data = {
+            "data_type": "database_search",
+            "query": query,
+            "total_results": search_results['total_results'],
+            "search_params": search_results.get('extracted_params', {}),
+            "structured_results": {}
+        }
 
-        # 가격 요약
+        # 가격 데이터 구조화
         if search_results['price_data']:
-            summary += f"### 가격 데이터 ({len(search_results['price_data'])}건)\n"
-            for item in search_results['price_data'][:5]:
-                direction_map = {0: '▼', 1: '▲', 2: '-'}
-                direction_symbol = direction_map.get(item.get('direction'), '')
+            price_items = []
+            for item in search_results['price_data'][:10]:  # 상위 10개
                 price_now = item.get('dpr1')
                 price_yesterday = item.get('dpr2')
-                lastest_day_obj = item.get('lastest_day')
-                display_date = lastest_day_obj.strftime('%Y-%m-%d') if lastest_day_obj else 'N/A'
-
-                daily_trend_info = ""
+                price_1m_ago = item.get('dpr3')
+                price_1y_ago = item.get('dpr4')
+                
+                # 가격 변동 계산
+                daily_change = None
+                monthly_change = None
+                yearly_change = None
+                
                 if price_now is not None and price_yesterday is not None and price_yesterday > 0:
-                    diff = price_now - price_yesterday
-                    if diff != 0:
-                        daily_trend_info = f" (어제보다 {abs(diff):,}원 {direction_symbol})"
+                    daily_change = ((price_now - price_yesterday) / price_yesterday) * 100
+                    
+                if price_now is not None and price_1m_ago is not None and price_1m_ago > 0:
+                    monthly_change = ((price_now - price_1m_ago) / price_1m_ago) * 100
+                    
+                if price_now is not None and price_1y_ago is not None and price_1y_ago > 0:
+                    yearly_change = ((price_now - price_1y_ago) / price_1y_ago) * 100
 
-                hist = []
-                m_ago = item.get('dpr3'); y_ago = item.get('dpr4')
-                if price_now is not None and m_ago:
-                    pct = ((price_now - m_ago) / m_ago) * 100
-                    hist.append(f"1개월 전: {pct:+.1f}% {'▲' if pct>0 else '▼'}")
-                if price_now is not None and y_ago:
-                    pct = ((price_now - y_ago) / y_ago) * 100
-                    hist.append(f"1년 전: {pct:+.1f}% {'▲' if pct>0 else '▼'}")
-
-                summary += (
-                    f"- **{item.get('item_name','N/A')}** ({item.get('category_name','N/A')}): "
-                    f"**{(price_now if price_now is not None else 'N/A'):,}원**/{item.get('unit','N/A')} "
-                    f"[{display_date} 기준]{daily_trend_info}\n"
-                )
-                if hist:
-                    summary += f"    - `추세: {' | '.join(hist)}`\n"
-            if len(search_results['price_data']) > 5:
-                summary += f"... 외 {len(search_results['price_data']) - 5}건\n"
-            summary += "\n"
-
-        # 영양 요약
-        if search_results['nutrition_data']:
-            summary += f"### 영양 정보 ({len(search_results['nutrition_data'])}건)\n"
-
-            NUTRIENT_MAP = {
-                'energy_kcal': {'display': '에너지(칼로리)', 'keywords': ['에너지', '칼로리'], 'unit': 'kcal'},
-                'moisture_g': {'display': '수분', 'keywords': ['수분'], 'unit': 'g'},
-                'protein_g': {'display': '단백질', 'keywords': ['단백질'], 'unit': 'g'},
-                'fat_g': {'display': '지방', 'keywords': ['지방'], 'unit': 'g'},
-                'carbohydrate_g': {'display': '탄수화물', 'keywords': ['탄수화물'], 'unit': 'g'},
-                'sugars_g': {'display': '당류', 'keywords': ['당류'], 'unit': 'g'},
-                'glucose_g': {'display': '포도당', 'keywords': ['포도당'], 'unit': 'g'},
-                'fructose_g': {'display': '과당', 'keywords': ['과당'], 'unit': 'g'},
-                'total_dietary_fiber_g': {'display': '식이섬유', 'keywords': ['식이섬유', '총식이섬유'], 'unit': 'g'},
-                'calcium_mg': {'display': '칼슘', 'keywords': ['칼슘'], 'unit': 'mg'},
-                'iron_mg': {'display': '철(철분)', 'keywords': ['철', '철분'], 'unit': 'mg'},
-                'magnesium_mg': {'display': '마그네슘', 'keywords': ['마그네슘'], 'unit': 'mg'},
-                'potassium_mg': {'display': '칼륨', 'keywords': ['칼륨'], 'unit': 'mg'},
-                'sodium_mg': {'display': '나트륨', 'keywords': ['나트륨'], 'unit': 'mg'},
-                'vitamin_a_ug_rae': {'display': '비타민 A', 'keywords': ['비타민A', '비타민 A'], 'unit': 'μg'},
-                'vitamin_b6_mg': {'display': '비타민 B6', 'keywords': ['비타민B6', '비타민 B6'], 'unit': 'mg'},
-                'vitamin_b12_ug': {'display': '비타민 B12', 'keywords': ['비타민B12', '비타민 B12'], 'unit': 'μg'},
-                'vitamin_c_mg': {'display': '비타민 C', 'keywords': ['비타민C', '비타민 C'], 'unit': 'mg'},
-                'vitamin_d_ug': {'display': '비타민 D', 'keywords': ['비타민D', '비타민 D'], 'unit': 'μg'},
-                'vitamin_d2_ug': {'display': '비타민 D2', 'keywords': ['비타민D2', '비타민 D2'], 'unit': 'μg'},
-                'vitamin_d3_ug': {'display': '비타민 D3', 'keywords': ['비타민D3', '비타민 D3'], 'unit': 'μg'},
-                'vitamin_e_mg_ate': {'display': '비타민 E', 'keywords': ['비타민E', '비타민 E'], 'unit': 'mg'},
-                'vitamin_k_ug': {'display': '비타민 K', 'keywords': ['비타민K', '비타민 K'], 'unit': 'μg'},
-                'vitamin_k1_ug': {'display': '비타민 K1', 'keywords': ['비타민K1', '비타민 K1'], 'unit': 'μg'},
-                'vitamin_k2_ug': {'display': '비타민 K2', 'keywords': ['비타민K2', '비타민 K2'], 'unit': 'μg'},
+                price_item = {
+                    "item_name": item.get('item_name'),
+                    "category": item.get('category_name'),
+                    "current_price": price_now,
+                    "unit": item.get('unit'),
+                    "date": item.get('lastest_day').strftime('%Y-%m-%d') if item.get('lastest_day') else None,
+                    "price_trends": {
+                        "daily_change_percent": round(daily_change, 1) if daily_change is not None else None,
+                        "monthly_change_percent": round(monthly_change, 1) if monthly_change is not None else None,
+                        "yearly_change_percent": round(yearly_change, 1) if yearly_change is not None else None,
+                        "yesterday_price": price_yesterday,
+                        "month_ago_price": price_1m_ago,
+                        "year_ago_price": price_1y_ago
+                    },
+                    "market_trend": "상승" if daily_change and daily_change > 0 else "하락" if daily_change and daily_change < 0 else "보합"
+                }
+                price_items.append(price_item)
+            
+            structured_data["structured_results"]["price_data"] = {
+                "count": len(search_results['price_data']),
+                "items": price_items
             }
 
-            params = search_results.get('extracted_params', {})
-            specific_info = params.get('specific_info', [])  # 이미 영문 alias
+        # 영양 데이터 구조화
+        if search_results['nutrition_data']:
+            nutrition_items = []
+            for item in search_results['nutrition_data'][:10]:  # 상위 10개
+                
+                # 주요 영양소 정리
+                nutrition_facts = {}
+                
+                # 기본 영양소
+                basic_nutrients = {
+                    "energy_kcal": {"name": "칼로리", "unit": "kcal"},
+                    "protein_g": {"name": "단백질", "unit": "g"},
+                    "fat_g": {"name": "지방", "unit": "g"},
+                    "carbohydrate_g": {"name": "탄수화물", "unit": "g"},
+                    "sugars_g": {"name": "당류", "unit": "g"},
+                    "total_dietary_fiber_g": {"name": "식이섬유", "unit": "g"}
+                }
+                
+                # 미네랄
+                minerals = {
+                    "calcium_mg": {"name": "칼슘", "unit": "mg"},
+                    "iron_mg": {"name": "철분", "unit": "mg"},
+                    "potassium_mg": {"name": "칼륨", "unit": "mg"},
+                    "sodium_mg": {"name": "나트륨", "unit": "mg"},
+                    "magnesium_mg": {"name": "마그네슘", "unit": "mg"}
+                }
+                
+                # 비타민
+                vitamins = {
+                    "vitamin_a_ug_rae": {"name": "비타민A", "unit": "μg"},
+                    "vitamin_c_mg": {"name": "비타민C", "unit": "mg"},
+                    "vitamin_d_ug": {"name": "비타민D", "unit": "μg"},
+                    "vitamin_e_mg_ate": {"name": "비타민E", "unit": "mg"},
+                    "vitamin_k_ug": {"name": "비타민K", "unit": "μg"}
+                }
+                
+                # 모든 영양소 정보 수집
+                for key, info in {**basic_nutrients, **minerals, **vitamins}.items():
+                    value = item.get(key)
+                    if value is not None and value != 0:
+                        nutrition_facts[info["name"]] = {
+                            "value": value,
+                            "unit": info["unit"],
+                            "per_100g": f"{value}{info['unit']}/100g"
+                        }
 
-            for item in search_results['nutrition_data']:
-                summary += f"- **{item.get('food_name', 'N/A')}** ({item.get('food_group', 'N/A')}):\n"
-                highlights, done = [], set()
-                if specific_info:
-                    for db_key in specific_info:
-                        if db_key in done:
-                            continue
-                        nm = NUTRIENT_MAP.get(db_key, None)
-                        value = item.get(db_key)
-                        if nm and value is not None:
-                            highlights.append(f"**{nm['display']}**: {value}{nm['unit']}/100g")
-                            done.add(db_key)
-                if highlights:
-                    summary += "    - " + " | ".join(highlights) + "\n"
-                else:
-                    energy = item.get('energy_kcal', 'N/A')
-                    protein = item.get('protein_g', 'N/A')
-                    fat = item.get('fat_g', 'N/A')
-                    carb = item.get('carbohydrate_g', 'N/A')
-                    sugar = item.get('sugars_g', 'N/A')
-                    summary += (
-                        f"    - **주요성분**: "
-                        f"칼로리 {energy}kcal/100g | 단백질 {protein}g/100g | "
-                        f"지방 {fat}g/100g | 탄수화물 {carb}g/100g | 당류 {sugar}g/100g\n"
-                    )
+                nutrition_item = {
+                    "food_name": item.get('food_name'),
+                    "food_group": item.get('food_group'),
+                    "source": item.get('source'),
+                    "nutrition_facts": nutrition_facts,
+                    "summary": {
+                        "high_in": [],  # 높은 함량 영양소
+                        "notable_nutrients": []  # 주목할 영양소
+                    }
+                }
+                
+                # 높은 함량 영양소 식별 (임계값 기반)
+                high_thresholds = {
+                    "칼로리": 200, "단백질": 10, "칼슘": 100, "철분": 5, 
+                    "비타민C": 30, "비타민A": 300, "칼륨": 300
+                }
+                
+                for nutrient, data in nutrition_facts.items():
+                    threshold = high_thresholds.get(nutrient)
+                    if threshold and data["value"] >= threshold:
+                        nutrition_item["summary"]["high_in"].append(f"{nutrient} {data['per_100g']}")
+                
+                nutrition_items.append(nutrition_item)
+            
+            structured_data["structured_results"]["nutrition_data"] = {
+                "count": len(search_results['nutrition_data']),
+                "items": nutrition_items
+            }
+
+        # 최종 결과를 LLM이 이해하기 쉬운 형태로 포맷팅
+        summary = f"""=== RDB 검색 결과 ===
+검색어: {query}
+총 결과: {structured_data['total_results']}건
+
+"""
+
+        # 가격 정보 요약
+        if "price_data" in structured_data["structured_results"]:
+            price_data = structured_data["structured_results"]["price_data"]
+            summary += f"📊 가격 정보 ({price_data['count']}건):\n"
+            for item in price_data["items"][:5]:
+                trend_emoji = "📈" if item["market_trend"] == "상승" else "📉" if item["market_trend"] == "하락" else "➡️"
+                daily_trend = f"({item['price_trends']['daily_change_percent']:+.1f}%)" if item['price_trends']['daily_change_percent'] else ""
+                
+                summary += f"• {item['item_name']} ({item['category']}): {item['current_price']:,}원/{item['unit']} {trend_emoji} {daily_trend}\n"
+                
+                trends = []
+                if item['price_trends']['monthly_change_percent']:
+                    trends.append(f"1개월: {item['price_trends']['monthly_change_percent']:+.1f}%")
+                if item['price_trends']['yearly_change_percent']:
+                    trends.append(f"1년: {item['price_trends']['yearly_change_percent']:+.1f}%")
+                if trends:
+                    summary += f"  └ 추세: {' | '.join(trends)}\n"
             summary += "\n"
 
-        summary += "### 상세 데이터 (JSON)\n"
-        summary += json.dumps(search_results, ensure_ascii=False, indent=2, default=str)
+        # 영양 정보 요약
+        if "nutrition_data" in structured_data["structured_results"]:
+            nutrition_data = structured_data["structured_results"]["nutrition_data"]
+            summary += f"🥗 영양 정보 ({nutrition_data['count']}건):\n"
+            for item in nutrition_data["items"][:5]:
+                summary += f"• {item['food_name']} ({item['food_group']}):\n"
+                
+                # 주요 영양소 표시
+                key_nutrients = []
+                for nutrient in ["칼로리", "단백질", "지방", "탄수화물"]:
+                    if nutrient in item['nutrition_facts']:
+                        data = item['nutrition_facts'][nutrient]
+                        key_nutrients.append(f"{nutrient} {data['per_100g']}")
+                
+                if key_nutrients:
+                    summary += f"  └ 주요성분: {' | '.join(key_nutrients)}\n"
+                
+                # 높은 함량 영양소
+                if item['summary']['high_in']:
+                    summary += f"  └ 풍부한 영양소: {', '.join(item['summary']['high_in'])}\n"
+            summary += "\n"
+
+        # 구조화된 데이터도 포함 (분석용)
+        summary += "=== 구조화된 데이터 (분석용) ===\n"
+        summary += json.dumps(structured_data, ensure_ascii=False, indent=2, default=str)
+        
         return summary
 
     except Exception as e:

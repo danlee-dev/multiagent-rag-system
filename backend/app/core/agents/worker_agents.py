@@ -27,6 +27,14 @@ from ...services.search.search_tools import (
 # 전역 ThreadPoolExecutor 생성 (재사용으로 성능 향상)
 _global_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="search_worker")
 
+# 추가: 페르소나 프롬프트 로드
+PERSONA_PROMPTS = {}
+try:
+    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+        PERSONA_PROMPTS = json.load(f)
+    print("ProcessorAgent: 페르소나 프롬프트 로드 성공.")
+except Exception as e:
+    print(f"ProcessorAgent: 페르소나 프롬프트 로드 실패 - {e}")
 
 
 class DataGathererAgent:
@@ -814,6 +822,8 @@ class ProcessorAgent:
             self.llm_openai_4o = None
             print("ProcessorAgent: 경고: OPENAI_API_KEY가 설정되지 않음")
 
+        self.personas = PERSONA_PROMPTS
+
         # Orchestrator가 호출할 수 있는 작업 목록 정의
         self.processor_mapping = {
             "design_report_structure": self._design_report_structure,
@@ -893,33 +903,35 @@ class ProcessorAgent:
                 print(f"ProcessorAgent: 복구 불가능한 오류: {e}")
                 raise e
 
-    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None, state: Dict[str, Any] = None):
+    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None, state: Optional[Dict[str, Any]] = None):
         """Orchestrator로부터 동기식 작업을 받아 처리합니다."""
         print(f"\n>> Processor 실행: {processor_type}")
 
         if processor_type == "design_report_structure":
-            # design_report_structure(data, selected_indexes, original_query)
             selected_indexes = param2
             original_query = param3
-            result = await self._design_report_structure(data, selected_indexes, original_query)
+            result = await self._design_report_structure(data, selected_indexes, original_query, state)
             yield {"type": "result", "data": result}
 
         elif processor_type == "create_chart_data":
-            # create_charts(section_data, section_title, generated_content)
             section_title = param2
             generated_content = param3
             async for result in self._create_charts(data, section_title, generated_content, yield_callback, state):
                 yield result
-
         else:
             yield {"type": "error", "data": {"error": f"알 수 없는 처리 타입: {processor_type}"}}
 
-    async def _design_report_structure(self, data: List[SearchResult], selected_indexes: List[int], query: str) -> Dict[str, Any]:
+    async def _design_report_structure(self, data: List[SearchResult], selected_indexes: List[int], query: str, state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """보고서 구조 설계 + 섹션별 사용할 데이터 인덱스 선택"""
 
         print(f"\n>> 보고서 구조 설계 시작:")
         print(f"   전체 데이터: {len(data)}개")
         print(f"   선택된 인덱스: {selected_indexes} ({len(selected_indexes)}개)")
+
+        # 페르소나 정보 추출
+        persona_name = state.get("persona", "기본") if state else "기본"
+        persona_description = self.personas.get(persona_name, {}).get("description", "일반적인 분석가")
+        print(f"  - 보고서 구조 설계에 '{persona_name}' 페르소나 관점 적용")
 
         # 선택된 인덱스의 데이터를 인덱스와 함께 매핑하여 컨텍스트 생성
         indexed_context = ""
@@ -945,10 +957,10 @@ class ProcessorAgent:
         print(f"   제한된 컨텍스트 길이: {len(limited_indexed_context)} 문자")
 
         prompt = f"""
-    당신은 데이터 분석가이자 AI 에이전트 워크플로우 설계자입니다.
-    주어진 **선별된 데이터**와 사용자 질문을 분석하여, **내용이 절대 중복되지 않는** 논리적인 보고서 목차를 설계하고 **각 섹션별로 사용할 데이터 인덱스**를 명확히 분배해주세요.
+    당신은 '{persona_name}'({persona_description})의 관점을 가진 데이터 분석가이자 AI 에이전트 워크플로우 설계자입니다.
+    주어진 **선별된 데이터**와 사용자 질문을 분석하여, **'{persona_name}'가 가장 중요하게 생각할 만한 주제**들로 **내용이 절대 중복되지 않는** 논리적인 보고서 목차를 설계하고 **각 섹션별로 사용할 데이터 인덱스**를 명확히 분배해주세요.
 
-    **가장 중요한 목표**: 각 보고서 섹션이 고유한 주제를 다루게 하여, 내용 반복을 원천적으로 방지하는 것입니다.
+    **가장 중요한 목표**: 각 보고서 섹션이 '{persona_name}'의 관점에서 고유한 주제를 다루게 하여, 내용 반복을 원천적으로 방지하는 것입니다.
 
     **사용자 질문**: "{query}"
 
@@ -1168,12 +1180,16 @@ class ProcessorAgent:
         )
         return response.content
 
-    async def generate_section_streaming(self, section: Dict[str, Any], full_data_dict: Dict[int, Dict], original_query: str, use_indexes: List[int]) -> AsyncGenerator[str, None]:
-        """전체 데이터 딕셔너리에서 해당 섹션 인덱스만 사용하여 스트리밍 생성"""
-
+    async def generate_section_streaming(self, section: Dict[str, Any], full_data_dict: Dict[int, Dict], original_query: str, use_indexes: List[int], state: Optional[Dict[str, Any]] = None) -> AsyncGenerator[str, None]:
+        """페르소나를 반영하여 전체 데이터 딕셔너리에서 해당 섹션 인덱스만 사용하여 스트리밍 생성"""
         section_title = section.get("section_title", "제목 없음")
         content_type = section.get("content_type", "synthesis")
         description = section.get("description", "")
+
+        # 페르소나 정보 추출
+        persona_name = state.get("persona", "기본") if state else "기본"
+        persona_instruction = self.personas.get(persona_name, {}).get("prompt", "당신은 전문적인 AI 분석가입니다.")
+        print(f"  - 섹션 생성에 '{persona_name}' 페르소나 스타일 적용")
 
         # 섹션 시작 시 H2 헤더로 출력
         section_header = f"\n\n## {section_title}\n\n"
@@ -1202,7 +1218,10 @@ class ProcessorAgent:
             print(f"프롬프트에서 사용할 SOURCE 번호들: {valid_indexes}")
 
             prompt_template = """
-    당신은 주어진 데이터를 바탕으로 전문가 수준의 보고서의 한 섹션을 작성하는 AI입니다.
+
+    {persona_instruction}
+
+    당신은 위의 페르소나 지침을 반드시 따라서, 주어진 데이터를 바탕으로 전문가 수준의 보고서의 한 섹션을 작성하는 AI입니다.
 
     **사용자의 전체 질문**: "{original_query}"
     **현재 작성할 섹션 제목**: "{section_title}"
@@ -1212,11 +1231,12 @@ class ProcessorAgent:
     {section_data_content}
 
     **작성 지침 (매우 중요)**:
-    1. **간결성 유지**: 반드시 1~2 문단 이내로, 가장 핵심적인 내용만 간결하게 요약하여 작성하세요.
-    2. **제목 반복 금지**: 주어진 섹션 제목을 절대 반복해서 출력하지 마세요. 바로 본문 내용으로 시작해야 합니다.
-    3. **데이터 기반**: 참고 데이터에 있는 구체적인 수치, 사실, 인용구를 적극적으로 활용하여 내용을 구성하세요.
-    4. **전문가적 문체**: 명확하고 간결하며 논리적인 전문가의 톤으로 글을 작성하세요.
-    5. **⭐ 노션 스타일 마크다운 적극 활용 (매우 중요)**:
+    1. **페르소나 역할 유지**: 당신의 역할과 말투, 분석 관점을 반드시 유지하며 작성하세요.
+    2. **간결성 유지**: 반드시 1~2 문단 이내로, 가장 핵심적인 내용만 간결하게 요약하여 작성하세요.
+    3. **제목 반복 금지**: 주어진 섹션 제목을 절대 반복해서 출력하지 마세요. 바로 본문 내용으로 시작해야 합니다.
+    4. **데이터 기반**: 참고 데이터에 있는 구체적인 수치, 사실, 인용구를 적극적으로 활용하여 내용을 구성하세요.
+    5. **전문가적 문체**: 명확하고 간결하며 논리적인 전문가의 톤으로 글을 작성하세요.
+    6. **⭐ 노션 스타일 마크다운 적극 활용 (매우 중요)**:
     - **핵심 키워드나 중요한 수치**: **굵은 글씨**로 강조
     - *일반적인 강조나 변화*: *기울임체*로 표현
     - **주요 포인트나 결론**: > 중요한 인사이트나 결론 형태로 강조
@@ -1224,7 +1244,7 @@ class ProcessorAgent:
     - **하위 분류가 있는 경우**:   - 세부 항목 (들여쓰기 사용)
     - **세부 카테고리**: ### 소제목 활용
     - **단락 구분**: 내용이 바뀔 때마다 명확하게 단락을 나누어 공백 라인 삽입
-    6. **⭐ 출처 표기 (실제 인덱스 번호 사용)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:숫자] 형식으로 출처를 표기하세요. 반드시 숫자만 사용하고 "데이터"라는 단어는 사용하지 마세요.
+    7. **⭐ 출처 표기 (실제 인덱스 번호 사용)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:숫자] 형식으로 출처를 표기하세요. 반드시 숫자만 사용하고 "데이터"라는 단어는 사용하지 마세요.
     - 예시: "**매출이 증가했습니다** [SOURCE:8]", "시장 점유율이 상승했습니다 [SOURCE:12]"
     - 예시: **매출이 5% 감소**했습니다. [SOURCE:1, 4, 8]
     - 잘못된 예시: [SOURCE:데이터 1], [SOURCE:문서 1] (이런 형식 사용 금지)
@@ -1233,6 +1253,7 @@ class ProcessorAgent:
     """
 
             prompt = prompt_template.format(
+                persona_instruction=persona_instruction,
                 original_query=original_query,
                 section_title=section_title,
                 description=description,
@@ -1275,6 +1296,7 @@ class ProcessorAgent:
     """
 
             prompt = prompt_template.format(
+                persona_instruction=persona_instruction,
                 original_query=original_query,
                 section_title=section_title,
                 description=description,
@@ -1345,12 +1367,16 @@ class ProcessorAgent:
                 yield error_content
 
     async def _create_charts(self, section_data: List[SearchResult], section_title: str, generated_content: str = "", yield_callback=None, state: Dict[str, Any] = None):
-        """⭐ 수정: 섹션별 선택된 데이터와 생성된 내용을 바탕으로 정확한 차트 생성"""
+        """⭐ 수정: 페르소나 관점을 반영하여 섹션별 선택된 데이터와 생성된 내용을 바탕으로 정확한 차트 생성"""
         print(f"  - 차트 데이터 생성: '{section_title}' (데이터 {len(section_data)}개)")
 
         # >> 데이터 보강을 위한 DataGatherer 인스턴스 생성
         from .worker_agents import DataGathererAgent
         data_gatherer = DataGathererAgent() if not hasattr(self, 'data_gatherer') else self.data_gatherer
+
+        # 페르소나 정보 추출
+        persona_name = state.get("persona", "기본") if state else "기본"
+        print(f"  - 차트 생성에 '{persona_name}' 페르소나 관점 적용")
 
         async def _generate_chart_with_data(current_data: List[SearchResult], attempt: int = 1):
             """실제 차트 생성 로직 (재시도 가능)"""
@@ -1372,7 +1398,8 @@ class ProcessorAgent:
                 chart_prompt = f"""
         CRITICAL: You MUST respond with ONLY valid JSON. No explanations, no markdown, no other text.
 
-        다음 섹션을 위해 **선별된 실제 데이터**를 바탕으로 **정확하고 복잡한** Chart.js 차트를 생성해주세요.
+        '{persona_name}'의 관점에서 다음 섹션을 위해 **선별된 실제 데이터**를 바탕으로 **정확하고 복잡한**, **가장 흥미롭고 유용한** Chart.js 차트를 생성해주세요.
+        (예: 구매 담당자는 '원가 변동' 라인 차트, 마케터는 '소비자 관심도' 버블 차트를 선호할 것입니다.)
 
         **섹션 제목**: "{section_title}"
         **시도 횟수**: {attempt} (최대 2회)
@@ -1383,9 +1410,10 @@ class ProcessorAgent:
 
         **⭐ 중요한 제약사항**:
         1. **절대 임의 수치 생성 금지** - 위 데이터에서 명시된 실제 수치만 사용
-        2. **섹션 제목과 직접 관련된 차트만** 생성
-        3. **복잡하고 상세한 차트** 생성 (최소 3개 이상의 데이터 포인트)
-        4. **정확한 라벨과 수치** 사용
+        2. **'{persona_name}'의 관점 반영** - 해당 페르소나가 가장 중요하게 생각할 데이터를 시각화하세요.
+        3. **섹션 제목과 직접 관련된 차트만** 생성
+        4. **복잡하고 상세한 차트** 생성 (최소 3개 이상의 데이터 포인트)
+        5. **정확한 라벨과 수치** 사용
 
         **데이터 추출 규칙**:
         - 위 데이터에서 숫자, 퍼센트, 금액 등 수치 정보 추출

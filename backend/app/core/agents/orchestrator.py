@@ -11,6 +11,17 @@ from ..models.models import StreamingAgentState, SearchResult
 from .worker_agents import DataGathererAgent, ProcessorAgent
 from sentence_transformers import SentenceTransformer
 
+# --- 페르소나 프롬프트 로드 ---
+PERSONA_PROMPTS = {}
+try:
+    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+        PERSONA_PROMPTS = json.load(f)
+    print("OrchestratorAgent: 페르소나 프롬프트 로드 성공.")
+except FileNotFoundError:
+    print("경고: persona_prompts.json 파일을 찾을 수 없습니다.")
+except json.JSONDecodeError:
+    print("경고: persona_prompts.json 파일 파싱에 실패했습니다.")
+# -----------------------------
 
 class TriageAgent:
     """요청 분류 및 라우팅 담당 Agent"""
@@ -97,6 +108,8 @@ class OrchestratorAgent:
         self.llm_openai_mini = ChatOpenAI(model="gpt-4o-mini", temperature=temperature)
         self.data_gatherer = DataGathererAgent()
         self.processor = ProcessorAgent()
+        self.personas = PERSONA_PROMPTS
+        
 
     # ✅ 추가: 일관된 상태 메시지 생성을 위한 헬퍼 함수
     def _create_status_event(self, stage: str, sub_stage: str, message: str, details: Optional[Dict] = None) -> Dict:
@@ -150,17 +163,24 @@ class OrchestratorAgent:
         return query
 
     async def generate_plan(self, state: StreamingAgentState) -> StreamingAgentState:
-        """의존성을 고려하여 단계별 실행 계획(Hybrid Model)을 수립합니다."""
+        """페르소나 관점과 의존성을 반영하여 단계별 실행 계획(Hybrid Model)을 수립합니다."""
         print(f"\n>> Orchestrator: 지능형 단계별 계획 수립 시작")
         query = state["original_query"]
         current_date_str = datetime.now().strftime("%Y년 %m월 %d일")
 
-        planning_prompt = f"""
-당신은 사용자의 복잡한 요청을 분석하여, 논리적인 '실행 단계(Execution Steps)'로 구성된 지능형 계획을 수립하는 AI 수석 아키텍트입니다.
+        # 페르소나 정보 추출
+        persona_name = state.get("persona", "기본")
+        persona_info = self.personas.get(persona_name, {})
+        persona_description = persona_info.get("description", "일반적인 분석가")
+        print(f"  - 계획 수립에 '{persona_name}' 페르소나 관점 적용")
 
-**핵심 목표**:
-- 질문 간의 의존성을 정확히 파악하여 순차적으로 실행할 단계를 나눕니다.
-- 각 단계 내에서는 서로 독립적인 작업들을 병렬로 처리하여 효율성을 극대화합니다.
+        planning_prompt = f"""
+당신은 **'{persona_name}'의 유능한 AI 수석 보좌관**이자 **실행 계획 설계 전문가**입니다.
+당신의 임무는 **'{persona_name}'의 관점에서 가장 중요한 정보를 찾아내기 위한, 논리적이고 효율적인 실행 계획**을 수립하는 것입니다.
+
+**핵심 임무 (반드시 준수할 것)**:
+1.  **페르소나 관점 반영 (What to ask)**: 생성하는 모든 하위 질문은 철저히 '{persona_name}'의 관심사에 부합해야 합니다. 이들의 핵심 니즈(예: 구매-원가/시세, 마케팅-트렌드/소비자, R&D-신원료/성분)를 만족시키는 데 집중하세요.
+2.  **논리적 계획 수립 (How to ask)**: 페르소나의 관점에서 도출된 질문들의 선후 관계를 분석하여, 의존성이 있는 작업은 순차적으로, 없는 작업은 병렬로 처리하는 최적의 실행 단계를 설계하세요.
 
 **사용자 원본 요청**: "{query}"
 **현재 날짜**: {current_date_str}
@@ -206,12 +226,14 @@ class OrchestratorAgent:
 ---
 **## 계획 수립을 위한 단계별 사고 프로세스 (반드시 준수할 것)**
 
-**1단계: 요청 의도 및 최종 목표 분석**
-- 사용자가 궁극적으로 얻고 싶은 결과물이 무엇인지 명확히 이해합니다. (예: "신제품 개발을 위한 의사결정 보고서")
+**1단계: 목표 재해석**
+- 사용자의 원본 요청을 분석하여, 최종 목표가 무엇인지 **'{persona_name}'의 입장에서** 명확하게 재정의합니다.
+- (예: 원본 요청이 "만두 시장 조사"일 때, 페르소나가 '마케팅 담당자'라면 최종 목표는 '신제품 만두의 성공적인 시장 진입을 위한 마케팅 전략 보고서'로 구체화합니다.)
 
-**2단계: 핵심 정보 식별 및 질문 분해**
-- 최종 목표 달성을 위해 어떤 정보 조각들이 필요한지 식별하고, 각각을 완결된 형태의 질문으로 분해합니다.
-- 모든 하위 질문은 원본 요청의 핵심 맥락(예: '대한민국', '건강기능식품')을 반드시 포함해야 합니다.
+**2단계: 페르소나 기반 정보 식별 및 질문 구체화**
+- 1단계에서 재정의한 목표를 달성하기 위해, **'{persona_name}'가 가장 중요하게 생각할 핵심 키워드(예: 구매 담당자-원가/시세, 마케터-트렌드/소비자, R&D-신원료/성분)를 중심으로** 필요한 정보 조각들을 식별합니다.
+- 식별된 정보 조각들을 바탕으로, 각각 완결된 형태의 구체적인 질문으로 분해합니다.
+- 생성된 모든 하위 질문은 원본 요청의 핵심 맥락(예: '대한민국', '건강기능식품')을 반드시 포함해야 합니다.
 
 **3단계: 질문 간 의존성 분석 (가장 중요한 단계)**
 - 분해된 질문들 간의 선후 관계를 분석합니다.
@@ -335,7 +357,6 @@ class OrchestratorAgent:
 
 
     # ⭐ 핵심 수정: 요약된 내용이 아닌 전체 원본 내용을 LLM에게 제공
-
     async def _select_relevant_data_for_step(self, step_info: Dict, current_collected_data: List[SearchResult], query: str) -> List[int]:
         """현재 단계에서 수집된 데이터 중 관련 있는 것만 LLM이 선택 (전체 내용 기반)"""
 
@@ -545,6 +566,17 @@ class OrchestratorAgent:
         """단계별 계획에 따라 순차적, 병렬적으로 데이터 수집 및 보고서 생성"""
         query = state["original_query"]
 
+        # --- 추가: 페르소나 확인 및 상태 알림 ---
+        # 사용자가 선택한 페르소나가 state에 이미 포함되어 있다고 가정합니다.
+        # 예: state['persona'] = '구매 담당자'
+        selected_persona = state.get("persona")
+        if not selected_persona or selected_persona not in self.personas:
+            print(f"경고: 유효하지 않거나 지정되지 않은 페르소나 ('{selected_persona}'). '기본'으로 설정합니다.")
+            selected_persona = "기본"
+            state["persona"] = selected_persona
+
+        yield self._create_status_event("PLANNING", "PERSONA_CONFIRMED", f"'{selected_persona}' 페르소나로 보고서 생성을 시작합니다.")
+
         # 차트 카운터 초기화
         state['chart_counter'] = 0
 
@@ -653,7 +685,7 @@ class OrchestratorAgent:
         yield self._create_status_event("PROCESSING", "DESIGN_STRUCTURE_START", "보고서 구조 설계 중...")
 
         design = None
-        async for result in self.processor.process("design_report_structure", final_collected_data, cumulative_selected_indexes, query):
+        async for result in self.processor.process("design_report_structure", final_collected_data, cumulative_selected_indexes, query, state=state):
             if result.get("type") == "result":
                 design = result.get("data")
                 break
@@ -661,7 +693,7 @@ class OrchestratorAgent:
         if not design or "structure" not in design or not design["structure"]:
             yield {"type": "error", "data": {"message": "보고서 구조 설계에 실패했습니다."}}
             return
-
+        
         section_titles = [s.get('section_title', '제목 없음') for s in design.get('structure', [])]
         yield self._create_status_event("PROCESSING", "DESIGN_STRUCTURE_COMPLETE", "보고서 구조 설계 완료.", details={
             "report_title": design.get("title"),
@@ -705,7 +737,7 @@ class OrchestratorAgent:
             section_content_generated = False
             try:
                 async for chunk in self.processor.generate_section_streaming(
-                    section, full_data_dict, query, use_contents
+                    section, full_data_dict, query, use_contents, state=state
                 ):
                     section_content_generated = True
                     buffer += chunk
@@ -728,7 +760,7 @@ class OrchestratorAgent:
                             return event_data
 
                         chart_data = None
-                        async for result in self.processor.process("create_chart_data", section_data_list, section_title, buffer, "", chart_yield_callback):
+                        async for result in self.processor.process("create_chart_data", section_data_list, section_title, buffer, "", chart_yield_callback, state=state):
                             if result.get("type") == "chart":
                                 chart_data = result.get("data")
                                 break

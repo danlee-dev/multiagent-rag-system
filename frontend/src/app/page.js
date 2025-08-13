@@ -40,6 +40,16 @@ export default function Home() {
   const [fullDataDict, setFullDataDict] = useState({}); // 전체 데이터 딕셔너리
   const [sectionDataDicts, setSectionDataDicts] = useState({}); // 섹션별 데이터 딕셔너리
 
+  // 실시간 생각 스트리밍 상태들
+  const [statusMessages, setStatusMessages] = useState([]); // 상태 메시지들 배열
+  const [statusToggleOpen, setStatusToggleOpen] = useState(false); // 토글 열림/닫힘
+  const [streamingStartTime, setStreamingStartTime] = useState(null); // 시작 시간
+  const [elapsedTime, setElapsedTime] = useState(0); // 경과 시간 (초)
+  const [isStreamingCompleted, setIsStreamingCompleted] = useState(false); // 완료 여부
+
+  // 자동 스크롤 제어 상태
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true); // 자동 스크롤 활성화 여부
+
   // 🔍 디버깅: currentSearchResults 변경사항 추적
   const setCurrentSearchResultsDebug = (newResults) => {
     console.log("🔍 currentSearchResults 변경:", {
@@ -52,19 +62,80 @@ export default function Home() {
 
   // 스크롤 관리
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const textareaRef = useRef(null);
 
   // 차트 중복 방지를 위한 ID 추적
   const processedChartIds = useRef(new Set());
 
-  // 메시지 끝으로 스크롤
+  // 메시지 끝으로 스크롤 (자동 스크롤이 활성화된 경우에만)
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (autoScrollEnabled) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [autoScrollEnabled]);
+
+  // 스크롤 위치가 하단에 있는지 확인하는 함수
+  const isScrolledToBottom = useCallback(() => {
+    if (!messagesContainerRef.current) return true;
+    
+    const container = messagesContainerRef.current;
+    const threshold = 100; // 하단에서 100px 이내면 하단으로 간주
+    
+    return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
   }, []);
 
+  // 스크롤 이벤트 핸들러
+  const handleScroll = useCallback(() => {
+    if (!messagesContainerRef.current) return;
+    
+    const scrolledToBottom = isScrolledToBottom();
+    
+    // 사용자가 하단으로 스크롤하면 자동 스크롤 재개
+    if (scrolledToBottom && !autoScrollEnabled) {
+      setAutoScrollEnabled(true);
+    }
+    // 사용자가 하단에서 벗어나면 자동 스크롤 일시정지
+    else if (!scrolledToBottom && autoScrollEnabled) {
+      setAutoScrollEnabled(false);
+    }
+  }, [autoScrollEnabled, isScrolledToBottom]);
+
+  // 스크롤 이벤트 리스너 등록
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    container.addEventListener('scroll', handleScroll, { passive: true });
+    
+    return () => {
+      container.removeEventListener('scroll', handleScroll);
+    };
+  }, [handleScroll]);
+
+  // 메시지나 스트리밍 내용이 변경될 때 자동 스크롤
   useEffect(() => {
     scrollToBottom();
-  }, [currentConversation, currentStreamingMessage, currentStreamingCharts]);
+  }, [currentConversation, currentStreamingMessage, currentStreamingCharts, scrollToBottom]);
+
+  // 실시간 경과 시간 업데이트
+  useEffect(() => {
+    let interval = null;
+    
+    if (isStreaming && streamingStartTime && !isStreamingCompleted) {
+      interval = setInterval(() => {
+        const now = Date.now();
+        const elapsed = Math.floor((now - streamingStartTime) / 1000);
+        setElapsedTime(elapsed);
+      }, 1000);
+    }
+    
+    return () => {
+      if (interval) {
+        clearInterval(interval);
+      }
+    };
+  }, [isStreaming, streamingStartTime, isStreamingCompleted]);
 
   // 로컬 스토리지에서 대화 히스토리 로드
   useEffect(() => {
@@ -175,6 +246,14 @@ export default function Home() {
     setFullDataDict({});
     setSectionDataDicts({});
 
+    // 실시간 생각 스트리밍 상태 초기화
+    setStatusMessages([]);
+    setStatusToggleOpen(false);
+    setStreamingStartTime(null);
+    setElapsedTime(0);
+    setIsStreamingCompleted(false);
+    setStatusMessage("");
+
     localStorage.removeItem("currentSearchResults");
     localStorage.removeItem("searchResultsVisible");
     localStorage.removeItem("conversationSearchResults");
@@ -234,6 +313,13 @@ export default function Home() {
     setSourcesPanelVisible(!sourcesPanelVisible);
   };
 
+  // 경과 시간 포맷 함수
+  const formatElapsedTime = (seconds) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
   // 차트 고유 ID 생성 함수
   const generateChartId = (chartData) => {
     let sampleData = "";
@@ -285,9 +371,21 @@ export default function Home() {
     setStatusMessage("생각하는 중...");
     setSourcesData(null);
 
+    // 실시간 생각 스트리밍 상태 초기화 및 시작
+    const currentStreamingStartTime = Date.now();
+    
+    setStatusMessages([{
+      id: Date.now(),
+      message: "생각하는 중...",
+      timestamp: Date.now()
+    }]);
+    setStatusToggleOpen(false);
+    setStreamingStartTime(currentStreamingStartTime);
+    setElapsedTime(0);
+    setIsStreamingCompleted(false);
+
     setCurrentSearchResultsDebug([]);
     console.log("🔄 새 질문 시작: 검색 결과 초기화 (세션별 관리)");
-
     const assistantMessage = {
       id: Date.now() + 1,
       type: "assistant",
@@ -295,6 +393,7 @@ export default function Home() {
       charts: [],
       timestamp: new Date().toISOString(),
       isStreaming: true,
+      streamingStartTime: currentStreamingStartTime,  // 메시지에 스트리밍 시작 시간 저장
       sources: null,
     };
 
@@ -399,6 +498,17 @@ export default function Home() {
                   // 안전한 접근: data.data.message 또는 data.message
                   const statusMessage = data.data?.message || data.message || "처리 중...";
                   setStatusMessage(statusMessage);
+                  
+                  // 실시간 생각 스트리밍에 상태 메시지 추가
+                  setStatusMessages(prev => {
+                    const newMessage = {
+                      id: Date.now() + Math.random(),
+                      message: statusMessage,
+                      timestamp: Date.now()
+                    };
+                    console.log("🔄 새 상태 메시지 추가:", statusMessage, "현재 배열 길이:", prev.length + 1);
+                    return [...prev, newMessage];
+                  });
                   break;
 
                 // >> 새로운 이벤트 타입: 전체 데이터 딕셔너리
@@ -704,17 +814,56 @@ export default function Home() {
 
                 case "final_complete":
                   setStatusMessage("");
-                  console.log('🔥 final_complete 이벤트 - fullDataDict 상태:', {
-                    hasFullDataDict: !!fullDataDict,
-                    fullDataDictSize: Object.keys(fullDataDict || {}).length,
-                    fullDataDictKeys: Object.keys(fullDataDict || {}).slice(0, 5)
+                  
+                  // 최종 경과 시간 계산 (먼저 계산)
+                  const finalElapsedTime = streamingStartTime ? Math.floor((Date.now() - streamingStartTime) / 1000) : 0;
+                  
+                  console.log("🔥 finalElapsedTime 계산 확인:", {
+                    streamingStartTime,
+                    currentTime: Date.now(),
+                    timeDiff: streamingStartTime ? (Date.now() - streamingStartTime) : 0,
+                    finalElapsedTime,
+                    hasStreamingStartTime: !!streamingStartTime
                   });
-
-                  setCurrentConversation((prev) => {
-                    const newConversation = prev.map((msg) => {
+                  
+                  // 실시간 경과 시간 상태도 최종 시간으로 업데이트
+                  setElapsedTime(finalElapsedTime);
+                  
+                  // 실시간 생각 스트리밍 완료 처리
+                  setIsStreamingCompleted(true);
+                  
+                  // 최종 상태 메시지 생성 - 함수형 업데이트로 최신 상태 사용
+                  setStatusMessages(prevMessages => {
+                    const finalMessages = [...prevMessages, {
+                      id: Date.now() + Math.random(),
+                      message: "보고서 생성 완료",
+                      timestamp: Date.now(),
+                      isCompleted: true
+                    }];
+                    
+                    console.log("🔥 setStatusMessages 내부 값 확인:", {
+                      finalElapsedTime,
+                      streamingStartTime,
+                      hasStreamingStartTime: !!streamingStartTime
+                    });
+                    
+                    return finalMessages;
+                  });
+                  
+                  // 메시지에 저장할 때도 최신 상태 사용
+                  setCurrentConversation((prevConversation) => {
+                    console.log("🚨 final_complete - 메시지 업데이트 시작:", {
+                      targetMessageId: assistantMessage.id,
+                      conversationLength: prevConversation.length,
+                      assistantMessages: prevConversation.filter(m => m.type === "assistant").map(m => ({id: m.id, isStreaming: m.isStreaming}))
+                    });
+                    
+                    const newConversation = prevConversation.map((msg) => {
                       if (msg.id === assistantMessage.id) {
                         console.log('🔥 final_complete - 메시지 업데이트:', {
                           messageId: msg.id,
+                          finalElapsedTime: finalElapsedTime,
+                          streamingStartTime: streamingStartTime,
                           fullDataDictToSave: !!fullDataDict,
                           fullDataDictSize: Object.keys(fullDataDict || {}).length,
                           fullDataDictKeys: Object.keys(fullDataDict || {}).slice(0, 5),
@@ -725,32 +874,65 @@ export default function Home() {
                         // 메시지에서 이미 저장된 fullDataDict를 우선 사용
                         const finalFullDataDict = msg.fullDataDict || fullDataDict;
 
-                        return {
+                        // 메시지의 streamingStartTime이 있다면 그것을 사용해서 정확한 경과시간 계산
+                        const messageStreamingStartTime = msg.streamingStartTime || streamingStartTime;
+                        const accurateElapsedTime = messageStreamingStartTime ? 
+                          Math.floor((Date.now() - messageStreamingStartTime) / 1000) : finalElapsedTime;
+
+                        console.log("🚨 정확한 시간 계산 확인:", {
+                          msgId: msg.id,
+                          msgStreamingStartTime: messageStreamingStartTime,
+                          globalStreamingStartTime: streamingStartTime,
+                          currentTime: Date.now(),
+                          timeDifference: messageStreamingStartTime ? (Date.now() - messageStreamingStartTime) : 0,
+                          accurateElapsedTime,
+                          finalElapsedTime,
+                          willSaveAsTotal: accurateElapsedTime
+                        });
+
+                        const updatedMessage = {
                           ...msg,
                           charts: finalCharts,
                           isStreaming: false,
                           // >> 우선순위: 메시지에 저장된 것 > 상태의 것
                           fullDataDict: finalFullDataDict,
-                          sectionDataDicts: sectionDataDicts
+                          sectionDataDicts: sectionDataDicts,
+                          // 상태 메시지들과 시간 정보 저장 (이전에 이미 생성된 상태 사용)
+                          statusMessages: [...statusMessages, {
+                            id: Date.now() + Math.random(),
+                            message: "보고서 생성 완료",
+                            timestamp: Date.now(),
+                            isCompleted: true
+                          }],
+                          streamingStartTime: messageStreamingStartTime,
+                          totalElapsedTime: accurateElapsedTime  // 더 정확한 경과 시간 사용
                         };
+                        
+                        console.log("🔥 메시지 업데이트 - 시간 저장 확인:", {
+                          messageId: msg.id,
+                          finalElapsedTime,
+                          accurateElapsedTime,
+                          globalStreamingStartTime: streamingStartTime,
+                          messageStreamingStartTime,
+                          updatedMessage: {
+                            totalElapsedTime: updatedMessage.totalElapsedTime,
+                            streamingStartTime: updatedMessage.streamingStartTime,
+                            hasStatusMessages: !!updatedMessage.statusMessages
+                          }
+                        });
+                        
+                        return updatedMessage;
                       }
                       return msg;
                     });
 
-                    const updatedMessage = newConversation.find(m => m.id === assistantMessage.id);
-                    console.log("🔥 final_complete - 최종 메시지 상태:", {
-                      messageId: assistantMessage.id,
-                      hasSearchResults: !!updatedMessage?.searchResults,
-                      searchResultsLength: updatedMessage?.searchResults?.length || 0,
-                      isStreaming: updatedMessage?.isStreaming,
-                      hasSources: !!updatedMessage?.sources,
-                      sourcesTotalCount: updatedMessage?.sources?.total_count || 0,
-                      sourcesDataState: !!sourcesData,
-                      sourcesDataCount: sourcesData?.total_count || 0,
-                      sourcesReceived: updatedMessage?.sourcesReceived,
-                      msgSources: updatedMessage?.sources
+                    console.log("🚨 final_complete - conversation 업데이트 완료:", {
+                      targetMessageId: assistantMessage.id,
+                      foundUpdatedMessage: !!newConversation.find(m => m.id === assistantMessage.id),
+                      updatedMessageData: newConversation.find(m => m.id === assistantMessage.id)?.totalElapsedTime
                     });
-
+                    
+                    // 대화 저장
                     const conversationData = {
                       id: conversationId || Date.now().toString(),
                       title:
@@ -774,7 +956,7 @@ export default function Home() {
                   console.log("검색 결과 및 데이터 딕셔너리 유지됨");
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
-                  return;
+                  break;
 
                 case "error":
                   setStatusMessage(`오류: ${data.message}`);
@@ -1053,7 +1235,7 @@ export default function Home() {
       {/* 메인 채팅 영역 */}
       <div className={`chat-main ${sourcesPanelVisible ? "chat-main-with-sources" : ""}`}>
         {/* 메시지 영역 */}
-        <div className="messages-container">
+        <div className="messages-container" ref={messagesContainerRef}>
           {currentConversation.length === 0 ? (
             <div className="welcome-screen">
               <div className="welcome-content">
@@ -1085,6 +1267,117 @@ export default function Home() {
                       </div>
                     )}
                     <div className="message-content">
+                      {/* 어시스턴트 메시지에서 실시간 생각 스트리밍 UI를 맨 위에 표시 */}
+                      {message.type === "assistant" && (() => {
+                        // 현재 스트리밍 중인 메시지이거나, 완료된 메시지 중 상태 정보가 있는 경우 표시
+                        const isCurrentStreaming = message.isStreaming && isStreaming;
+                        const messageStatusMessages = message.statusMessages || [];
+                        const hasStatusHistory = !message.isStreaming && messageStatusMessages.length > 0;
+                        
+                        console.log("🎯 상단 스트리밍 메시지 렌더링 조건 체크:", {
+                          messageId: message.id,
+                          isStreaming,
+                          messageIsStreaming: message.isStreaming,
+                          isCurrentStreaming,
+                          hasStatusHistory,
+                          messageStatusMessagesLength: messageStatusMessages.length,
+                          currentStatusMessagesLength: statusMessages.length,
+                          shouldShow: isCurrentStreaming || hasStatusHistory,
+                          messageData: {
+                            hasStatusMessages: !!message.statusMessages,
+                            hasStreamingStartTime: !!message.streamingStartTime,
+                            hasTotalElapsedTime: !!message.totalElapsedTime,
+                            statusMessages: message.statusMessages
+                          }
+                        });
+                        
+                        return isCurrentStreaming || hasStatusHistory;
+                      })() && (
+                        <div className="thinking-stream">
+                          <div 
+                            className="thinking-stream-header"
+                            onClick={() => setStatusToggleOpen(!statusToggleOpen)}
+                          >
+                            <div className="thinking-stream-title">
+                              <div className="pulse-dot"></div>
+                              <span>
+                                {(() => {
+                                  const isCurrentStreaming = message.isStreaming && isStreaming;
+                                  
+                                  // 시간 표시 로직 개선
+                                  let displayTime;
+                                  if (isCurrentStreaming) {
+                                    // 현재 스트리밍 중인 메시지: 실시간 경과 시간 사용
+                                    displayTime = elapsedTime;
+                                  } else if (message.totalElapsedTime) {
+                                    // 완료된 메시지이고 저장된 시간이 있는 경우: 저장된 시간 사용
+                                    displayTime = message.totalElapsedTime;
+                                  } else {
+                                    // 저장된 시간이 없는 경우 0으로 설정
+                                    displayTime = 0;
+                                  }
+                                  
+                                  // 디버깅 로그 추가
+                                  console.log("🚨 UI 시간 표시 최종 확인:", {
+                                    messageId: message.id,
+                                    step: "UI_RENDER",
+                                    isCurrentStreaming,
+                                    globalElapsedTime: elapsedTime,
+                                    messageTotalElapsedTime: message.totalElapsedTime,
+                                    messageStreamingStartTime: message.streamingStartTime,
+                                    globalStreamingStartTime: streamingStartTime,
+                                    finalDisplayTime: displayTime,
+                                    displayTimeSource: isCurrentStreaming ? "global_elapsed" : 
+                                                     (message.totalElapsedTime ? "message_total" : "zero"),
+                                    willShowTime: displayTime,
+                                    formattedTime: formatElapsedTime(displayTime),
+                                    messageComplete: !message.isStreaming
+                                  });
+                                  
+                                  if (statusToggleOpen) {
+                                    return isCurrentStreaming ? `생각하는 중...` : `생각 과정`;
+                                  } else {
+                                    return isCurrentStreaming ? 
+                                      `생각하는 중... (${formatElapsedTime(displayTime)})` :
+                                      `생각 완료 (${formatElapsedTime(displayTime)})`;
+                                  }
+                                })()}
+                              </span>
+                            </div>
+                            <div className="thinking-stream-toggle">
+                              {statusToggleOpen ? '▼' : '▶'}
+                            </div>
+                          </div>
+                          
+                          {statusToggleOpen && (
+                            <div className="thinking-stream-content">
+                              {(() => {
+                                // 현재 스트리밍 중이면 실시간 상태 메시지, 아니면 저장된 메시지 사용
+                                const displayMessages = message.isStreaming && isStreaming ? statusMessages : (message.statusMessages || []);
+                                const displayStartTime = message.isStreaming && isStreaming ? streamingStartTime : message.streamingStartTime;
+                                
+                                return displayMessages.map((status) => (
+                                  <div 
+                                    key={status.id} 
+                                    className={`thinking-step ${status.isCompleted ? 'completed' : ''}`}
+                                  >
+                                    <div className="step-indicator">
+                                      {status.isCompleted ? '✓' : '●'}
+                                    </div>
+                                    <div className="step-content">
+                                      <span className="step-message">{status.message}</span>
+                                      <span className="step-time">
+                                        {displayStartTime ? formatElapsedTime(Math.floor((status.timestamp - displayStartTime) / 1000)) : '0:00'}
+                                      </span>
+                                    </div>
+                                  </div>
+                                ));
+                              })()}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       {/* 완료된 어시스턴트 메시지 위에 해당 검색 결과 먼저 표시 */}
                       {message.type === "assistant" && !message.isStreaming && message.searchResults && message.searchResults.length > 0 && (
                         <div className="claude-search-results">
@@ -1274,7 +1567,7 @@ export default function Home() {
               ref={textareaRef}
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              onKeyPress={handleKeyPress}
+              onKeyDown={handleKeyPress}
               placeholder="메시지 보내기..."
               disabled={isStreaming}
               className="message-input"
