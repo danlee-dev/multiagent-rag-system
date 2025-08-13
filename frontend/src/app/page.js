@@ -49,6 +49,11 @@ export default function Home() {
 
   // 자동 스크롤 제어 상태
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true); // 자동 스크롤 활성화 여부
+  
+  // 팀 선택 관련 상태
+  const [selectedTeam, setSelectedTeam] = useState(null); // 선택된 팀 정보
+  const [availableTeams, setAvailableTeams] = useState([]); // 사용 가능한 팀 목록
+  const [teamSectionExpanded, setTeamSectionExpanded] = useState(false); // 팀 섹션 확장 상태
 
   // 🔍 디버깅: currentSearchResults 변경사항 추적
   const setCurrentSearchResultsDebug = (newResults) => {
@@ -246,8 +251,8 @@ export default function Home() {
     setFullDataDict({});
     setSectionDataDicts({});
 
-    // 실시간 생각 스트리밍 상태 초기화
-    setStatusMessages([]);
+    // 실시간 생각 스트리밍 상태 초기화 (현재 스트리밍만 초기화, 기존 메시지 상태는 유지)
+    setStatusMessages([]); // 새 메시지용 상태만 초기화
     setStatusToggleOpen(false);
     setStreamingStartTime(null);
     setElapsedTime(0);
@@ -318,6 +323,28 @@ export default function Home() {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  // 팀 목록 로드 함수
+  const loadAvailableTeams = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/teams`);
+      const data = await response.json();
+      // 문자열 배열을 객체 배열로 변환
+      const teams = (data.teams || []).map(teamName => ({
+        id: teamName,
+        name: teamName,
+        description: `${teamName} 전용 응답`
+      }));
+      setAvailableTeams(teams);
+      console.log("사용 가능한 팀 목록:", teams);
+    } catch (error) {
+      console.error("팀 목록 로드 실패:", error);
+      // 기본 팀 목록 설정
+      setAvailableTeams([
+        {id: "기본", name: "기본", description: "기본 응답"}
+      ]);
+    }
   };
 
   // 차트 고유 ID 생성 함수
@@ -433,6 +460,7 @@ export default function Home() {
           query: currentQuery,
           session_id: conversationId || undefined,
           message_id: String(assistantMessage.id),
+          team_id: selectedTeam?.id || null, // 선택된 팀 ID 추가
         }),
       }).catch(error => {
         console.error("fetch 요청 자체가 실패:", error);
@@ -1141,6 +1169,11 @@ export default function Home() {
     adjustTextareaHeight();
   }, [query, adjustTextareaHeight]);
 
+  // 컴포넌트 마운트 시 팀 목록 로드
+  useEffect(() => {
+    loadAvailableTeams();
+  }, []);
+
   return (
     <div className="chat-app">
       {/* 사이드바 */}
@@ -1183,6 +1216,74 @@ export default function Home() {
             </button>
           )}
         </div>
+
+        {/* 팀 선택 토글 UI */}
+        {sidebarOpen && (
+          <div className="team-selection-section">
+            <button 
+              className="team-selection-header"
+              onClick={() => setTeamSectionExpanded(!teamSectionExpanded)}
+            >
+              <div className="team-selection-title">
+                <span className="team-selection-label">응답 전문 분야</span>
+                {selectedTeam && (
+                  <span className="selected-team-indicator">
+                    {selectedTeam.name}
+                  </span>
+                )}
+              </div>
+              <svg 
+                className={`team-expand-icon ${teamSectionExpanded ? 'expanded' : ''}`}
+                width="16" 
+                height="16" 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="currentColor" 
+                strokeWidth="2"
+              >
+                <polyline points="6,9 12,15 18,9" />
+              </svg>
+            </button>
+            
+            {teamSectionExpanded && (
+              <div className="team-buttons-container">
+                {availableTeams.map((team) => (
+                  <button
+                    key={team.id}
+                    className={`team-toggle-btn ${
+                      selectedTeam?.id === team.id ? 'active' : ''
+                    }`}
+                    onClick={() => {
+                      if (selectedTeam?.id === team.id) {
+                        setSelectedTeam(null); // 같은 팀 클릭시 해제
+                      } else {
+                        setSelectedTeam(team); // 새로운 팀 선택
+                      }
+                    }}
+                    title={team.description}
+                  >
+                    <div className="team-button-content">
+                      <span className="team-name">{team.name}</span>
+                      {selectedTeam?.id === team.id && (
+                        <svg 
+                          className="team-check-icon" 
+                          width="16" 
+                          height="16" 
+                          viewBox="0 0 24 24" 
+                          fill="none" 
+                          stroke="currentColor" 
+                          strokeWidth="2"
+                        >
+                          <polyline points="20,6 9,17 4,12" />
+                        </svg>
+                      )}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {sidebarOpen && (
           <div className="conversations-list">
@@ -1355,6 +1456,17 @@ export default function Home() {
                                 // 현재 스트리밍 중이면 실시간 상태 메시지, 아니면 저장된 메시지 사용
                                 const displayMessages = message.isStreaming && isStreaming ? statusMessages : (message.statusMessages || []);
                                 const displayStartTime = message.isStreaming && isStreaming ? streamingStartTime : message.streamingStartTime;
+                                
+                                console.log("🎯 상태 메시지 표시 확인:", {
+                                  messageId: message.id,
+                                  isCurrentStreaming: message.isStreaming && isStreaming,
+                                  globalStatusMessagesLength: statusMessages.length,
+                                  messageStatusMessagesLength: (message.statusMessages || []).length,
+                                  displayMessagesLength: displayMessages.length,
+                                  displayMessages: displayMessages.map(msg => msg.message),
+                                  messageIsStreaming: message.isStreaming,
+                                  globalIsStreaming: isStreaming
+                                });
                                 
                                 return displayMessages.map((status) => (
                                   <div 

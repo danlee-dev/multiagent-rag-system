@@ -6,6 +6,7 @@ from datetime import datetime
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 import re
+import os
 
 from ..models.models import StreamingAgentState, SearchResult
 from .worker_agents import DataGathererAgent, ProcessorAgent
@@ -14,13 +15,18 @@ from sentence_transformers import SentenceTransformer
 # --- 페르소나 프롬프트 로드 ---
 PERSONA_PROMPTS = {}
 try:
-    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+    # 현재 파일(orchestrator.py)의 디렉토리 경로를 가져옵니다.
+    current_dir = os.path.dirname(__file__)
+    # JSON 파일의 절대 경로를 생성합니다.
+    file_path = os.path.join(current_dir, "prompts", "persona_prompts.json")
+    
+    with open(file_path, "r", encoding="utf-8") as f:
         PERSONA_PROMPTS = json.load(f)
-    print("OrchestratorAgent: 페르소나 프롬프트 로드 성공.")
+    print(f"OrchestratorAgent: 페르소나 프롬프트 로드 성공. (경로: {file_path})")
 except FileNotFoundError:
-    print("경고: persona_prompts.json 파일을 찾을 수 없습니다.")
+    print(f"경고: 다음 경로에서 persona_prompts.json 파일을 찾을 수 없습니다: {file_path}")
 except json.JSONDecodeError:
-    print("경고: persona_prompts.json 파일 파싱에 실패했습니다.")
+    print(f"경고: {file_path} 파일 파싱에 실패했습니다. JSON 형식을 확인해주세요.")
 # -----------------------------
 
 class TriageAgent:
@@ -111,6 +117,15 @@ class OrchestratorAgent:
         self.personas = PERSONA_PROMPTS
         
 
+    def get_available_personas(self) -> List[str]:
+        """
+        현재 로드된 모든 페르소나의 이름 목록을 반환합니다.
+        프론트엔드에서 선택지를 동적으로 구성하는 데 사용할 수 있습니다.
+        """
+        if not self.personas:
+            return []
+        return list(self.personas.keys())
+    
     # ✅ 추가: 일관된 상태 메시지 생성을 위한 헬퍼 함수
     def _create_status_event(self, stage: str, sub_stage: str, message: str, details: Optional[Dict] = None) -> Dict:
         """표준화된 상태 이벤트 객체를 생성합니다."""
@@ -613,7 +628,8 @@ class OrchestratorAgent:
                 continue
 
             step_collected_data: List[SearchResult] = []
-            async for event in self.data_gatherer.execute_parallel_streaming(tasks_for_this_step):
+            
+            async for event in self.data_gatherer.execute_parallel_streaming(tasks_for_this_step, state=state):
                 if event["type"] == "search_results":
                     yield event
                 elif event["type"] == "collection_complete":

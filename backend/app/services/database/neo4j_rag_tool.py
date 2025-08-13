@@ -89,7 +89,7 @@ class GraphDBSearchService:
     - DB 호출은 단 하나의 쿼리 형태만 사용:
         CALL db.index.fulltext.queryNodes('product_idx', $kw)
         YIELD node AS n, score
-        MATCH (n)-[r]-(m)
+        MATCH (n)-[r0]-(m)
         RETURN n, r, m, score
         ORDER BY score DESC
     - 관계 가공:

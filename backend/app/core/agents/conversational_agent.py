@@ -9,6 +9,16 @@ from langchain_openai import ChatOpenAI
 from ..models.models import StreamingAgentState, SearchResult
 from ...services.search.search_tools import vector_db_search
 from ...services.search.search_tools import debug_web_search
+from .orchestrator import OrchestratorAgent
+
+# 추가: 페르소나 프롬프트 로드
+PERSONA_PROMPTS = {}
+try:
+    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+        PERSONA_PROMPTS = json.load(f)
+    print("SimpleAnswererAgent: 페르소나 프롬프트 로드 성공.")
+except Exception as e:
+    print(f"SimpleAnswererAgent: 페르소나 프롬프트 로드 실패 - {e}")
 
 
 class SimpleAnswererAgent:
@@ -36,6 +46,7 @@ class SimpleAnswererAgent:
             print("SimpleAnswererAgent: 경고: OPENAI_API_KEY가 설정되지 않음")
 
         self.agent_type = "SIMPLE_ANSWERER"
+        self.personas = PERSONA_PROMPTS
 
     async def _astream_with_fallback(self, prompt, primary_model, fallback_model):
         """
@@ -91,13 +102,23 @@ class SimpleAnswererAgent:
             else:
                 raise e
 
-    async def answer_streaming(
-        self, state: StreamingAgentState
-    ) -> AsyncGenerator[str, None]:
-        """스트리밍으로 답변을 생성하는 메서드"""
+    async def answer_streaming(self, state: StreamingAgentState) -> AsyncGenerator[str, None]:
+        """스트리밍으로 페르소나 기반 답변을 생성하는 메서드"""
         print("\n>> SimpleAnswerer: 스트리밍 답변 시작")
 
         query = state["original_query"]  # 딕셔너리 접근 방식 사용
+
+        # --- 수정: state에 페르소나 정보가 있는지 확인 ---
+        selected_persona = state.get("persona", "기본")
+        
+        # 선택된 페르소나가 유효한지 확인 (없으면 기본으로 설정)
+        if selected_persona not in self.personas:
+            print(f" - 알 수 없는 페르소나 '{selected_persona}', '기본'으로 설정")
+            selected_persona = "기본"
+            state["persona"] = selected_persona
+        
+        print(f"  - 채팅에 '{selected_persona}' 페르소나 적용")
+        # ---------------------------------------------
 
         # 간단한 벡터 검색 수행 (필요시)
         search_results = []
@@ -174,7 +195,7 @@ class SimpleAnswererAgent:
 
         full_response = ""
         prompt = self._create_enhanced_prompt_with_memory(
-            query, search_results, memory_context
+            query, search_results, state
         )
 
         try:
@@ -434,10 +455,15 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
 
 
     def _create_enhanced_prompt_with_memory(
-        self, query: str, search_results: List[SearchResult], memory_context: str
+        self, query: str, search_results: List[SearchResult], state: StreamingAgentState
     ) -> str:
-        """메모리 컨텍스트를 포함한 향상된 프롬프트"""
+        """페르소나, 메모리, 검색 결과를 포함한 향상된 프롬프트를 생성합니다."""
         current_date_str = datetime.now().strftime("%Y년 %m월 %d일")
+
+        # state에서 페르소나와 메모리 정보 추출
+        persona_name = state.get("persona", "기본")
+        persona_instruction = self.personas.get(persona_name, {}).get("prompt", "당신은 친절하고 도움이 되는 AI 어시스턴트입니다.")
+        memory_context = state.get("metadata", {}).get("memory_context", "")
 
         # 검색 결과 요약
         context_summary = ""
@@ -458,11 +484,12 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
             context_summary = "\n\n".join(summary_parts)
 
         # 메모리 컨텍스트 처리
-        memory_info = ""
-        if memory_context:
-            memory_info = f"\n## 대화 맥락\n{memory_context[:500]}...\n"
+        memory_info = f"\n## 이전 대화\n{memory_context[:500]}...\n" if memory_context else ""
 
-        return f"""당신은 친근하고 도움이 되는 AI 어시스턴트입니다.
+        return f"""{persona_instruction}
+
+위의 당신의 역할과 원칙을 반드시 지키면서 답변해주세요.
+
 현재 날짜: {current_date_str}
 
 {memory_info}
@@ -474,6 +501,7 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
 {query}
 
 ## 응답 가이드
+- **페르소나 유지**: 당신의 역할에 맞는 말투와 관점을 일관되게 유지하세요.
 - 자연스럽고 친근한 톤으로 답변
 - 참고 정보가 있으면 이를 활용하되, 정확한 정보만 사용
 - 불확실한 내용은 명시적으로 표현

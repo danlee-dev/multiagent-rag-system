@@ -23,11 +23,11 @@ def preload_models():
         print("\n" + "="*50)
         print("🚀 서버 시작: 모델 사전 로드 중...")
         from .services.database.elasticsearch.elastic_search_rag_tool import get_hf_model, get_bge_reranker
-        
+
         # 모델 로드 (첫 요청 시 지연 방지)
         get_hf_model()
         get_bge_reranker()
-        
+
         print("✅ 모든 모델 사전 로드 완료!")
         print("="*50 + "\n")
     except Exception as e:
@@ -72,6 +72,7 @@ class QueryRequest(BaseModel):
     query: str
     session_id: str | None = Field(default_factory=lambda: str(uuid.uuid4()))
     message_id: str | None = Field(default_factory=lambda: str(uuid.uuid4()))
+    team_id: str | None = None  # 사용자가 선택한 팀 ID
 
 # --- FastAPI 애플리케이션 설정 ---
 app = FastAPI(
@@ -119,10 +120,26 @@ async def stream_query(request: QueryRequest):
             user_id="default_user"
         )
 
+        # 팀 정보를 state에 추가
+        if request.team_id:
+            state.metadata["team_id"] = request.team_id
+            print(f">> 선택된 팀: {request.team_id}")
+        else:
+            print(">> 팀 선택 없음 - LLM이 자동 판단하거나 general 사용")
+
         try:
             # 1. Triage Agent 실행
             yield server_sent_event("status", {"message": "요청 유형 분석 중...", "session_id": state.session_id})
             state_dict = state.model_dump()
+            
+            # 🔑 핵심: 딕셔너리로 변환된 후에 persona 추가
+            if request.team_id:
+                state_dict["persona"] = request.team_id
+                print(f">> state_dict에 persona '{request.team_id}' 추가됨")
+            else:
+                state_dict["persona"] = "기본"
+                print(">> state_dict에 기본 persona 추가됨")
+                
             updated_state_dict = await triage_agent.classify_request(request.query, state_dict)
             state = StreamingAgentStateModel(**updated_state_dict)
             flow_type = state.flow_type or "task"
@@ -269,6 +286,40 @@ def server_sent_event(event_type: str, data: Dict[str, Any]) -> str:
     payload = json.dumps(data_with_type, ensure_ascii=False)
     return f"data: {payload}\n\n"
 
+
+@app.get("/teams")
+def get_teams():
+    """사용 가능한 팀 목록을 반환합니다."""
+    try:
+        # orchestrator_agent에서 팀 정보 가져오기
+        teams = orchestrator_agent.get_available_personas()
+        return {"teams": teams}
+    except Exception as e:
+        print(f"팀 목록 조회 오류: {e}")
+        # 기본 팀 목록 반환
+        return {
+            "teams": [
+                {"id": "marketing", "name": "마케팅팀", "description": "마케팅 전략 및 캠페인 관련"},
+                {"id": "product", "name": "제품팀", "description": "제품 개발 및 기획 관련"},
+                {"id": "sales", "name": "영업팀", "description": "영업 전략 및 고객 관리 관련"},
+                {"id": "general", "name": "일반", "description": "범용 응답"}
+            ]
+        }
+
+@app.post("/teams/suggest")
+async def suggest_team(request: dict):
+    """쿼리 내용을 분석하여 적합한 팀을 추천합니다."""
+    try:
+        query = request.get("query", "")
+        if not query:
+            return {"error": "쿼리가 필요합니다"}
+
+        # orchestrator_agent를 통해 팀 추천
+        suggested_team = await orchestrator_agent.suggest_team_for_query(query)
+        return {"suggested_team": suggested_team}
+    except Exception as e:
+        print(f"팀 추천 오류: {e}")
+        return {"suggested_team": "general"}
 
 @app.get("/memory/stats")
 async def get_memory_stats(user_id: str = None):

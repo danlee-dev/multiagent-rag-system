@@ -277,7 +277,7 @@ def rdb_search(query: str) -> str:
 
 
 @tool
-def vector_db_search(query: str, top_k = 50) -> List:
+def vector_db_search(query: str, top_k = 20) -> List:
     """
     Elasticsearch에 저장된 뉴스 기사 본문, 논문, 보고서 전문에서 '의미 기반'으로 유사한 내용을 검색합니다.
     """
