@@ -224,9 +224,11 @@ class SimpleAnswererAgent:
         # 출처 정보 저장 (프론트엔드에서 사용)
         if search_results:
             sources_data = []
-            for i, result in enumerate(search_results[:10], 1):  # 최대 10개로 증가
+            full_data_dict = {}
+            
+            for idx, result in enumerate(search_results[:10]):  # 최대 10개로 증가
                 source_data = {
-                    "id": i,
+                    "id": idx + 1,
                     "title": getattr(result, 'metadata', {}).get("title", result.title or "자료"),
                     "content": result.content[:300] + "..." if len(result.content) > 300 else result.content,
                     "url": result.url if hasattr(result, 'url') else None,
@@ -234,7 +236,28 @@ class SimpleAnswererAgent:
                     "source_type": result.source if hasattr(result, 'source') else "unknown"
                 }
                 sources_data.append(source_data)
+                
+                # full_data_dict 생성 (0부터 시작하는 인덱스 사용)
+                full_data_dict[idx] = {
+                    "title": getattr(result, 'metadata', {}).get("title", result.title or "자료"),
+                    "content": result.content,
+                    "source": result.source if hasattr(result, 'source') else "unknown",
+                    "url": result.url if hasattr(result, 'url') else "",
+                    "source_url": result.source_url if hasattr(result, 'source_url') else "",
+                    "score": getattr(result, 'relevance_score', getattr(result, 'score', 0.0)),
+                    "document_type": getattr(result, 'document_type', 'unknown')
+                }
+            
             state["metadata"]["sources"] = sources_data
+            
+            # full_data_dict를 프론트엔드로 전송 (JSON 이벤트로)
+            if full_data_dict:
+                full_data_event = {
+                    "type": "full_data_dict",
+                    "data_dict": full_data_dict
+                }
+                yield json.dumps(full_data_event)
+                print(f"- SimpleAnswerer full_data_dict 전송 완료: {len(full_data_dict)}개 항목")
 
         print(f"- 스트리밍 답변 생성 완료 (길이: {len(full_response)}자)")
 
@@ -420,7 +443,7 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
         context_summary = ""
         if search_results:
             summary_parts = []
-            for i, result in enumerate(search_results[:3], 1):
+            for i, result in enumerate(search_results[:3]):
                 content = result.content
                 title = getattr(result, 'metadata', {}).get("title", result.title or "자료")
 
@@ -459,10 +482,10 @@ Vector DB 검색이 필요하면 True, 아니면 False를 반환하세요.
 - 마크다운 형식으로 답변 작성
 - 마크다운의 '-', '*', '+', '##', '###' 등을 사용하여 가독성 좋은 답변 작성
 - **중요**: 참고 정보를 사용할 때는 다음 형식으로 출처를 표기하세요:
-  * 문장 끝에 [SOURCE:번호1, 번호2, ...] 형식으로 출처 번호를 표기
-  * 예시: "건강기능식품 시장 규모는 6조 440억 원입니다 [SOURCE:3]"
-  * 예시: "경쟁사의 경우 바이럴을 통한 마케팅 전략을 사용합니다. [SOURCE:1, 2]"
-  * 예시: "돼지고기에 대한 영양 성분은 다음과 같습니다. [SOURCE:1, 4, 5]"
-  * 참고 정보의 순서대로 1, 2, 3... 번호를 사용하세요
+  * 문장 끝에 [SOURCE:숫자] 형식으로 출처 번호를 표기 (숫자만 사용, "데이터"나 "문서" 등의 단어 사용 금지)
+  * 예시: "건강기능식품 시장 규모는 6조 440억 원입니다 [SOURCE:0]"
+  * 예시: "경쟁사의 경우 바이럴을 통한 마케팅 전략을 사용합니다 [SOURCE:1]"
+  * 잘못된 예시: [SOURCE:데이터 1], [SOURCE:문서 1] (이런 형식 사용 금지)
+  * 참고 정보의 인덱스 순서대로 0, 1, 2... 번호를 사용하세요
 
 답변:"""

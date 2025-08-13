@@ -16,6 +16,26 @@ from .core.config.env_checker import check_api_keys
 
 check_api_keys()
 
+# 임베딩 모델 사전 로드 (서버 시작 시 한 번만)
+def preload_models():
+    """서버 시작 시 모델을 미리 로드"""
+    try:
+        print("\n" + "="*50)
+        print("🚀 서버 시작: 모델 사전 로드 중...")
+        from .services.database.elasticsearch.elastic_search_rag_tool import get_hf_model, get_bge_reranker
+        
+        # 모델 로드 (첫 요청 시 지연 방지)
+        get_hf_model()
+        get_bge_reranker()
+        
+        print("✅ 모든 모델 사전 로드 완료!")
+        print("="*50 + "\n")
+    except Exception as e:
+        print(f"⚠️ 모델 사전 로드 실패 (계속 진행): {e}")
+
+# 서버 시작 시 모델 로드
+preload_models()
+
 # 시스템 경로 설정을 통해 다른 폴더의 모듈을 임포트합니다.
 # 실제 프로젝트 구조에 맞게 이 부분은 조정될 수 있습니다.
 # sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -129,6 +149,18 @@ async def stream_query(request: QueryRequest):
                                 "tool_name": search_event["tool_name"],
                                 "query": search_event["query"],
                                 "results": search_event["results"],
+                                "session_id": state.session_id
+                            })
+                        except json.JSONDecodeError:
+                            # JSON 파싱 실패 시 일반 텍스트로 처리
+                            yield server_sent_event("content", {"chunk": chunk, "session_id": state.session_id})
+                    elif chunk.startswith('{"type": "full_data_dict"'):
+                        try:
+                            # full_data_dict 이벤트 파싱
+                            full_data_event = json.loads(chunk.strip())
+                            # full_data_dict 이벤트를 프론트엔드로 전달
+                            yield server_sent_event("full_data_dict", {
+                                "data_dict": full_data_event["data_dict"],
                                 "session_id": state.session_id
                             })
                         except json.JSONDecodeError:

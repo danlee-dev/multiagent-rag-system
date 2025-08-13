@@ -17,3 +17,4 @@ numpy
 elasticsearch==8.18.1
 sentence-transformers
 cohere
+transformers>=4.51.0

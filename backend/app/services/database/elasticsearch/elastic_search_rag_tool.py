@@ -11,6 +11,7 @@ import os
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from elasticsearch import Elasticsearch
+from elasticsearch import AsyncElasticsearch
 from datetime import datetime
 import re
 from ....core.config.rag_config import RAGConfig
@@ -27,26 +28,77 @@ if hasattr(sys.stdout, 'reconfigure'):
 """
 import sys
 import json
+import torch
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from elasticsearch import Elasticsearch
+from elasticsearch import AsyncElasticsearch
 import google.generativeai as genai
 from datetime import datetime
 import re
 from ....core.config.rag_config import RAGConfig
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer, CrossEncoder
 
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stdin, 'reconfigure'):
     sys.stdin.reconfigure(encoding='utf-8')
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f">> 현재 디바이스: {DEVICE}")
 
-print(">> CPU 전용으로 모델 로드...")
-hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
-print(">> CPU 모델 로드 성공")
+import threading
+
+# 전역 변수로 모델 초기화를 지연
+_hf_model = None
+_bge_reranker = None
+_model_lock = threading.Lock()  # 모델 로드 동기화를 위한 락
+
+def get_hf_model():
+    """임베딩 모델을 lazy loading으로 가져오기 (thread-safe)"""
+    global _hf_model
+    if _hf_model is None:
+        with _model_lock:  # 한 번에 하나의 스레드만 모델 로드
+            if _hf_model is None:  # double-check locking pattern
+                print(">> 임베딩 모델 로드 시작...")
+                import time
+                start_time = time.time()
+                try:
+                    _hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device=DEVICE, trust_remote_code=True)
+                    elapsed = time.time() - start_time
+                    print(f">> 임베딩 모델 로드 성공 (소요시간: {elapsed:.2f}초)")
+                except Exception as e:
+                    print(f"!! 임베딩 모델 로드 실패: {e}")
+                    raise
+    return _hf_model
+
+def get_bge_reranker():
+    """리랭킹 모델을 lazy loading으로 가져오기 (thread-safe)"""
+    global _bge_reranker
+    if _bge_reranker is None:
+        with _model_lock:  # 한 번에 하나의 스레드만 모델 로드
+            if _bge_reranker is None:  # double-check locking pattern
+                print(">> 리랭킹 모델 로드 시작...")
+                import time
+                start_time = time.time()
+                try:
+                    _bge_reranker = CrossEncoder(
+                        "dragonkue/bge-reranker-v2-m3-ko",
+                        activation_fn=torch.nn.Sigmoid(),
+                        device=DEVICE
+                    )
+                    elapsed = time.time() - start_time
+                    print(f">> 리랭킹 모델 로드 성공 (소요시간: {elapsed:.2f}초)")
+                except Exception as e:
+                    print(f"!! 리랭킹 모델 로드 실패: {e}")
+                    raise
+    return _bge_reranker
+
+# 기존 코드와의 호환성을 위해 변수 이름 유지 (실제 사용시 lazy loading)
+hf_model = None  # MultiIndexRAGSearchEngine에서 사용시 get_hf_model() 호출
+BGE_RERANKER = None  # MultiIndexRAGSearchEngine에서 사용시 get_bge_reranker() 호출
 
 class MultiIndexRAGSearchEngine:
-    def __init__(self, google_api_key: str = None, cohere_api_key: str = None, hf_model = hf_model, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
+    def __init__(self, google_api_key: str = None, cohere_api_key: str = None, hf_model = None, es_host: str = None, es_user: str = None, es_password: str = None, config: RAGConfig = None):
         if config is None:
             config = RAGConfig()
         api_key = google_api_key or os.getenv('GOOGLE_API_KEY')
@@ -66,34 +118,9 @@ class MultiIndexRAGSearchEngine:
             es_host or config.ELASTICSEARCH_HOST,
             basic_auth=(es_user or config.ELASTICSEARCH_USER, es_password or config.ELASTICSEARCH_PASSWORD)
         )
-        # SentenceTransformer 안전한 초기화 (meta 장치 문제 완전 회피)
-
-        # if not hf_model:
-        #     try:
-        #         print(">> SentenceTransformer 모델 로드 시작...")
-
-        #         # 환경변수로 meta 장치 사용 방지
-        #         os.environ["TRANSFORMERS_OFFLINE"] = "0"
-
-        #         # 1단계: CPU 전용으로 로드
-        #         print(">> CPU 전용으로 모델 로드...")
-        #         self.hf_model = SentenceTransformer("dragonkue/bge-m3-ko", device="cpu", trust_remote_code=True)
-        #         print(">> CPU 모델 로드 성공")
-
-        #     except Exception as e:
-        #         print(f">> 한국어 모델 로드 실패: {e}")
-        #         print(">> 영어 fallback 모델 시도...")
-        #         try:
-        #             # 더 안정적인 영어 모델로 fallback
-        #             self.hf_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-        #             print(">> Fallback 모델 로드 성공")
-        #         except Exception as final_error:
-        #             print(f">> 모든 모델 로드 실패: {final_error}")
-        #             print(">> 임베딩 기능 비활성화")
-        #             self.hf_model = None
-        # else:
-        self.hf_model = hf_model
-
+        # Lazy loading: 모델은 실제 사용시에만 로드
+        self._hf_model = hf_model  # None으로 저장
+        self._reranker = None
         self.TEXT_INDEX = "bge_text"
         self.TABLE_INDEX = "bge_table"
         self.config = config
@@ -118,6 +145,20 @@ class MultiIndexRAGSearchEngine:
                 self.synonym_dict = json.load(f)
         else:
             self.synonym_dict = {}
+    
+    @property
+    def hf_model(self):
+        """임베딩 모델을 lazy loading으로 가져오기"""
+        if self._hf_model is None:
+            self._hf_model = get_hf_model()
+        return self._hf_model
+    
+    @property
+    def reranker(self):
+        """리랭킹 모델을 lazy loading으로 가져오기"""
+        if self._reranker is None:
+            self._reranker = get_bge_reranker()
+        return self._reranker
 
     def embed_text(self, text: str) -> List[float]:
         try:
@@ -494,11 +535,48 @@ class MultiIndexRAGSearchEngine:
             # 오류 발생시 원본 결과 반환
             return results[:top_k]
 
+    def BGE_rerank(self, results, query, top_k=20):
+        if not results:
+            return results
+
+        subset = results[:top_k]
+        try:
+            pairs = []
+            for r in subset:
+                content = r.get("page_content", "") or ""
+                name = r.get("name", "") or ""
+                doc_text = f"제목: {name}\n내용: {content}".strip()
+                pairs.append([query, doc_text if doc_text else content])
+
+            if not pairs:
+                return subset
+
+            scores = self.reranker.predict(pairs, batch_size=32)
+
+            reranked = []
+            for r, s in zip(subset, scores):
+                item = r.copy()
+                item["rerank_score"] = float(s)
+                reranked.append(item)
+
+            reranked.sort(key=lambda x: x["rerank_score"], reverse=True)
+            for i, r in enumerate(reranked, start=1):
+                r["rerank_rank"] = i
+
+            return reranked
+
+        except Exception as e:
+            print(f"Cohere reranker 오류: {e}")
+            # 오류 발생시 원본 결과 반환
+            return subset
+
+
     def simple_reranking(self, results: List[Dict], query: str, top_k: int = 20) -> List[Dict]:
         """
         Cohere reranker를 사용한 재순위화 (기존 simple_reranking 대체)
         """
-        return self.cohere_reranking(results, query, top_k)
+        return self.cohere_reranking(results, query, top_k) # rerank-v3.5, api 호출을 통한 빠른 속도
+        #return self.BGE_rerank(results, query, top_k) # bge-reranker-v2-m3-ko, 로컬실행
 
     def document_summarization(self, results: List[Dict], query: str) -> List[Dict]:
         summarized_results = []
@@ -531,11 +609,14 @@ class MultiIndexRAGSearchEngine:
             enhanced_query_text = query
             enhanced_query_table = query
         hybrid_results = self.hybrid_search(query, top_k=self.TOP_K_RETRIEVAL, enhanced_query_text=enhanced_query_text, enhanced_query_table=enhanced_query_table)
-        reranked_results = hybrid_results
+
         if self.USE_RERANKING and len(hybrid_results) > 5:
             reranked_results = self.simple_reranking(
                 hybrid_results, query, top_k=self.TOP_K_RERANK
             )
+        else:
+            reranked_results = hybrid_results
+
         final_results = reranked_results[:self.TOP_K_FINAL]
         if self.USE_SUMMARIZATION:
             final_results = self.document_summarization(final_results, query)

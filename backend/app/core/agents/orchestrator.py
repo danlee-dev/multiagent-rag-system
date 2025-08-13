@@ -98,6 +98,21 @@ class OrchestratorAgent:
         self.data_gatherer = DataGathererAgent()
         self.processor = ProcessorAgent()
 
+    # ✅ 추가: 일관된 상태 메시지 생성을 위한 헬퍼 함수
+    def _create_status_event(self, stage: str, sub_stage: str, message: str, details: Optional[Dict] = None) -> Dict:
+        """표준화된 상태 이벤트 객체를 생성합니다."""
+        return {
+            "type": "status",
+            "timestamp": datetime.now().isoformat(),
+            "data": {
+                "agent": "OrchestratorAgent",
+                "stage": stage,
+                "sub_stage": sub_stage,
+                "message": message,
+                "details": details or {}
+            }
+        }
+
     async def _invoke_with_fallback(self, prompt: str, primary_model, fallback_model):
         """Gemini API rate limit 시 OpenAI로 fallback 처리"""
         try:
@@ -534,35 +549,34 @@ class OrchestratorAgent:
         state['chart_counter'] = 0
 
         # 1. 단계별 계획 수립
-        yield {"type": "status", "data": {"message": "지능형 분석 계획 수립 중..."}}
+        yield self._create_status_event("PLANNING", "GENERATE_PLAN_START", "분석 계획 수립 중...")
         state_with_plan = await self.generate_plan(state)
         plan = state_with_plan.get("plan", {})
 
-        print(">> 수립된 계획:")
-        print(json.dumps(plan, ensure_ascii=False, indent=2))
-
         yield {"type": "plan", "data": {"plan": plan}}
+
+        yield self._create_status_event("PLANNING", "GENERATE_PLAN_COMPLETE", "분석 계획 수립 완료.", details={
+            "plan_title": plan.get('title'),
+            "plan_reasoning": plan.get('reasoning'),
+            "step_count": len(plan.get("execution_steps", []))
+        })
+
+        await asyncio.sleep(0.01)
 
         # 2. 단계별 데이터 수집 실행
         execution_steps = plan.get("execution_steps", [])
         final_collected_data: List[SearchResult] = []
         step_results_context: Dict[int, str] = {}
-        cumulative_selected_indexes: List[int] = []  # ⭐ 누적 선택 인덱스 초기화
+        cumulative_selected_indexes: List[int] = []
 
-        for step_info in execution_steps:
+        for i, step_info in enumerate(execution_steps):
             current_step_index = step_info["step"]
-            step_reasoning = step_info.get("reasoning", "")
-
-            yield {"type": "status", "data": {"message": f"분석 {current_step_index}단계 시작: {step_reasoning}"}}
+            yield self._create_status_event("GATHERING", "STEP_START", f"데이터 수집 ({i + 1}/{len(execution_steps)}) 시작.")
 
             tasks_for_this_step = []
             for sq in step_info.get("sub_questions", []):
                 injected_query = self._inject_context_into_query(sq["question"], step_results_context)
-                tasks_for_this_step.append({
-                    "tool": sq["tool"],
-                    "inputs": {"query": injected_query}
-                })
-
+                tasks_for_this_step.append({"tool": sq["tool"], "inputs": {"query": injected_query}})
             if not tasks_for_this_step:
                 continue
 
@@ -574,167 +588,152 @@ class OrchestratorAgent:
                     step_collected_data = event["data"]["collected_data"]
 
             summary_of_step = " ".join([res.content for res in step_collected_data])
-            step_results_context[current_step_index] = summary_of_step[:2000] # 메모리 관리
-
+            step_results_context[current_step_index] = summary_of_step[:2000]
             final_collected_data.extend(step_collected_data)
 
-            # 디버깅 출력
             print(f">> {current_step_index}단계 완료: {len(step_collected_data)}개 데이터 수집. (총 {len(final_collected_data)}개)")
-            print("--"*50)
-            print(f"수집된 정보 :\n")
-            for i, data_item in enumerate(final_collected_data):
-                print(f"  [{i:2d}] [{getattr(data_item, 'source', 'Unknown'):12s}] {getattr(data_item, 'title', 'No Title')[:80]}")
-            print("--"*50)
 
-            # ⭐ 단계별 LLM 데이터 선택
             if len(final_collected_data) > 0:
-                yield {"type": "status", "data": {"message": f"{current_step_index}단계 데이터 분석 중..."}}
+                yield self._create_status_event("PROCESSING", "FILTER_DATA_START", "수집 데이터 선별 중...")
 
+                # reasoning을 반환하지 않으므로 selected_indexes만 받습니다.
                 selected_indexes = await self._select_relevant_data_for_step(
-                    step_info,
-                    final_collected_data,
-                    state["original_query"]
+                    step_info, final_collected_data, state["original_query"]
                 )
-                print(f"  - LLM이 선택한 인덱스: {selected_indexes}")
 
-                cumulative_selected_indexes = list(set(cumulative_selected_indexes + selected_indexes))
-                cumulative_selected_indexes.sort()
+                yield self._create_status_event("PROCESSING", "FILTER_DATA_COMPLETE", f"핵심 데이터 {len(selected_indexes)}개 선별 완료.", details={
+                    "selected_indices": selected_indexes
+                })
+                cumulative_selected_indexes = sorted(list(set(cumulative_selected_indexes + selected_indexes)))
 
-                print(f"  - 누적 선택 인덱스: {cumulative_selected_indexes}")
+        # >> 핵심 수정: 전체 데이터 딕셔너리를 프론트로 먼저 전송
+        print(f"\n>> 전체 데이터 딕셔너리 생성 및 전송")
+
+        # 전체 데이터를 인덱스:데이터 형태의 딕셔너리로 변환
+        full_data_dict = {}
+        print(f"\n🔍 === FULL_DATA_DICT 생성 디버깅 ===")
+        print(f"final_collected_data 총 개수: {len(final_collected_data)}")
+
+        for idx, data in enumerate(final_collected_data):
+            full_data_dict[idx] = {
+                "title": getattr(data, 'title', 'No Title'),
+                "content": getattr(data, 'content', ''),
+                "source": getattr(data, 'source', 'Unknown'),
+                "url": getattr(data, 'url', ''),
+                "source_url": getattr(data, 'source_url', ''),
+                "score": getattr(data, 'score', 0.0),
+                "document_type": getattr(data, 'document_type', 'unknown')
+            }
+
+            # 첫 5개와 마지막 5개만 상세 로그
+            if idx < 5 or idx >= len(final_collected_data) - 5:
+                print(f"  [{idx}]: 제목='{getattr(data, 'title', 'No Title')[:50]}...' 출처='{getattr(data, 'source', 'Unknown')}'")
+
+        print(f"전체 데이터 딕셔너리 키들: {list(full_data_dict.keys())}")
+        print(f"전체 데이터 딕셔너리 크기: {len(full_data_dict)}개")
+
+        # 전체 데이터 딕셔너리를 프론트로 전송
+        print(f"\n🚀 === 프론트엔드로 FULL_DATA_DICT 전송 ===")
+        print(f"전송할 데이터 구조:")
+        print(f"  type: 'full_data_dict'")
+        print(f"  data.data_dict 키들: {list(full_data_dict.keys())}")
+        print(f"  data.data_dict 크기: {len(full_data_dict)}")
+
+        # 샘플 데이터 확인 (첫 번째 것만)
+        if full_data_dict:
+            first_key = list(full_data_dict.keys())[0]
+            first_item = full_data_dict[first_key]
+            print(f"  샘플 [{first_key}]: 제목='{first_item['title'][:30]}...' 출처='{first_item['source']}'")
+
+        yield {"type": "full_data_dict", "data": {"data_dict": full_data_dict}}
 
         # 3. 섹션별 데이터 상태 분석 및 보고서 구조 설계
-        yield {"type": "status", "data": {"message": f"총 {len(final_collected_data)}개 정보 수집 완료. 수집된 정보를 바탕으로 보고서를 생성합니다."}}
+        # 중복된 full_data_dict 생성 및 전송 제거 (이미 위에서 처리됨)
 
-        print(f">> 모든 단계 완료. 보고서 구조 설계 시작\n")
+        yield self._create_status_event("PROCESSING", "DESIGN_STRUCTURE_START", "보고서 구조 설계 중...")
 
-        # ⭐ design_report_structure에 selected_indexes 전달
-        design = await self.processor.process("design_report_structure", final_collected_data, cumulative_selected_indexes, query)
+        design = None
+        async for result in self.processor.process("design_report_structure", final_collected_data, cumulative_selected_indexes, query):
+            if result.get("type") == "result":
+                design = result.get("data")
+                break
 
         if not design or "structure" not in design or not design["structure"]:
-            yield {"type": "error", "data": {"message": "보고서 구조를 설계하는 데 실패했습니다. 수집된 데이터가 부족하거나 분석할 수 없는 형식일 수 있습니다."}}
+            yield {"type": "error", "data": {"message": "보고서 구조 설계에 실패했습니다."}}
             return
+
+        section_titles = [s.get('section_title', '제목 없음') for s in design.get('structure', [])]
+        yield self._create_status_event("PROCESSING", "DESIGN_STRUCTURE_COMPLETE", "보고서 구조 설계 완료.", details={
+            "report_title": design.get("title"),
+            "section_titles": section_titles
+        })
 
         # 보고서 제목을 가장 먼저 스트리밍
         yield {"type": "content", "data": {"chunk": f"# {design.get('title', query)}\n\n---\n\n"}}
 
-        # 4. 데이터 재수집이 필요한 섹션에 대해 백그라운드 작업 실행
-        recollection_tasks: Dict[int, asyncio.Task] = {}
-        for i, section in enumerate(design.get("structure", [])):
-            if not section.get("is_sufficient", True):
-                feedback = section.get("feedback_for_gatherer")
-                if isinstance(feedback, dict) and "tool" in feedback and "query" in feedback:
-                    tool = feedback["tool"]
-                    recollection_query = feedback["query"]
-                    yield {"type": "status", "data": {"message": f"'{section.get('section_title')}' 섹션 데이터 보강({tool}) 시작..."}}
-                    recollection_tasks[i] = asyncio.create_task(
-                        self.data_gatherer.execute(tool, {"query": recollection_query})
-                    )
-
-        # 5. 순차적 생성 및 비동기 대기 루프
+        # 4. 섹션별 생성 루프
         for i, section in enumerate(design.get("structure", [])):
             section_title = section.get('section_title', f'섹션 {i+1}')
+            use_contents = section.get("use_contents", [])
 
-            # 재수집 작업 완료 대기
-            pending_tasks = {idx: task for idx, task in recollection_tasks.items() if idx <= i and not task.done()}
-            if pending_tasks:
-                yield {"type": "status", "data": {"message": f"'{section_title}' 섹션 생성을 위해 데이터 보강 완료를 기다립니다..."}}
-                print(f">> {i+1}번 섹션 생성 전, 재수집 작업 완료 대기...")
-                await asyncio.gather(*pending_tasks.values())
+            yield self._create_status_event("GENERATING", "GENERATE_SECTION_START", f"'{section_title}' 섹션 생성 중...", details={
+                "section_index": i,
+                "section_title": section_title,
+                "using_indices": use_contents
+            })
 
-            # ⭐ 재수집 완료 후 데이터 추가 및 use_contents 업데이트
-            original_use_contents = section.get("use_contents", []).copy()
+            # >> 단순화: section_data_list만 생성 (차트용)
+            section_data_list = []
+            for actual_index in use_contents:
+                if 0 <= actual_index < len(final_collected_data):
+                    section_data_list.append(final_collected_data[actual_index])
 
-            if i in recollection_tasks and recollection_tasks[i].done():
-                try:
-                    new_data, _ = recollection_tasks[i].result()
-                    if new_data:
-                        before_count = len(final_collected_data)
-                        final_collected_data.extend(new_data)
-                        after_count = len(final_collected_data)
+            print(f"\n🔍 === 섹션 '{section_title}' 생성 디버깅 ===")
+            print(f"   사용할 실제 인덱스: {use_contents}")
+            print(f"   final_collected_data 길이: {len(final_collected_data)}")
+            print(f"   full_data_dict 키들: {list(full_data_dict.keys())}")
 
-                        print(f">> 섹션 {i+1} 재수집 완료:")
-                        print(f"   추가된 데이터: {len(new_data)}개")
-                        print(f"   전체 데이터: {before_count} → {after_count}개")
+            # 사용되는 인덱스들의 실제 데이터 확인
+            for idx in use_contents[:3]:  # 처음 3개만
+                if idx in full_data_dict:
+                    print(f"   [{idx}] 제목: '{full_data_dict[idx]['title'][:50]}...'")
+                else:
+                    print(f"   [❌{idx}] 인덱스가 full_data_dict에 없음!")
 
-                        # 새로 추가된 데이터 미리보기
-                        for j, new_item in enumerate(new_data[:3]):
-                            new_index = before_count + j
-                            print(f"   [{new_index:2d}] [NEW] {getattr(new_item, 'source', 'Unknown'):10s} | {getattr(new_item, 'title', 'No Title')[:50]}")
-
-                        # ⭐ 새로 추가된 데이터 인덱스를 use_contents에 추가
-                        new_data_indexes = list(range(before_count, after_count))
-
-                        yield {"type": "status", "data": {"message": f"'{section_title}' 섹션을 위한 데이터를 재선택합니다..."}}
-
-                        # LLM이 기존 + 새 데이터에서 최적 조합 선택
-                        updated_use_contents = await self._update_use_contents_after_recollection(
-                            section,
-                            final_collected_data,
-                            original_use_contents,
-                            new_data_indexes,
-                            query
-                        )
-
-                        # 섹션의 use_contents 업데이트
-                        section["use_contents"] = updated_use_contents
-
-                        print(f"   원본 use_contents: {original_use_contents}")
-                        print(f"   업데이트된 use_contents: {updated_use_contents}")
-
-                        yield {"type": "status", "data": {"message": f"'{section_title}' 섹션의 데이터 선택이 완료되었습니다."}}
-
-                except Exception as e:
-                    print(f">> 백그라운드 재수집 실패 (섹션 {i+1}): {e}")
-                    yield {"type": "status", "data": {"message": f"'{section_title}' 섹션의 데이터 보강에 실패했습니다."}}
-
-            # ⭐ 섹션 생성 시 업데이트된 use_contents 사용
-            final_use_contents = section.get("use_contents", [])
-            if final_use_contents:
-                section_data = [final_collected_data[idx] for idx in final_use_contents if 0 <= idx < len(final_collected_data)]
-                print(f"\n>> 섹션 '{section_title}' 생성:")
-                print(f"   사용할 데이터: {len(section_data)}개 (인덱스: {final_use_contents})")
-            else:
-                section_data = final_collected_data[:5]  # fallback
-                print(f"\n>> 섹션 '{section_title}' 생성:")
-                print(f"   fallback 데이터: {len(section_data)}개")
-
-            # 섹션 생성
+            # 섹션 생성 (전체 데이터 딕셔너리와 사용 인덱스 전달)
             buffer = ""
             section_content_generated = False
             try:
-                # ⭐ 섹션별 매핑 정보를 프론트엔드에 전송
-                section_mapping_data = {
-                    "section_title": section_title,
-                    "section_to_global_mapping": final_use_contents,
-                    "section_data_count": len(section_data)
-                }
-                yield {"type": "section_mapping", "data": section_mapping_data}
-
-                # ⭐ 섹션별 선택된 데이터와 매핑 정보 전달
-                async for chunk in self.processor.generate_section_streaming(section, section_data, query, final_use_contents):
+                async for chunk in self.processor.generate_section_streaming(
+                    section, full_data_dict, query, use_contents
+                ):
                     section_content_generated = True
                     buffer += chunk
 
-                    # 차트 생성 처리 (간소화됨)
+                    # 차트 생성 처리 (기존 로직 유지)
                     if "[GENERATE_CHART]" in buffer:
                         parts = buffer.split("[GENERATE_CHART]", 1)
 
-                        # 차트 생성 전 부분이 있으면 즉시 전송
                         if parts[0]:
                             yield {"type": "content", "data": {"chunk": parts[0]}}
 
-                        buffer = parts[1]  # 차트 생성 후 부분은 buffer에 보관
+                        buffer = parts[1]
 
-                        # 차트 생성 시작 상태 메시지
-                        yield {"type": "status", "data": {"message": f"'{section_title}' 섹션의 차트를 생성합니다..."}}
+                        yield self._create_status_event("GENERATING", "GENERATE_CHART_START", f"'{section_title}' 차트 생성 중...")
 
+                        # 차트 생성 과정의 상태 메시지를 위한 콜백 (상태만 반환, yield 없음)
                         async def chart_yield_callback(event_data):
-                            return None
+                            # 차트 생성 상태 로그 출력 (yield 없이 상태만 처리)
+                            print(f"차트 생성 상태: {event_data}")
+                            return event_data
 
-                        # ⭐ 핵심 개선: 이미 선택된 section_data 사용 (복잡한 키워드 매칭 제거)
-                        chart_data = await self.processor.process("create_chart_data", section_data, section_title, buffer, "", chart_yield_callback)
+                        chart_data = None
+                        async for result in self.processor.process("create_chart_data", section_data_list, section_title, buffer, "", chart_yield_callback):
+                            if result.get("type") == "chart":
+                                chart_data = result.get("data")
+                                break
 
-                        if "error" not in chart_data:
+                        if chart_data and "error" not in chart_data:
                             current_chart_index = state.get('chart_counter', 0)
                             chart_placeholder = f"\n\n[CHART-PLACEHOLDER-{current_chart_index}]\n\n"
                             yield {"type": "content", "data": {"chunk": chart_placeholder}}
@@ -742,15 +741,15 @@ class OrchestratorAgent:
                             state['chart_counter'] = current_chart_index + 1
                         else:
                             print(f"   차트 생성 실패: {chart_data}")
-                            yield {"type": "content", "data": {"chunk": "\n\n*[차트 생성에 실패했습니다]*\n\n"}}
+                            yield {"type": "status", "data": {"message": f"'{section_title}' 차트 생성이 완료되지 못했습니다. 텍스트로 계속 진행합니다."}}
+                            yield {"type": "content", "data": {"chunk": "\n\n*[데이터 부족으로 차트 표시가 제한됩니다]*\n\n"}}
 
                     else:
-                        # 일반 chunk 처리 (개선된 조건)
                         potential_chart_marker = "[GENERATE_CHART]"
                         has_partial_marker = any(potential_chart_marker.startswith(buffer[-i:]) for i in range(1, min(len(buffer)+1, len(potential_chart_marker)+1)) if buffer[-i:])
 
                         should_flush = (
-                            not has_partial_marker and (  # 마커 조각이 없을 때만 flush
+                            not has_partial_marker and (
                                 len(buffer) >= 120 or
                                 buffer.endswith(('.', '!', '?', '\n', '다.', '요.', '니다.', '습니다.', '됩니다.', '있습니다.')) or
                                 '\n\n' in buffer
@@ -761,11 +760,9 @@ class OrchestratorAgent:
                             yield {"type": "content", "data": {"chunk": buffer}}
                             buffer = ""
 
-                # 버퍼에 남은 내용이 있으면 출력
                 if buffer.strip():
                     yield {"type": "content", "data": {"chunk": buffer}}
 
-                # 섹션 내용이 전혀 생성되지 않은 경우 처리
                 if not section_content_generated:
                     print(f">> 경고: 섹션 '{section_title}' 내용 생성 실패")
                     yield {"type": "content", "data": {"chunk": f"*'{section_title}' 섹션 생성 중 문제가 발생했습니다.*\n\n"}}
@@ -774,78 +771,28 @@ class OrchestratorAgent:
                 print(f">> 섹션 생성 중 오류 발생: {e}")
                 yield {"type": "content", "data": {"chunk": f"*'{section_title}' 섹션 생성 중 오류가 발생했습니다: {str(e)}*\n\n"}}
 
-            # 섹션 끝 간격 추가
             yield {"type": "content", "data": {"chunk": "\n\n"}}
 
-        # 워크플로우 완료 후 출처 정보 설정
-        if final_collected_data:
-            sources_data = []
-            seen_urls = set()
-            source_count = 0
-            for result in final_collected_data:
-                if source_count >= 100:
-                    break
+        # 워크플로우 완료 후 출처 정보 설정 (실제 사용된 인덱스만)
+        # 모든 섹션에서 사용된 인덱스들을 수집
+        used_indexes = set()
+        for section in design.get("structure", []):
+            use_contents = section.get("use_contents", [])
+            used_indexes.update(use_contents)
 
-                # URL 기반 중복 제거
-                result_url = None
-                if hasattr(result, 'url') and result.url:
-                    result_url = result.url
-                elif hasattr(result, 'source_url') and result.source_url:
-                    result_url = result.source_url
+        print(f">> 실제 사용된 인덱스들: {sorted(used_indexes)}")
+        print(f">> final_collected_data 길이: {len(final_collected_data) if final_collected_data else 0}")
+        print(f">> used_indexes 길이: {len(used_indexes)}")
 
-                if result_url and result_url in seen_urls:
-                    continue
+        # sources 이벤트는 더 이상 보내지 않음 (full_data_dict만 사용)
+        # 대신 사용된 인덱스 정보만 로깅
+        if final_collected_data and used_indexes:
+            print(f">> 보고서에서 실제 사용된 인덱스들: {sorted(used_indexes)}")
+            print(f">> 총 {len(used_indexes)}개 출처 사용 (전체 {len(final_collected_data)}개 중)")
 
-                if result_url:
-                    seen_urls.add(result_url)
-
-                source_count += 1
-
-                # Vector DB 결과인 경우 doc_link와 page_number 처리
-                if hasattr(result, 'doc_link') and hasattr(result, 'page_number'):
-                    page_num = result.page_number[0] if isinstance(result.page_number, list) and result.page_number else result.page_number
-                    page_display = f"p.{page_num}" if page_num else ""
-
-                    source_data = {
-                        "id": source_count,
-                        "title": f"{getattr(result, 'title', '자료')} {page_display}".strip(),
-                        "content": result.content[:300] + "..." if len(result.content) > 300 else result.content,
-                        "url": result.doc_link,
-                        "source_url": result.doc_link,
-                        "source_type": "vector_db"
-                    }
-                else:
-                    # 기존 웹 검색 결과 처리
-                    source_data = {
-                        "id": source_count,
-                        "title": getattr(result, 'title', "자료"),
-                        "content": result.content[:300] + "..." if len(result.content) > 300 else result.content,
-                        "url": result.url if hasattr(result, 'url') else None,
-                        "source_url": result.source_url if hasattr(result, 'source_url') else None,
-                        "source_type": result.source if hasattr(result, 'source') else "unknown"
-                    }
-                sources_data.append(source_data)
-
-            # state에 출처 정보 저장
-            if "metadata" not in state:
-                state["metadata"] = {}
-            state["metadata"]["sources"] = sources_data
-
-            print(f">> 출처 정보 설정 완료: {len(sources_data)}개 출처")
-
-            # 출처 정보를 별도 이벤트로 먼저 전송
-            sources_payload = {
-                "total_count": len(sources_data),
-                "sources": sources_data
-            }
-            yield {"type": "sources", "data": sources_payload}
-
-            # 출처 정보를 complete 이벤트로도 전송 (호환성)
-            yield {"type": "complete", "data": {
-                "message": "보고서 생성 완료",
-                "sources": sources_payload
-            }}
-
+        yield {"type": "complete", "data": {
+            "message": "보고서 생성 완료"
+        }}
 
     async def _update_use_contents_after_recollection(
     self,

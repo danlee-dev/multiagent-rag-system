@@ -7,6 +7,7 @@ import concurrent.futures
 import os
 from typing import Dict, List, Any, Optional, AsyncGenerator, Tuple
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain.prompts import PromptTemplate
 from langchain import hub
@@ -22,6 +23,9 @@ from ...services.search.search_tools import (
     graph_db_search,
     scrape_and_extract_content,
 )
+
+# 전역 ThreadPoolExecutor 생성 (재사용으로 성능 향상)
+_global_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="search_worker")
 
 
 
@@ -54,8 +58,8 @@ class DataGathererAgent:
         # 도구 매핑 설정 - 이름 통일
         self.tool_mapping = {
             "web_search": self._web_search,
-            "vector_db_search": self._vector_db_search,  # 이름 수정
-            "graph_db_search": self._graph_db_search,    # 이름 수정
+            "vector_db_search": self._vector_db_search,
+            "graph_db_search": self._graph_db_search,
             "rdb_search": self._rdb_search,
             "scrape_content": self._scrape_content,
         }
@@ -480,11 +484,13 @@ class DataGathererAgent:
             # 최적화된 쿼리 사용 (이미 _optimize_query_for_tool에서 처리됨)
             print(f"  - 웹 검색 실행 쿼리: {query}")
 
-            # ThreadPoolExecutor를 사용하여 동기 함수를 안전하게 실행
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(debug_web_search, query)
-                result_text = future.result(timeout=30)  # 30초 타임아웃
+            # 전역 ThreadPoolExecutor 사용하여 병렬 처리
+            loop = asyncio.get_event_loop()
+            result_text = await loop.run_in_executor(
+                _global_executor,  # 전역 executor 사용
+                debug_web_search,
+                query
+            )
 
             # 결과가 문자열인 경우 파싱
             search_results = []
@@ -552,16 +558,14 @@ class DataGathererAgent:
     async def _vector_db_search(self, query: str, **kwargs) -> List[SearchResult]:
         """Vector DB 검색 실행 - 오류 처리 강화"""
         try:
-            # LangChain 추적 비활성화하여 SentenceTransformer 충돌 방지
-
-            # 동기 함수를 별도 스레드에서 실행하여 이벤트 루프 충돌 방지
-            # import concurrent.futures
-            # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            #     future = executor.submit(vector_db_search, query)  # hf_model은 None으로 고정
-            #     results = future.result(timeout=300)  # 30초 타임아웃
-
-            results = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: vector_db_search(query)
+            print(f">> Vector DB 검색 시작: {query}")
+            
+            # 전역 ThreadPoolExecutor 사용하여 병렬 처리
+            loop = asyncio.get_event_loop()
+            results = await loop.run_in_executor(
+                _global_executor,  # 전역 executor 사용
+                vector_db_search,
+                query
             )
 
             search_results = []
@@ -616,11 +620,36 @@ class DataGathererAgent:
                 # list of dict or list of str
                 for res in raw_results[:5]:
                     if isinstance(res, dict):
-                        title = res.get("entity") or res.get("product") or "그래프 결과"
-                        content = res.get("content") or json.dumps(res, ensure_ascii=False)
+                        # Graph DB 결과의 의미있는 제목 생성
+                        title_candidates = [
+                            res.get("title"),
+                            res.get("entity"),
+                            res.get("product"),
+                            res.get("name"),
+                            res.get("품목명"),
+                            res.get("원산지"),
+                            res.get("영양소명")
+                        ]
+                        title = next((t for t in title_candidates if t), "그래프 정보")
+
+                        # 관계형 데이터의 의미있는 내용 생성
+                        content_parts = []
+                        relationship_info = []
+
+                        # 관계 정보 추출
+                        for key, value in res.items():
+                            if "관계" in key or "연결" in key or key.endswith("_관계"):
+                                relationship_info.append(f"🔗 {key}: {value}")
+                            elif key not in ['title', 'content', 'entity', 'product'] and value:
+                                content_parts.append(f"• {key}: {value}")
+
+                        if relationship_info:
+                            content_parts = relationship_info + content_parts
+
+                        content = res.get("content") or "\n".join(content_parts[:8]) or json.dumps(res, ensure_ascii=False, indent=2)
                         score = res.get("confidence") or res.get("score") or 0.8
                     else:
-                        title = "그래프 결과"
+                        title = f"그래프 관계 정보"
                         content = str(res)
                         score = 0.8
 
@@ -629,22 +658,40 @@ class DataGathererAgent:
                             source="graph_db",
                             content=content,
                             search_query=query,
-                            title=f"그래프 정보: {title}",
+                            title=title,
                             score=score,
                             document_type="graph",
                             url=""  # 빈 문자열로 통일 (None 쓰면 후단에서 깨지는 경우 있음)
                         )
                     )
             elif isinstance(raw_results, dict):
-                title = raw_results.get("entity") or raw_results.get("product") or "그래프 결과"
-                content = raw_results.get("content") or json.dumps(raw_results, ensure_ascii=False)
+                # 단일 그래프 결과의 의미있는 제목 생성
+                title_candidates = [
+                    raw_results.get("title"),
+                    raw_results.get("entity"),
+                    raw_results.get("product"),
+                    raw_results.get("name"),
+                    raw_results.get("품목명")
+                ]
+                title = next((t for t in title_candidates if t), "그래프 관계 정보")
+
+                # 구조화된 내용 생성
+                content_parts = []
+                for key, value in raw_results.items():
+                    if key not in ['title', 'content', 'entity', 'product'] and value:
+                        if "관계" in key or "연결" in key:
+                            content_parts.append(f"🔗 {key}: {value}")
+                        else:
+                            content_parts.append(f"• {key}: {value}")
+
+                content = raw_results.get("content") or "\n".join(content_parts[:8]) or json.dumps(raw_results, ensure_ascii=False, indent=2)
                 score = raw_results.get("confidence") or raw_results.get("score") or 0.8
                 search_results.append(
                     SearchResult(
                         source="graph_db",
                         content=content,
                         search_query=query,
-                        title=f"그래프 정보: {title}",
+                        title=title,
                         score=score,
                         document_type="graph",
                         url=""
@@ -680,36 +727,32 @@ class DataGathererAgent:
         """RDB 검색 실행 - 반환 표준화"""
         try:
             loop = asyncio.get_running_loop()
-            results = await loop.run_in_executor(None, rdb_search, query)
+            result_text = await loop.run_in_executor(None, rdb_search, query)
 
-            search_results: List[SearchResult] = []
+            # rdb_search는 문자열을 반환하므로, 이를 단일 SearchResult로 변환
+            if isinstance(result_text, str) and result_text.strip():
+                # "PostgreSQL 검색 결과: "로 시작하는지 체크
+                if "PostgreSQL 검색 결과:" in result_text and "찾을 수 없습니다" in result_text:
+                    # 검색 결과가 없는 경우
+                    print(f"  - RDB에서 '{query}' 관련 데이터 없음")
+                    return []
 
-            for r in results:
-                # r이 dict가 아닐 수도 있음 → 안전 변환
-                if not isinstance(r, dict):
-                    try:
-                        r = dict(r)
-                    except Exception:
-                        r = {"raw": str(r)}
-
-                title = r.get("title") or r.get("food_name") or r.get("item_name") or "RDB 데이터"
-                content = r.get("content") or json.dumps(r, ensure_ascii=False)
-
-                search_results.append(
-                    SearchResult(
-                        source="rdb_search",
-                        content=content,
-                        search_query=query,
-                        title=title,
-                        url="",                 # None 금지
-                        score=float(r.get("score", 0.9)),   # 필드명 score로 통일
-                        document_type=r.get("document_type", "database"),
-                        metadata=r
-                    )
+                search_result = SearchResult(
+                    source="rdb_search",
+                    content=result_text,
+                    search_query=query,
+                    title="PostgreSQL 데이터베이스 검색 결과",
+                    url="",
+                    score=0.9,
+                    document_type="database",
+                    metadata={"raw_result": result_text}
                 )
+                print(f"  - rdb_search 래퍼 반환: 1개 (텍스트 결과)")
+                return [search_result]
+            else:
+                print(f"  - RDB 검색 결과가 비어있음")
+                return []
 
-            print(f"  - rdb_search 래퍼 반환: {len(search_results)}개")
-            return search_results[:5]
 
         except Exception as e:
             print(f"RDB 검색 오류: {e}")
@@ -850,7 +893,7 @@ class ProcessorAgent:
                 print(f"ProcessorAgent: 복구 불가능한 오류: {e}")
                 raise e
 
-    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None, state: Dict[str, Any] = None) -> Any:
+    async def process(self, processor_type: str, data: Any, param2: Any, param3: str, param4: str = "", yield_callback=None, state: Dict[str, Any] = None):
         """Orchestrator로부터 동기식 작업을 받아 처리합니다."""
         print(f"\n>> Processor 실행: {processor_type}")
 
@@ -858,16 +901,18 @@ class ProcessorAgent:
             # design_report_structure(data, selected_indexes, original_query)
             selected_indexes = param2
             original_query = param3
-            return await self._design_report_structure(data, selected_indexes, original_query)
+            result = await self._design_report_structure(data, selected_indexes, original_query)
+            yield {"type": "result", "data": result}
 
         elif processor_type == "create_chart_data":
             # create_charts(section_data, section_title, generated_content)
             section_title = param2
             generated_content = param3
-            return await self._create_charts(data, section_title, generated_content, yield_callback, state)
+            async for result in self._create_charts(data, section_title, generated_content, yield_callback, state):
+                yield result
 
         else:
-            return {"error": f"알 수 없는 처리 타입: {processor_type}"}
+            yield {"type": "error", "data": {"error": f"알 수 없는 처리 타입: {processor_type}"}}
 
     async def _design_report_structure(self, data: List[SearchResult], selected_indexes: List[int], query: str) -> Dict[str, Any]:
         """보고서 구조 설계 + 섹션별 사용할 데이터 인덱스 선택"""
@@ -1084,13 +1129,15 @@ class ProcessorAgent:
                 source_info = f"출처: {source_name}"
                 source_link = source_name
 
-            # ⭐ 핵심: 섹션 데이터 내에서의 인덱스 사용 (0, 1, 2...)
+            # 핵심: 섹션 데이터 내에서의 인덱스 사용 (0, 1, 2...)
             context_with_sources += f"--- 문서 ID {i}: [{source_info}] ---\n제목: {res.title}\n내용: {res.content}\n출처_링크: {source_link}\n\n"
 
         prompt = f"""
     당신은 여러 데이터 소스를 종합하여 특정 주제에 대한 분석 보고서의 한 섹션을 저술하는 주제 전문가입니다.
 
     **작성할 섹션의 주제**: "{section_title}"
+
+    **사용 데이터 인덱스**
 
     **참고할 선택된 데이터** (섹션별로 엄선된 관련 데이터):
     {context_with_sources[:8000]}
@@ -1100,15 +1147,16 @@ class ProcessorAgent:
     2. **간결한 요약**: 정보를 단순히 나열하지 말고, 1~2 문단 이내의 간결하고 논리적인 핵심 요약문으로 재구성해주세요.
     3. **중복 제거**: 여러 문서에 걸쳐 반복되는 내용은 하나로 통합하여 제거하세요.
     4. **객관성 유지**: 데이터에 기반하여 객관적인 사실만을 전달해주세요.
-    5. **⭐ 출처 정보 보존**: 중요한 정보나 수치를 언급할 때 해당 정보의 출처를 [SOURCE:번호1, 번호2, ...] 형식으로 표기하세요.
-    - **문서 ID 순서대로 1, 2... 번호를 사용** (1부터 시작)
-    - 예시: "시장 규모가 증가했습니다 [SOURCE:1]", "매출이 상승했습니다 [SOURCE:1, 2]"
+    5. **⭐ 출처 정보 보존**: 중요한 정보나 수치를 언급할 때 해당 정보의 출처를 [SOURCE:숫자] 형식으로 표기하세요. 반드시 숫자만 사용하세요.
+    - **문서 ID 번호를 사용**
+    - 예시: "시장 규모가 증가했습니다 [SOURCE:1]", "매출이 상승했습니다 [SOURCE:2]"
+    - 잘못된 예시: [SOURCE:데이터 1], [SOURCE:문서 1] (이런 형식 사용 금지)
     6. **⭐ 노션 스타일 마크다운 적극 활용**:
-    - **중요한 키워드나 수치**: `**굵은 글씨**`로 강조
-    - *일반적인 강조나 트렌드*: `*기울임체*`로 표현
-    - **핵심 포인트나 결론**: `> 인용문` 형태로 강조
-    - **항목이 여러 개**: `- 첫 번째 항목`, `- 두 번째 항목` 형태
-    - **하위 분류**: `  - 세부 항목` (들여쓰기)
+    - **중요한 키워드나 수치**: **굵은 글씨**로 강조
+    - *일반적인 강조나 트렌드*: *기울임체*로 표현
+    - **핵심 포인트나 결론**: > 인용문 형태로 강조
+    - **항목이 여러 개**: - 첫 번째 항목, - 두 번째 항목 형태
+    - **하위 분류**:   - 세부 항목 (들여쓰기)
     - **단락 구분**: 내용 변화 시 공백 라인으로 명확히 구분
 
     **결과물 (핵심 요약본)**:
@@ -1120,56 +1168,38 @@ class ProcessorAgent:
         )
         return response.content
 
-    async def generate_section_streaming(self, section: Dict[str, Any], section_data: List[SearchResult], original_query: str, global_indexes: Optional[List[int]] = None) -> AsyncGenerator[str, None]:
-        """⭐ 수정: 섹션별 선택된 데이터만 사용하여 스트리밍 생성"""
+    async def generate_section_streaming(self, section: Dict[str, Any], full_data_dict: Dict[int, Dict], original_query: str, use_indexes: List[int]) -> AsyncGenerator[str, None]:
+        """전체 데이터 딕셔너리에서 해당 섹션 인덱스만 사용하여 스트리밍 생성"""
 
         section_title = section.get("section_title", "제목 없음")
         content_type = section.get("content_type", "synthesis")
         description = section.get("description", "")
 
-        # 섹션 시작 시 H2 헤더로 출력하고 매핑 정보 포함
+        # 섹션 시작 시 H2 헤더로 출력
         section_header = f"\n\n## {section_title}\n\n"
-
-        # 🔥 핵심 수정: 섹션 매핑 정보를 섹션 헤더에 포함
-        section_header = f"\n\n## {section_title}\n\n"
-
-        # 매핑 정보를 숨김 주석으로 추가 (프론트엔드에서 파싱할 수 있도록)
-        if global_indexes:
-            mapping_comment = f"<!--SECTION_MAPPING:{json.dumps(global_indexes)}-->"
-            section_header = mapping_comment + section_header
-            print(f"  - 섹션 매핑 정보 포함: {section_title} -> {global_indexes}")
-
         yield section_header
 
         if content_type == "synthesis":
-            # ⭐ 수정: _synthesize_data_for_section 대신 직접 section_data에서 content 추출
+            print(f"\n🔍 === SECTION STREAMING 디버깅 ({section_title}) ===")
+            print(f"use_indexes: {use_indexes}")
+            print(f"full_data_dict 키들: {list(full_data_dict.keys()) if full_data_dict else 'None'}")
+
+            # 전체 데이터 딕셔너리에서 해당 인덱스만 선별하여 프롬프트용으로 포맷팅
             section_data_content = ""
-            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑 (1-based)
-
-            for i, res in enumerate(section_data):
-                source_info = ""
-
-                # 전체 데이터에서의 실제 인덱스 저장 (1-based numbering)
-                if global_indexes and i < len(global_indexes):
-                    source_mapping[i+1] = global_indexes[i]
+            valid_indexes = []
+            for actual_index in use_indexes:
+                if actual_index in full_data_dict:
+                    valid_indexes.append(actual_index)
+                    data_info = full_data_dict[actual_index]
+                    section_data_content += f"**데이터 {actual_index}: {data_info['source']}**\n"
+                    section_data_content += f"- **제목**: {data_info['title']}\n"
+                    section_data_content += f"- **내용**: {data_info['content']}\n\n"
+                    print(f"  ✅ [{actual_index}] 데이터 매핑 성공: '{data_info['title'][:30]}...'")
                 else:
-                    source_mapping[i+1] = i  # fallback
+                    print(f"  ❌ [{actual_index}] full_data_dict에서 찾을 수 없음!")
 
-                # 출처 정보 추출
-                if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
-                    if hasattr(res, 'url') and res.url:
-                        source_info = f"웹 출처: {res.url}"
-                    else:
-                        source_info = "웹 검색 결과"
-                elif hasattr(res, 'source_url'):
-                    source_info = f"문서 출처: {res.source_url}"
-                elif hasattr(res, 'title'):
-                    source_info = f"문서: {res.title}"
-                else:
-                    source_name = res.source if hasattr(res, 'source') else 'Unknown'
-                    source_info = f"출처: {source_name}"
-
-                section_data_content += f"**데이터 {i+1}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n\n"
+            print(f"유효한 인덱스들: {valid_indexes}")
+            print(f"프롬프트에서 사용할 SOURCE 번호들: {valid_indexes}")
 
             prompt_template = """
     당신은 주어진 데이터를 바탕으로 전문가 수준의 보고서의 한 섹션을 작성하는 AI입니다.
@@ -1178,7 +1208,7 @@ class ProcessorAgent:
     **현재 작성할 섹션 제목**: "{section_title}"
     **섹션 목표**: "{description}"
 
-    **참고 데이터 (원본 데이터)**:
+    **참고 데이터 (실제 인덱스 번호 포함)**:
     {section_data_content}
 
     **작성 지침 (매우 중요)**:
@@ -1194,22 +1224,10 @@ class ProcessorAgent:
     - **하위 분류가 있는 경우**:   - 세부 항목 (들여쓰기 사용)
     - **세부 카테고리**: ### 소제목 활용
     - **단락 구분**: 내용이 바뀔 때마다 명확하게 단락을 나누어 공백 라인 삽입
-    6. **출처 표기**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호1, 번호2, ...] 형식으로 출처를 표기하세요.
-    - 섹션 데이터 내에서 1, 2... 번호를 사용하세요(1부터 시작)
-    - 예시: "**매출이 증가했습니다**" [SOURCE:1]
-
-    **구조화된 작성 예시**:
-
-    **핵심 분석 결과**, 시장 규모는 전년 대비 **15% 성장**했습니다. [SOURCE:1]
-
-    주요 성장 요인은 다음과 같습니다:
-    - *디지털 전환 가속화*로 인한 수요 증가
-    - **정부 정책 지원**에 따른 투자 확대 [SOURCE:3]
-    - 세부 지원책: 세제 혜택 및 보조금 확대
-    - 투자 규모: **500억원** 규모의 지원 예산
-    - 소비자 행동 변화로 인한 *새로운 니즈 창출*
-
-    > 특히 주목할 점은 젊은 층의 소비 패턴 변화가 전체 시장 성장을 견인하고 있다는 것입니다. [SOURCE:2]
+    6. **⭐ 출처 표기 (실제 인덱스 번호 사용)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:숫자] 형식으로 출처를 표기하세요. 반드시 숫자만 사용하고 "데이터"라는 단어는 사용하지 마세요.
+    - 예시: "**매출이 증가했습니다** [SOURCE:8]", "시장 점유율이 상승했습니다 [SOURCE:12]"
+    - 예시: **매출이 5% 감소**했습니다. [SOURCE:1, 4, 8]
+    - 잘못된 예시: [SOURCE:데이터 1], [SOURCE:문서 1] (이런 형식 사용 금지)
 
     **보고서 섹션 내용**:
     """
@@ -1222,46 +1240,14 @@ class ProcessorAgent:
             )
 
         else:  # "full_data_for_chart"
-            # ⭐ 핵심 개선: 섹션별 선택된 데이터만 사용하여 출처 정보 준비
             section_data_with_sources = ""
-            source_mapping = {}  # 섹션 인덱스 -> 전체 인덱스 매핑 (1-based)
-
-            for i, res in enumerate(section_data):  # section_data만 사용
-                source_info = ""
-                source_link = ""
-
-                # 전체 데이터에서의 실제 인덱스 저장 (1-based numbering)
-                if global_indexes and i < len(global_indexes):
-                    source_mapping[i+1] = global_indexes[i]
-                else:
-                    source_mapping[i+1] = i  # fallback
-
-                # Web search 결과인 경우
-                if hasattr(res, 'source') and 'web_search' in str(res.source).lower():
-                    if hasattr(res, 'url') and res.url:
-                        source_link = res.url
-                        source_info = f"웹 출처: {res.url}"
-                    elif hasattr(res, 'metadata') and res.metadata and 'link' in res.metadata:
-                        source_link = res.metadata['link']
-                        source_info = f"웹 출처: {res.metadata['link']}"
-                    else:
-                        source_info = "웹 검색 결과"
-                        source_link = "웹 검색"
-
-                # Vector DB 결과인 경우
-                elif hasattr(res, 'source_url'):
-                    source_info = f"문서 출처: {res.source_url}"
-                    source_link = res.source_url
-                elif hasattr(res, 'title'):
-                    source_info = f"문서: {res.title}"
-                    source_link = res.title
-                else:
-                    source_name = res.source if hasattr(res, 'source') else 'Vector DB'
-                    source_info = f"출처: {source_name}"
-                    source_link = source_name
-
-                # ⭐ 핵심: 섹션 데이터 내에서의 인덱스 사용 (0, 1, 2...)
-                section_data_with_sources += f"**섹션 데이터 {i+1}: {source_info}**\n- **제목**: {res.title}\n- **내용**: {res.content}\n- **출처_링크**: {source_link}\n\n"
+            for actual_index in use_indexes:
+                if actual_index in full_data_dict:
+                    data_info = full_data_dict[actual_index]
+                    section_data_with_sources += f"**데이터 {actual_index}: {data_info['source']}**\n"
+                    section_data_with_sources += f"- **제목**: {data_info['title']}\n"
+                    section_data_with_sources += f"- **내용**: {data_info['content']}\n"
+                    section_data_with_sources += f"- **출처_링크**: {data_info.get('url') or data_info.get('source_url', '')}\n\n"
 
             prompt_template = """
     당신은 데이터 분석가이자 보고서 작성가입니다. 주어진 선택된 데이터를 분석하여, 텍스트 설명과 시각적 차트를 결합한 전문가 수준의 보고서 섹션을 작성합니다.
@@ -1270,7 +1256,7 @@ class ProcessorAgent:
     **현재 작성할 섹션 제목**: "{section_title}"
     **섹션 목표**: "{description}"
 
-    **참고 데이터 (섹션별로 엄선된 관련 데이터)**:
+    **참고 데이터 (실제 인덱스 번호 포함)**:
     {section_data}
 
     **작성 지침 (매우 중요)**:
@@ -1279,35 +1265,11 @@ class ProcessorAgent:
     3. **데이터 기반**: 설명에 구체적인 수치, 사실, 통계 자료를 적극적으로 인용하여 신뢰도를 높이세요.
     4. **⭐ 차트 마커 삽입**: 텍스트 설명의 흐름 상, 시각적 데이터가 필요한 적절한 위치에 [GENERATE_CHART] 마커를 한 줄에 단독으로 삽입하세요.
     5. **서술 계속**: 마커를 삽입한 후, 이어서 나머지 텍스트 설명을 자연스럽게 계속 작성하세요.
-    6. **⭐ 노션 스타일 마크다운 적극 활용 (매우 중요)**:
-    - **핵심 데이터나 수치**: **굵은 글씨**로 강조
-    - *중요한 트렌드나 변화*: *기울임체*로 표현
-    - **주요 인사이트나 결론**: > 중요한 발견사항이나 결론 형태로 강조
-    - **분석 항목이 여러 개인 경우**: - 첫 번째 분석, - 두 번째 분석 형태로 구조화
-    - **세부 분석이 필요한 경우**: ### 세부 분석 소제목 활용
-    - **차트 설명**: > 아래 차트는 ~를 보여줍니다 형태로 설명
-    - **단락 구분**: 분석 내용이 바뀔 때마다 명확하게 단락을 나누어 공백 라인 삽입
-    7. **⭐ 출처 표기 (매우 중요)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:번호1, 번호2, ...] 형식으로 출처를 표기하세요.
-    - 섹션 데이터 내에서 1, 2, 3... 번호를 사용하세요 (1부터 시작)
-    - 예시: **시장 규모가 10% 증가**했습니다. [SOURCE:1]
-
-    **구조화된 작성 예시 (차트 포함)**:
-
-    **데이터 분석 결과**, 전체 시장에서 **주요 3개 부문**이 차지하는 비중이 증가하고 있습니다. [SOURCE:1]
-
-    ### 부문별 성장률 분석
-    - *A 부문*: 전년 대비 **18% 성장** [SOURCE:1]
-    - 주요 성장 동력: 신제품 출시 및 마케팅 강화
-    - *B 부문*: **12% 증가**로 안정적 성장세 유지
-    - *C 부문*: **25% 급증**으로 가장 높은 성장률 기록 [SOURCE:2]
-
-    > 아래 차트는 각 부문별 성장률과 시장 점유율 변화를 시각적으로 보여줍니다.
-
-    [GENERATE_CHART]
-
-    **주목할 점은** C 부문의 급격한 성장이 *신기술 도입*과 *소비자 선호 변화*에 기인한다는 것입니다. [SOURCE:2]
-
-    > 이러한 트렌드는 향후 6개월간 지속될 것으로 예상되며, 전체 시장 구조에 중대한 변화를 가져올 것으로 전망됩니다.
+    6. **⭐ 노션 스타일 마크다운 적극 활용**: 굵은 글씨, 기울임체, 인용문, 목록 등을 적절히 사용하세요.
+    7. **⭐ 출처 표기 (실제 인덱스 번호 사용)**: 특정 정보를 참고하여 작성한 문장 바로 뒤에 [SOURCE:숫자1, 숫자2, 숫자3] 형식으로 출처를 표기하세요. 반드시 숫자만 사용하고 "데이터", "문서" 등의 단어는 사용하지 마세요.
+    - 예시: **시장 규모가 10% 증가**했습니다. [SOURCE:8]
+    - 예시: **매출이 5% 감소**했습니다. [SOURCE:1, 4, 8]
+    - 잘못된 예시: [SOURCE:데이터 8], [SOURCE:문서 8] (이런 형식 사용 금지)
 
     **보고서 섹션 본문**:
     """
@@ -1320,7 +1282,7 @@ class ProcessorAgent:
             )
 
         try:
-            print(f"\n>> 섹션 스트리밍 시작: {section_title} (데이터 {len(section_data)}개)")
+            print(f"\n>> 섹션 스트리밍 시작: {section_title} (사용 인덱스: {use_indexes})")
             total_content = ""
             chunk_count = 0
             valid_content_count = 0
@@ -1331,9 +1293,6 @@ class ProcessorAgent:
                 self.llm_openai_4o
             ):
                 chunk_count += 1
-                print(f"- 디버깅: chunk 타입={type(chunk)}, hasattr={hasattr(chunk, 'content')}")
-                if hasattr(chunk, 'content'):
-                    print(f"- 디버깅: content 길이={len(chunk.content) if chunk.content else 'None'}")
                 if hasattr(chunk, 'content') and chunk.content:
                     total_content += chunk.content
                     chunk_text = chunk.content
@@ -1348,15 +1307,12 @@ class ProcessorAgent:
 
             print(f"\n>> 섹션 완료: {section_title}, 총 {chunk_count}개 원본 청크, {valid_content_count}개 유효 청크, {len(total_content)} 문자")
 
-            # 내용이 전혀 생성되지 않은 경우 fallback
             if not total_content.strip() or valid_content_count == 0:
                 print(f"- 섹션 스트리밍 오류 ({section_title}): No generation chunks were returned")
                 raise Exception("No generation chunks were returned")
 
         except Exception as e:
             print(f"- 섹션 스트리밍 오류 ({section_title}): {e}")
-
-            # 내용이 생성되지 않은 경우 OpenAI로 직접 재시도
             if "No generation chunks" in str(e) or "no valid content" in str(e).lower():
                 try:
                     print(f"- OpenAI로 직접 재시도: {section_title}")
@@ -1370,7 +1326,6 @@ class ProcessorAgent:
                             chunk_text = chunk.content
                             print(f"- OpenAI 재시도 청크 {chunk_count}: {len(chunk_text)} 문자")
 
-                            # 5자 단위로 쪼개서 전송
                             for i in range(0, len(chunk_text), 5):
                                 mini_chunk = chunk_text[i:i+5]
                                 yield mini_chunk
@@ -1389,8 +1344,7 @@ class ProcessorAgent:
                 error_content = f"*'{section_title}' 섹션 생성 중 오류가 발생했습니다: {str(e)}*\n\n"
                 yield error_content
 
-
-    async def _create_charts(self, section_data: List[SearchResult], section_title: str, generated_content: str = "", yield_callback=None, state: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def _create_charts(self, section_data: List[SearchResult], section_title: str, generated_content: str = "", yield_callback=None, state: Dict[str, Any] = None):
         """⭐ 수정: 섹션별 선택된 데이터와 생성된 내용을 바탕으로 정확한 차트 생성"""
         print(f"  - 차트 데이터 생성: '{section_title}' (데이터 {len(section_data)}개)")
 
@@ -1398,7 +1352,7 @@ class ProcessorAgent:
         from .worker_agents import DataGathererAgent
         data_gatherer = DataGathererAgent() if not hasattr(self, 'data_gatherer') else self.data_gatherer
 
-        async def _generate_chart_with_data(current_data: List[SearchResult], attempt: int = 1) -> Dict[str, Any]:
+        async def _generate_chart_with_data(current_data: List[SearchResult], attempt: int = 1):
             """실제 차트 생성 로직 (재시도 가능)"""
             try:
                 # 데이터 요약 생성
@@ -1507,11 +1461,10 @@ class ProcessorAgent:
                         print(f"  - 차트 데이터 부족 감지: {missing_info}")
                         print(f"  - 추가 검색 실행: '{search_query}'")
 
-                        if yield_callback:
-                            await yield_callback({
-                                "type": "status",
-                                "data": {"message": f"차트를 위한 추가 데이터 수집 중: {search_query[:50]}..."}
-                            })
+                        yield {
+                            "type": "status",
+                            "data": {"message": f"차트 데이터 부족으로 '{search_query[:50]}...' 관련 정보를 추가 수집 중입니다"}
+                        }
 
                         # >> 웹 검색으로 추가 데이터 수집
                         try:
@@ -1525,7 +1478,11 @@ class ProcessorAgent:
                                 print(f"  - 추가 데이터 수집 완료: {len(additional_data)}개")
 
                                 # >> 프론트엔드에 검색 결과 스트리밍 전송
-                                if yield_callback and additional_data:
+                                if additional_data:
+                                    yield {
+                                        "type": "status",
+                                        "data": {"message": f"추가 데이터 {len(additional_data)}개 수집 완료. 차트를 재생성합니다..."}
+                                    }
                                     # 검색 결과를 프론트엔드 형식으로 변환
                                     formatted_results = []
                                     for search_result in additional_data:
@@ -1548,7 +1505,7 @@ class ProcessorAgent:
                                         formatted_results.append(formatted_result)
 
                                     # 검색 결과 이벤트 전송 (중간 검색 표시)
-                                    await yield_callback({
+                                    yield {
                                         "type": "search_results",
                                         "data": {
                                             "step": f"chart_enhancement_{attempt}",
@@ -1563,31 +1520,31 @@ class ProcessorAgent:
                                             },
                                             "message_id": state.get("message_id") if state else None
                                         }
-                                    })
+                                    }
 
                                     # 데이터 보강 완료 상태 전송
-                                    await yield_callback({
+                                    yield {
                                         "type": "status",
                                         "data": {"message": f"차트 데이터 보강 완료. 차트를 다시 생성합니다."}
-                                    })
+                                    }
                             else:
                                 print(f"  - 추가 데이터 수집 실패")
-                                if yield_callback:
-                                    await yield_callback({
-                                        "type": "status",
-                                        "data": {"message": "추가 데이터 수집에 실패했습니다. 기본 차트를 생성합니다."}
-                                    })
+                                yield {
+                                    "type": "status",
+                                    "data": {"message": "추가 데이터 수집에 실패했습니다. 기본 데이터로 차트를 생성합니다..."}
+                                }
                         except Exception as search_error:
                             print(f"  - 데이터 보강 검색 실패: {search_error}")
-                            if yield_callback:
-                                await yield_callback({
-                                    "type": "status",
-                                    "data": {"message": f"데이터 보강 중 오류 발생: {str(search_error)}"}
-                                })
+                            yield {
+                                "type": "status",
+                                "data": {"message": f"데이터 보강 중 오류 발생: {str(search_error)}"}
+                            }
 
                         # 검색 실패시 fallback 차트 반환
-                        return {
-                            "type": "bar",
+                        yield {
+                            "type": "chart",
+                            "data": {
+                                "type": "bar",
                             "data": {
                                 "labels": ["데이터 부족"],
                                 "datasets": [{
@@ -1607,7 +1564,9 @@ class ProcessorAgent:
                                     }
                                 }
                             }
+                            }
                         }
+                        return
 
                     # >> 정상적인 차트 데이터인 경우
                     elif "type" in chart_response and "data" in chart_response:
@@ -1637,7 +1596,11 @@ class ProcessorAgent:
                         remove_callbacks(chart_response)
 
                         print(f"  - 차트 생성 성공: {chart_response['type']} 타입, {len(datasets)}개 데이터셋 (시도 {attempt})")
-                        return chart_response
+                        yield {
+                            "type": "chart",
+                            "data": chart_response
+                        }
+                        return
                     else:
                         raise ValueError("올바르지 않은 JSON 형식")
 
@@ -1659,37 +1622,42 @@ class ProcessorAgent:
                             if additional_data:
                                 print(f"  - Fallback 추가 데이터 수집: {len(additional_data)}개")
                                 enhanced_data = current_data + additional_data
-                                return await _generate_chart_with_data(enhanced_data, attempt=2)
+                                async for result in _generate_chart_with_data(enhanced_data, attempt=2):
+                                    yield result
+                                return
                         except Exception as search_error:
                             print(f"  - Fallback 검색 실패: {search_error}")
 
                     # 최종 fallback 차트
-                    return {
-                        "type": "bar",
+                    yield {
+                        "type": "chart",
                         "data": {
-                            "labels": [f"{section_title} 관련 데이터"],
-                            "datasets": [{
-                                "label": "정보 수집 상태",
-                                "data": [1],
-                                "backgroundColor": "rgba(255, 193, 7, 0.6)",
-                                "borderColor": "rgba(255, 193, 7, 1)",
-                                "borderWidth": 1
-                            }]
-                        },
-                        "options": {
-                            "responsive": True,
-                            "plugins": {
-                                "title": {
-                                    "display": True,
-                                    "text": f"{section_title} - 데이터 분석 중"
-                                }
+                            "type": "bar",
+                            "data": {
+                                "labels": [f"{section_title} 관련 데이터"],
+                                "datasets": [{
+                                    "label": "정보 수집 상태",
+                                    "data": [1],
+                                    "backgroundColor": "rgba(255, 193, 7, 0.6)",
+                                    "borderColor": "rgba(255, 193, 7, 1)",
+                                    "borderWidth": 1
+                                }]
                             },
-                            "scales": {
-                                "y": {
-                                    "beginAtZero": True,
-                                    "max": 2,
-                                    "ticks": {
-                                        "stepSize": 1
+                            "options": {
+                                "responsive": True,
+                                "plugins": {
+                                    "title": {
+                                        "display": True,
+                                        "text": f"{section_title} - 데이터 분석 중"
+                                    }
+                                },
+                                "scales": {
+                                    "y": {
+                                        "beginAtZero": True,
+                                        "max": 2,
+                                        "ticks": {
+                                            "stepSize": 1
+                                        }
                                     }
                                 }
                             }
@@ -1698,28 +1666,32 @@ class ProcessorAgent:
 
             except Exception as e:
                 print(f"  - 차트 생성 전체 오류 (시도 {attempt}): {e}")
-                return {
-                    "type": "bar",
+                yield {
+                    "type": "chart",
                     "data": {
-                        "labels": ["시스템 오류"],
-                        "datasets": [{
-                            "label": "처리 상태",
-                            "data": [0],
-                            "backgroundColor": "rgba(220, 53, 69, 0.6)",
-                            "borderColor": "rgba(220, 53, 69, 1)",
-                            "borderWidth": 1
-                        }]
-                    },
-                    "options": {
-                        "responsive": True,
-                        "plugins": {
-                            "title": {
-                                "display": True,
-                                "text": "차트 생성 중 오류 발생"
+                        "type": "bar",
+                        "data": {
+                            "labels": ["시스템 오류"],
+                            "datasets": [{
+                                "label": "처리 상태",
+                                "data": [0],
+                                "backgroundColor": "rgba(220, 53, 69, 0.6)",
+                                "borderColor": "rgba(220, 53, 69, 1)",
+                                "borderWidth": 1
+                            }]
+                        },
+                        "options": {
+                            "responsive": True,
+                            "plugins": {
+                                "title": {
+                                    "display": True,
+                                    "text": "차트 생성 중 오류 발생"
+                                }
                             }
                         }
                     }
                 }
 
         # >> 메인 로직 실행
-        return await _generate_chart_with_data(section_data, attempt=1)
+        async for result in _generate_chart_with_data(section_data, attempt=1):
+            yield result

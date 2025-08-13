@@ -30,6 +30,15 @@ export default function Home() {
 
   // Claude 스타일 실시간 검색 결과 상태
   const [currentSearchResults, setCurrentSearchResults] = useState([]);
+  const [searchResultsVisible, setSearchResultsVisible] = useState({});
+  const [conversationSearchResults, setConversationSearchResults] = useState({});
+
+  // 섹션별 매핑 정보 상태 추가
+  const [sectionMappings, setSectionMappings] = useState({});
+
+  // >> 핵심 추가: 데이터 딕셔너리 상태들
+  const [fullDataDict, setFullDataDict] = useState({}); // 전체 데이터 딕셔너리
+  const [sectionDataDicts, setSectionDataDicts] = useState({}); // 섹션별 데이터 딕셔너리
 
   // 🔍 디버깅: currentSearchResults 변경사항 추적
   const setCurrentSearchResultsDebug = (newResults) => {
@@ -40,11 +49,6 @@ export default function Home() {
     });
     setCurrentSearchResults(newResults);
   };
-  const [searchResultsVisible, setSearchResultsVisible] = useState({});
-  const [conversationSearchResults, setConversationSearchResults] = useState({}); // 대화별 검색 결과
-
-  // 섹션별 매핑 정보 상태 추가
-  const [sectionMappings, setSectionMappings] = useState({});
 
   // 스크롤 관리
   const messagesEndRef = useRef(null);
@@ -70,7 +74,6 @@ export default function Home() {
         const parsedConversations = JSON.parse(savedConversations);
         setConversations(parsedConversations);
 
-        // ✅ 현재 대화가 있으면 검색 결과도 복원
         if (currentConversation.length > 0) {
           const restoredSearchResults = [];
           currentConversation.forEach(message => {
@@ -94,11 +97,6 @@ export default function Home() {
       }
     }
 
-    // 🚫 검색 결과 로컬 스토리지 복원 제거 - 세션별 관리로 변경
-    // 검색 결과는 각 세션마다 독립적으로 관리되므로 전역 복원 불필요
-    console.log("검색 결과 전역 복원 건너뜀 - 세션별 관리");
-
-    // ✅ 페이지 로드 시 localStorage에서 검색 결과 복원
     const savedCurrentSearchResults = localStorage.getItem("currentSearchResults");
     if (savedCurrentSearchResults) {
       try {
@@ -121,7 +119,6 @@ export default function Home() {
       }
     }
 
-    // conversationSearchResults 로드
     const savedConversationSearchResults = localStorage.getItem("conversationSearchResults");
     if (savedConversationSearchResults) {
       try {
@@ -132,7 +129,6 @@ export default function Home() {
       }
     }
 
-    // 스트리밍 중에 저장된 대화 복원
     const savedStreamingConversation = localStorage.getItem("currentStreamingConversation");
     if (savedStreamingConversation) {
       try {
@@ -147,7 +143,9 @@ export default function Home() {
         localStorage.removeItem("currentStreamingConversation");
       }
     }
-  }, []);  // 대화 히스토리 저장
+  }, []);
+
+  // 대화 히스토리 저장
   const saveConversations = useCallback((newConversations) => {
     localStorage.setItem("chatConversations", JSON.stringify(newConversations));
     setConversations(newConversations);
@@ -169,11 +167,14 @@ export default function Home() {
     setQuery("");
     setSourcesData(null);
     setSourcesPanelVisible(false);
-    // 새 채팅 시작할 때만 검색 결과 초기화
     setCurrentSearchResultsDebug([]);
     setSearchResultsVisible({});
     setConversationSearchResults({});
-    // 로컬 스토리지에서도 제거
+
+    // >> 데이터 딕셔너리 초기화
+    setFullDataDict({});
+    setSectionDataDicts({});
+
     localStorage.removeItem("currentSearchResults");
     localStorage.removeItem("searchResultsVisible");
     localStorage.removeItem("conversationSearchResults");
@@ -190,12 +191,29 @@ export default function Home() {
     setSourcesData(null);
     setSourcesPanelVisible(false);
 
-    // ✅ 검색 결과 복원: 메시지에 저장된 searchResults를 currentSearchResults로 복원
+    // >> 데이터 딕셔너리 복원
+    if (conv.messages && conv.messages.length > 0) {
+      const lastAssistantMessage = conv.messages
+        .reverse()
+        .find(msg => msg.type === "assistant" && !msg.isStreaming);
+
+      if (lastAssistantMessage) {
+        if (lastAssistantMessage.fullDataDict) {
+          setFullDataDict(lastAssistantMessage.fullDataDict);
+          console.log("전체 데이터 딕셔너리 복원:", Object.keys(lastAssistantMessage.fullDataDict).length, "개");
+        }
+        if (lastAssistantMessage.sectionDataDicts) {
+          setSectionDataDicts(lastAssistantMessage.sectionDataDicts);
+          console.log("섹션 데이터 딕셔너리 복원:", Object.keys(lastAssistantMessage.sectionDataDicts).length, "개");
+        }
+      }
+      conv.messages.reverse(); // 순서 복원
+    }
+
     const restoredSearchResults = [];
     if (conv.messages) {
       conv.messages.forEach(message => {
         if (message.searchResults && Array.isArray(message.searchResults)) {
-          // 각 검색 결과에 messageId 추가
           message.searchResults.forEach(result => {
             restoredSearchResults.push({
               ...result,
@@ -208,7 +226,6 @@ export default function Home() {
 
     setCurrentSearchResultsDebug(restoredSearchResults);
     console.log(`대화 ${conv.id} 로드 완료 - 검색 결과 ${restoredSearchResults.length}개 복원`);
-
     setSearchResultsVisible({});
   };
 
@@ -266,13 +283,11 @@ export default function Home() {
     setCurrentStreamingCharts([]);
     processedChartIds.current.clear();
     setStatusMessage("생각하는 중...");
-    setSourcesData(null); // 새 요청 시 출처 데이터 초기화
+    setSourcesData(null);
 
-    // 🆕 Claude 스타일: 새로운 질문 시작할 때 현재 검색 결과 초기화 (세션별 관리)
     setCurrentSearchResultsDebug([]);
     console.log("🔄 새 질문 시작: 검색 결과 초기화 (세션별 관리)");
 
-    // 빈 어시스턴트 메시지 추가 (스트리밍용)
     const assistantMessage = {
       id: Date.now() + 1,
       type: "assistant",
@@ -280,22 +295,20 @@ export default function Home() {
       charts: [],
       timestamp: new Date().toISOString(),
       isStreaming: true,
-      sources: null, // 출처 정보 초기화
+      sources: null,
     };
 
     setCurrentConversation((prev) => [...prev, assistantMessage]);
 
-    // 🔥 핵심 수정: 스트리밍 시작 즉시 현재 대화 상태를 localStorage에 저장
     const tempConversationWithNewMessages = [...currentConversation, userMessage, assistantMessage];
     const tempConversationData = {
       id: conversationId || Date.now().toString(),
       title: currentQuery.slice(0, 30) + (currentQuery.length > 30 ? "..." : ""),
       messages: tempConversationWithNewMessages,
       lastUpdated: new Date().toISOString(),
-      isStreaming: true, // 🆕 스트리밍 상태 표시
+      isStreaming: true,
     };
 
-    // 임시 대화 데이터를 localStorage에 저장 (스트리밍 중 복원용)
     localStorage.setItem("currentStreamingConversation", JSON.stringify(tempConversationData));
     console.log("🔄 스트리밍 중 대화 상태 저장:", tempConversationData.id);
 
@@ -305,7 +318,7 @@ export default function Home() {
       console.log("요청 데이터:", {
         query: currentQuery,
         session_id: conversationId || undefined,
-        message_id: assistantMessage.id, // 🆕 메시지 ID 추가
+        message_id: assistantMessage.id,
       });
 
       console.log("fetch 요청 시작!");
@@ -320,7 +333,7 @@ export default function Home() {
         body: JSON.stringify({
           query: currentQuery,
           session_id: conversationId || undefined,
-          message_id: String(assistantMessage.id), // 🆕 메시지 ID를 문자열로 변환
+          message_id: String(assistantMessage.id),
         }),
       }).catch(error => {
         console.error("fetch 요청 자체가 실패:", error);
@@ -351,7 +364,6 @@ export default function Home() {
       let finalCharts = [];
       let currentStep = 0;
       let totalSteps = 0;
-      let finalSources = null; // 최종 출처 정보 저장
 
       while (true) {
         console.log("스트리밍 청크 읽기 시도...");
@@ -384,38 +396,73 @@ export default function Home() {
 
               switch (data.type) {
                 case "status":
-                  setStatusMessage(data.message);
+                  // 안전한 접근: data.data.message 또는 data.message
+                  const statusMessage = data.data?.message || data.message || "처리 중...";
+                  setStatusMessage(statusMessage);
+                  break;
+
+                // >> 새로운 이벤트 타입: 전체 데이터 딕셔너리
+                case "full_data_dict":
+                  console.log("🎯 full_data_dict 이벤트 받음, data 구조:", data);
+                  // main.py에서 data를 펼쳐서 보내므로 data.data_dict로 직접 접근
+                  const dataDict = data.data_dict;  // 두 가지 경우 모두 처리
+                  if (dataDict) {
+                    console.log("✅ 전체 데이터 딕셔너리 받음:", Object.keys(dataDict).length, "개");
+                    console.log("📊 데이터 딕셔너리 키들:", Object.keys(dataDict));
+
+                    setFullDataDict(dataDict);
+
+                    // dataDict를 sourcesData에도 직접 설정
+                    setSourcesData(dataDict);
+                    console.log("✅ setSourcesData에도 dataDict 설정 완료");
+
+                    // 즉시 현재 메시지에도 저장
+                    setCurrentConversation((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessage.id
+                          ? { ...msg, fullDataDict: dataDict }
+                          : msg
+                      )
+                    );
+                    console.log("✅ 현재 메시지에도 fullDataDict 저장 완료");
+                  } else {
+                    console.error("❌ 데이터 딕셔너리를 찾을 수 없음, data 구조:", JSON.stringify(data, null, 2));
+                  }
                   break;
 
                 case "chart":
-                  finalCharts.push(data.chart_data);
-                  // 차트가 생성되는 즉시 UI 업데이트
-                  setCurrentConversation((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessage.id
-                        ? {
-                            ...msg,
-                            charts: [...finalCharts],
-                          }
-                        : msg
-                    )
-                  );
+                  if (data.chart_data) {
+                    finalCharts.push(data.chart_data);
+                    setCurrentConversation((prev) =>
+                      prev.map((msg) =>
+                        msg.id === assistantMessage.id
+                          ? {
+                              ...msg,
+                              charts: [...finalCharts],
+                            }
+                          : msg
+                      )
+                    );
+                  }
                   break;
 
                 case "plan":
-                  totalSteps = data.total_steps || data.plan?.steps?.length || 0;
+                  totalSteps = data.total_steps || data.data?.plan?.steps?.length || data.plan?.steps?.length || 0;
                   setStatusMessage(`실행 계획: ${totalSteps}개 단계`);
-                  console.log("실행 계획:", data.plan);
+                  console.log("실행 계획:", data.data?.plan || data.plan);
                   break;
 
                 case "step_start":
-                  currentStep = data.step;
+                  currentStep = data.step || data.data?.step;
 
-                  // Claude 스타일 도구 사용 상태 표시
-                  let statusText = `단계 ${data.step}/${totalSteps}: ${data.description}`;
-                  if (data.tool && data.query) {
-                    if (data.status === "searching") {
-                      statusText = `${data.tool}로 검색 중: "${data.query}"`;
+                  let statusText = `단계 ${currentStep}/${totalSteps}: ${data.description || data.data?.description || "처리 중"}`;
+                  if ((data.tool || data.data?.tool) && (data.query || data.data?.query)) {
+                    const tool = data.tool || data.data?.tool;
+                    const query = data.query || data.data?.query;
+                    const status = data.status || data.data?.status;
+                    
+                    if (status === "searching") {
+                      statusText = `${tool}로 검색 중: "${query}"`;
                     } else if (data.status === "processing") {
                       statusText = `${data.tool}로 처리 중`;
                     }
@@ -425,10 +472,8 @@ export default function Home() {
                   break;
 
                 case "search_results":
-                  // Claude 스타일 실시간 검색 결과 표시
-                  console.log("검색 결과 받음:", data); // 디버깅 로그
+                  console.log("검색 결과 받음:", data);
 
-                  // 🆕 중간 검색 여부 확인
                   const isIntermediateSearch = data.is_intermediate_search || false;
                   const sectionContext = data.section_context || null;
 
@@ -443,14 +488,12 @@ export default function Home() {
                     results: data.results,
                     timestamp: new Date().toISOString(),
                     conversationId: conversationId || data.session_id || Date.now().toString(),
-                    messageId: data.message_id || assistantMessage.id, // 🆕 메시지 ID 추가
-                    // 🆕 중간 검색 정보 추가
+                    messageId: data.message_id || assistantMessage.id,
                     isIntermediateSearch: isIntermediateSearch,
                     sectionContext: sectionContext
                   };
-                  console.log("처리된 검색 데이터:", searchResultData); // 디버깅 로그
+                  console.log("처리된 검색 데이터:", searchResultData);
 
-                  // 현재 대화의 검색 결과에 추가
                   const currentConvId = conversationId || data.session_id || Date.now().toString();
 
                   setConversationSearchResults(prev => {
@@ -458,26 +501,20 @@ export default function Home() {
                       ...prev,
                       [currentConvId]: [...(prev[currentConvId] || []), searchResultData]
                     };
-                    // 로컬 스토리지에 저장
                     localStorage.setItem("conversationSearchResults", JSON.stringify(newResults));
                     return newResults;
                   });
 
-                  // 🆕 모든 검색 결과를 currentSearchResults에 추가 (메시지별 필터링은 렌더링 시 처리)
                   setCurrentSearchResultsDebug(prev => {
                     const newResults = [...prev, searchResultData];
 
-                    // 로컬 스토리지에는 모든 검색 결과 저장
                     localStorage.setItem("currentSearchResults", JSON.stringify(newResults));
                     console.log(`🔍 검색 결과 추가 (총 ${newResults.length}개):`, searchResultData);
 
-                    // ✅ 즉시 메시지에 검색 결과 저장 (새로고침 대비)
                     setCurrentConversation(prevMessages => {
                       return prevMessages.map(msg => {
                         if (msg.id === assistantMessage.id && msg.type === "assistant") {
-                          // 현재 메시지의 모든 검색 결과 수집 (디버깅 강화)
                           const messageSearchResults = newResults.filter(result => {
-                            // 🔥 숫자와 문자열 모두 처리하도록 수정
                             const resultMsgId = String(result.messageId);
                             const assistantMsgId = String(assistantMessage.id);
                             const match = resultMsgId === assistantMsgId;
@@ -504,18 +541,15 @@ export default function Home() {
                     return newResults;
                   });
 
-                  // 자동으로 검색 결과 펼치기 (최신 검색만)
                   setSearchResultsVisible(prev => {
                     const newVisible = {
                       ...prev,
                       [`${data.step}-latest`]: true
                     };
-                    // 로컬 스토리지에 저장
                     localStorage.setItem("searchResultsVisible", JSON.stringify(newVisible));
                     return newVisible;
                   });
 
-                  // 임시 출처 데이터 업데이트 (실시간 표시용)
                   const tempSources = {
                     total_count: data.results.length,
                     sources: data.results.map((result, index) => ({
@@ -532,13 +566,34 @@ export default function Home() {
                   setSourcesData(tempSources);
                   break;
 
+                case "section_mapping":
+                  console.log("섹션 매핑 정보 받음:", data);
+                  console.log("섹션 제목:", data.section_title);
+                  console.log("섹션 데이터 딕셔너리:", data.section_data_dict);
+                  console.log("사용된 인덱스:", data.section_indexes);
+
+                  const sectionKey = `${conversationId || data.session_id || Date.now()}-${data.section_title}`;
+                  console.log("생성된 섹션 키:", sectionKey);
+
+                  setSectionDataDicts(prev => {
+                    const newSectionDicts = {
+                      ...prev,
+                      [sectionKey]: {
+                        dataDict: data.section_data_dict,
+                        indexes: data.section_indexes,
+                        title: data.section_title
+                      }
+                    };
+                    console.log("업데이트된 섹션 딕셔너리:", newSectionDicts);
+                    return newSectionDicts;
+                  });
+                  break;
+
                 case "section_header":
-                  // 섹션 헤더를 별도 배열로 관리하여 올바른 마크다운 형식 유지
                   setCurrentConversation((prev) => {
                     const updated = [...prev];
                     if (updated.length > 0 && updated[updated.length - 1].id === assistantMessage.id) {
                       const lastMessage = updated[updated.length - 1];
-                      // 섹션 헤더를 별도 배열로 관리
                       if (!lastMessage.sectionHeaders) {
                         lastMessage.sectionHeaders = [];
                       }
@@ -547,7 +602,6 @@ export default function Home() {
                         title: data.title,
                         timestamp: Date.now()
                       });
-                      // 현재 content에 임시로 헤더 추가 (렌더링에서 별도 처리할 예정)
                       return updated.map((msg) =>
                         msg.id === assistantMessage.id
                           ? { ...msg, content: finalContent }
@@ -559,43 +613,11 @@ export default function Home() {
                   break;
 
                 case "sources":
-                  // 실시간 출처 정보 업데이트 (즉시 버튼으로 전환)
-                  console.log("실시간 출처 데이터 받음:", data);
-                  setSourcesData(data);
-
-                  // 현재 스트리밍 중인 메시지에도 출처 정보 추가
-                  setCurrentConversation((prev) =>
-                    prev.map((msg) =>
-                      msg.id === assistantMessage.id
-                        ? { ...msg, sources: data }
-                        : msg
-                    )
-                  );
-                  break;
-
-                case "section_mapping":
-                  // 섹션별 매핑 정보 저장
-                  console.log("섹션 매핑 정보 받음:", data);
-                  console.log("섹션 제목:", data.section_title);
-                  console.log("매핑 데이터:", data.section_to_global_mapping);
-                  console.log("데이터 타입:", typeof data.section_to_global_mapping);
-                  console.log("배열 여부:", Array.isArray(data.section_to_global_mapping));
-
-                  const mappingKey = `${conversationId || data.session_id || Date.now()}-${data.section_title}`;
-                  console.log("생성된 매핑 키:", mappingKey);
-
-                  setSectionMappings(prev => {
-                    const newMappings = {
-                      ...prev,
-                      [mappingKey]: data.section_to_global_mapping
-                    };
-                    console.log("업데이트된 전체 매핑:", newMappings);
-                    return newMappings;
-                  });
+                  // sources 이벤트는 더 이상 사용하지 않음 (full_data_dict만 사용)
+                  console.log("⚠️ sources 이벤트 수신 (무시됨):", data);
                   break;
 
                 case "section_start":
-                  // 섹션 시작 시 적절한 마크다운 헤더와 간격 추가
                   const sectionHeader = `\n\n## ${data.title}\n\n`;
                   finalContent += sectionHeader;
                   setCurrentConversation((prev) =>
@@ -612,7 +634,6 @@ export default function Home() {
                   break;
 
                 case "content":
-                  // 실시간 스트리밍: 청크를 즉시 기존 내용에 추가
                   finalContent += data.chunk;
                   setCurrentConversation((prev) =>
                     prev.map((msg) =>
@@ -626,7 +647,6 @@ export default function Home() {
                     )
                   );
                   break;
-
 
                 case "section_end":
                   const sectionEnd = "\n\n";
@@ -675,39 +695,62 @@ export default function Home() {
                   break;
 
                 case "complete":
-                  // 완료시 최종 출처 정보 저장
-                  if (data.sources) {
-                    finalSources = data.sources;
-                  }
                   setStatusMessage("완료");
+                  console.log("complete 이벤트 수신, 현재 fullDataDict 상태:", {
+                    hasFullDataDict: !!fullDataDict,
+                    fullDataDictSize: Object.keys(fullDataDict || {}).length
+                  });
                   break;
 
                 case "final_complete":
                   setStatusMessage("");
-                  // 스트리밍 완료 - 최종 메시지 업데이트 (검색 결과는 이미 실시간으로 저장됨)
-                  setCurrentConversation((prev) => {
-                    const newConversation = prev.map((msg) =>
-                      msg.id === assistantMessage.id
-                        ? {
-                            ...msg,
-                            // 기존 searchResults 보존하면서 다른 속성들만 업데이트
-                            charts: finalCharts,
-                            isStreaming: false,
-                            sources: finalSources, // 최종 출처 정보 저장
-                          }
-                        : msg
-                    );
+                  console.log('🔥 final_complete 이벤트 - fullDataDict 상태:', {
+                    hasFullDataDict: !!fullDataDict,
+                    fullDataDictSize: Object.keys(fullDataDict || {}).length,
+                    fullDataDictKeys: Object.keys(fullDataDict || {}).slice(0, 5)
+                  });
 
-                    // 디버깅: final_complete 후 searchResults 확인
+                  setCurrentConversation((prev) => {
+                    const newConversation = prev.map((msg) => {
+                      if (msg.id === assistantMessage.id) {
+                        console.log('🔥 final_complete - 메시지 업데이트:', {
+                          messageId: msg.id,
+                          fullDataDictToSave: !!fullDataDict,
+                          fullDataDictSize: Object.keys(fullDataDict || {}).length,
+                          fullDataDictKeys: Object.keys(fullDataDict || {}).slice(0, 5),
+                          msgCurrentFullDataDict: !!msg.fullDataDict,
+                          msgCurrentFullDataDictSize: Object.keys(msg.fullDataDict || {}).length
+                        });
+
+                        // 메시지에서 이미 저장된 fullDataDict를 우선 사용
+                        const finalFullDataDict = msg.fullDataDict || fullDataDict;
+
+                        return {
+                          ...msg,
+                          charts: finalCharts,
+                          isStreaming: false,
+                          // >> 우선순위: 메시지에 저장된 것 > 상태의 것
+                          fullDataDict: finalFullDataDict,
+                          sectionDataDicts: sectionDataDicts
+                        };
+                      }
+                      return msg;
+                    });
+
                     const updatedMessage = newConversation.find(m => m.id === assistantMessage.id);
-                    console.log("final_complete - 최종 메시지 상태:", {
+                    console.log("🔥 final_complete - 최종 메시지 상태:", {
                       messageId: assistantMessage.id,
                       hasSearchResults: !!updatedMessage?.searchResults,
                       searchResultsLength: updatedMessage?.searchResults?.length || 0,
-                      isStreaming: updatedMessage?.isStreaming
+                      isStreaming: updatedMessage?.isStreaming,
+                      hasSources: !!updatedMessage?.sources,
+                      sourcesTotalCount: updatedMessage?.sources?.total_count || 0,
+                      sourcesDataState: !!sourcesData,
+                      sourcesDataCount: sourcesData?.total_count || 0,
+                      sourcesReceived: updatedMessage?.sourcesReceived,
+                      msgSources: updatedMessage?.sources
                     });
 
-                    // 대화 히스토리 업데이트
                     const conversationData = {
                       id: conversationId || Date.now().toString(),
                       title:
@@ -723,14 +766,12 @@ export default function Home() {
                     updatedConversations.unshift(conversationData);
                     saveConversations(updatedConversations.slice(0, 50));
 
-                    // 스트리밍 완료 후 임시 저장된 대화 정리
                     localStorage.removeItem('currentStreamingConversation');
 
                     return newConversation;
                   });
 
-                  console.log("검색 결과 유지됨 - Claude 스타일 지속성 적용");
-
+                  console.log("검색 결과 및 데이터 딕셔너리 유지됨");
                   setIsStreaming(false);
                   console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   return;
@@ -738,12 +779,10 @@ export default function Home() {
                 case "error":
                   setStatusMessage(`오류: ${data.message}`);
                   setIsStreaming(false);
-                  // 에러 발생 시 임시 저장된 대화 정리
                   localStorage.removeItem('currentStreamingConversation');
                   return;
 
                 case "result":
-                  // 기타 결과 데이터는 로그로만 출력 (context integration 결과 제외)
                   console.log("처리 결과:", data.data);
                   break;
 
@@ -765,7 +804,6 @@ export default function Home() {
       console.error("========================");
       setStatusMessage(`오류: ${error.message}`);
       setIsStreaming(false);
-      // API 오류 발생 시 임시 저장된 대화 정리
       localStorage.removeItem('currentStreamingConversation');
     }
   };
@@ -791,30 +829,38 @@ export default function Home() {
     }
   };
 
-  // 메시지 렌더링 (차트 포함)
-  // renderMessageContent 함수 수정
+  // >> renderMessageContent 함수 수정 - 실제 인덱스 기반 출처 매핑
   const renderMessageContent = (message) => {
     const content = message.content || "";
     const charts = message.charts || [];
     const sectionHeaders = message.sectionHeaders || [];
 
-    // ✅ 수정: 실시간 출처 데이터 우선 사용
+    // >> 간단하게: 현재 전역 상태 우선 사용
+    const messageFullDataDict = fullDataDict || message.fullDataDict || {};
+    const messageSectionDataDicts = sectionDataDicts || message.sectionDataDicts || {};
+
+    console.log("렌더링 중인 메시지의 데이터 딕셔너리:", {
+      messageId: message.id,
+      hasFullDataDict: !!messageFullDataDict,
+      fullDataDictSize: Object.keys(messageFullDataDict).length,
+      hasSectionDataDicts: !!messageSectionDataDicts,
+      sectionDataDictsSize: Object.keys(messageSectionDataDicts).length
+    });
+
+    // 실시간 출처 데이터 우선 사용
     let sources = [];
     if (message.sources) {
-      // 완료된 메시지의 출처 사용
       if (Array.isArray(message.sources)) {
         sources = message.sources;
       } else if (message.sources.sources && Array.isArray(message.sources.sources)) {
         sources = message.sources.sources;
       }
     } else if (message.isStreaming && sourcesData && sourcesData.sources) {
-      // 🔥 스트리밍 중에는 전역 sourcesData 사용
       sources = sourcesData.sources;
     }
 
-    console.log("렌더링할 출처 정보:", sources); // 디버깅용
+    console.log("렌더링할 출처 정보:", sources);
 
-    // 섹션 헤더들을 먼저 렌더링
     const headerElements = sectionHeaders.map((header) => (
       <div key={header.id} className="section-header">
         <h2 className="section-title">{header.title}</h2>
@@ -853,61 +899,23 @@ export default function Home() {
         }
       }
 
-      // ✅ 수정: [SOURCE:번호] 형식이 있는 경우 SourceRenderer 사용
+      // >> 핵심 수정: [SOURCE:번호] 형식 처리 시 항상 전체 데이터 딕셔너리 사용
       if (part.includes('[SOURCE:')) {
-        // 🔥 핵심 수정: 현재 텍스트 부분에서 섹션 제목 추출하여 정확한 매핑 찾기
-        let currentSectionMapping = [];
-
-        // 1. 현재 part에서 가장 가까운 섹션 헤더 찾기 (## 제목)
-        const content = message.content || "";
-        const partIndex = content.indexOf(part);
-        let nearestSectionTitle = "";
-
-        if (partIndex !== -1) {
-          // 현재 part 이전의 텍스트에서 가장 마지막 ## 헤더 찾기
-          const beforePart = content.substring(0, partIndex);
-          const sectionHeaders = beforePart.match(/## (.+)/g);
-          if (sectionHeaders && sectionHeaders.length > 0) {
-            const lastHeader = sectionHeaders[sectionHeaders.length - 1];
-            nearestSectionTitle = lastHeader.replace(/^## /, '').trim();
-          }
-        }
-
-        // 2. 섹션 제목으로 매핑 정보 찾기
-        if (nearestSectionTitle) {
-          for (const [mappingKey, mapping] of Object.entries(sectionMappings)) {
-            // mappingKey 형태: "conversationId-섹션제목"
-            if (mappingKey.includes(nearestSectionTitle)) {
-              currentSectionMapping = mapping;
-              console.log(`정확한 섹션 매핑 찾음: ${nearestSectionTitle} -> ${JSON.stringify(mapping)}`);
-              break;
-            }
-          }
-        }
-
-        // 3. 매핑을 찾지 못한 경우 기본값 사용
-        if (currentSectionMapping.length === 0) {
-          // 가장 최근 매핑 사용 (fallback)
-          const mappingValues = Object.values(sectionMappings);
-          if (mappingValues.length > 0) {
-            currentSectionMapping = mappingValues[mappingValues.length - 1];
-            console.log(`기본 매핑 사용: ${JSON.stringify(currentSectionMapping)}`);
-          }
-        }
+        console.log('SOURCE 패턴 감지, 전체 데이터 딕셔너리 사용:', Object.keys(messageFullDataDict).length, '개');
 
         return (
           <SourceRenderer
             key={`source-${index}`}
             content={part}
-            sources={sources} // 실시간 sources 전달
-            isStreaming={message.isStreaming} // 스트리밍 상태도 전달
-            sectionMappings={currentSectionMapping} // 🔥 정확한 섹션 매핑 전달
+            sources={sources}
+            isStreaming={message.isStreaming}
+            dataDict={messageFullDataDict} // >> 핵심: 항상 전체 데이터 딕셔너리 사용
           />
         );
       }
 
-      // 일반 마크다운 렌더링 (헤더 크기 보존)
-      const cleanPart = part; // 헤더 제거하지 않고 그대로 유지
+      // 일반 마크다운 렌더링
+      const cleanPart = part;
       if (cleanPart.trim()) {
         return (
           <ReactMarkdown
@@ -928,9 +936,8 @@ export default function Home() {
         );
       }
       return null;
-    }).filter(Boolean); // null 요소 제거
+    }).filter(Boolean);
 
-    // 헤더와 컨텐츠를 함께 반환
     return (
       <div className="message-content-wrapper">
         {headerElements}
@@ -1081,7 +1088,7 @@ export default function Home() {
                       {/* 완료된 어시스턴트 메시지 위에 해당 검색 결과 먼저 표시 */}
                       {message.type === "assistant" && !message.isStreaming && message.searchResults && message.searchResults.length > 0 && (
                         <div className="claude-search-results">
-                          {console.log("렌더링 중인 완료된 메시지 검색 결과:", message.searchResults)} {/* 디버깅 로그 */}
+                          {console.log("렌더링 중인 완료된 메시지 검색 결과:", message.searchResults)}
                           {message.searchResults.map((searchData, index) => (
                             <div key={`search-${searchData.step}-${index}`} className={`search-result-section ${searchData.isIntermediateSearch ? 'intermediate-search' : ''}`}>
                               <div
@@ -1097,7 +1104,6 @@ export default function Home() {
                               >
                                 <div className="search-info">
                                   <span className="search-tool">{searchData.tool_name}</span>
-                                  {/* 🆕 중간 검색 표시 */}
                                   {searchData.isIntermediateSearch && searchData.sectionContext && (
                                     <span className="intermediate-badge">
                                       📊 {searchData.sectionContext.section_title}
@@ -1111,7 +1117,6 @@ export default function Home() {
                                     </span>
                                   )}
                                   <span className="result-count">{searchData.results.length}개 결과</span>
-                                  {/* 🆕 중간 검색 이유 표시 */}
                                   {searchData.isIntermediateSearch && searchData.sectionContext && (
                                     <span className="search-reason">
                                       {searchData.sectionContext.search_reason}
@@ -1152,7 +1157,7 @@ export default function Home() {
                         </div>
                       )}
 
-                      {/* 🆕 현재 스트리밍 중인 메시지에서만 실시간 검색 결과 표시 */}
+                      {/* 현재 스트리밍 중인 메시지에서만 실시간 검색 결과 표시 */}
                       {message.type === "assistant" && message.isStreaming && isStreaming && currentSearchResults.length > 0 && (
                         <div className="claude-search-results">
                           {currentSearchResults.map((searchData, index) => (
@@ -1170,7 +1175,6 @@ export default function Home() {
                               >
                                 <div className="search-info">
                                   <span className="search-tool">{searchData.tool_name}</span>
-                                  {/* 🆕 중간 검색 표시 */}
                                   {searchData.isIntermediateSearch && searchData.sectionContext && (
                                     <span className="intermediate-badge">
                                       📊 {searchData.sectionContext.section_title}
@@ -1184,7 +1188,6 @@ export default function Home() {
                                     </span>
                                   )}
                                   <span className="result-count">{searchData.results.length}개 결과</span>
-                                  {/* 🆕 중간 검색 이유 표시 */}
                                   {searchData.isIntermediateSearch && searchData.sectionContext && (
                                     <span className="search-reason">
                                       {searchData.sectionContext.search_reason}
@@ -1229,25 +1232,20 @@ export default function Home() {
                       {renderMessageContent(message)}
 
                       {/* 출처 보기 버튼 - 완료된 메시지에만 표시 */}
-                      {message.type === "assistant" && !message.isStreaming && (
+                      {message.type === "assistant" && !message.isStreaming && Object.keys(fullDataDict).length > 0 && (
                         <div className="message-actions">
-                          {message.sources && message.sources.total_count > 0 && (
-                            <button
-                              className="sources-simple-btn"
-                              onClick={() => {
-                                setSourcesData(message.sources);
-                                if (!sourcesPanelVisible) {
-                                  toggleSourcesPanel();
-                                }
-                              }}
-                            >
-                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                <polyline points="14,2 14,8 20,8" />
-                              </svg>
-                              {message.sources.total_count}개 출처
-                            </button>
-                          )}
+                          <button
+                            className="sources-simple-btn"
+                            onClick={() => {
+                              console.log('소스 패널 열기, fullDataDict:', Object.keys(fullDataDict).length, '개');
+                              setFullDataDict(fullDataDict); // 현재 전역 상태 사용
+                              if (!sourcesPanelVisible) {
+                                toggleSourcesPanel();
+                              }
+                            }}
+                          >
+                            {Object.keys(fullDataDict).length}개 출처
+                          </button>
                         </div>
                       )}
                     </div>
@@ -1309,6 +1307,7 @@ export default function Home() {
         sources={sourcesData}
         isVisible={sourcesPanelVisible}
         onToggle={toggleSourcesPanel}
+        dataDict={fullDataDict} // >> 전체 데이터 딕셔너리 전달
       />
     </div>
   );

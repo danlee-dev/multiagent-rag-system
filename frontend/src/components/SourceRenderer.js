@@ -4,24 +4,23 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import './SourceRenderer.css';
 
-const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMappings = [] }) => {
+const SourceRenderer = ({ content, sources = [], isStreaming = false, dataDict = {} }) => {
   const [hoveredSource, setHoveredSource] = useState(null);
-  const [hoveredIndex, setHoveredIndex] = useState(null); // 현재 호버된 버튼의 인덱스
+  const [hoveredIndex, setHoveredIndex] = useState(null);
+
+  console.log("SourceRenderer 렌더링 시작:");
+  console.log("- content 길이:", content?.length || 0);
+  console.log("- sources 개수:", sources?.length || 0);
+  console.log("- isStreaming:", isStreaming);
+  console.log("- dataDict 크기:", Object.keys(dataDict || {}).length);
+  console.log("- dataDict 키들:", Object.keys(dataDict || {}));
+  console.log("- dataDict 전체 내용:", dataDict);
 
   // [SOURCE:번호] 또는 [SOURCE:번호, 번호, ...] 형식을 파싱해서 출처 버튼으로 변환
   const parseContentWithSources = (text) => {
     if (!text) {
       return [{ type: 'text', content: '' }];
     }
-
-    console.log("SourceRenderer 렌더링 시작:");
-  console.log("- content 길이:", content?.length || 0);
-  console.log("- sources 개수:", sources?.length || 0);
-  console.log("- isStreaming:", isStreaming);
-  console.log("- sectionMappings:", sectionMappings);
-  console.log("- sectionMappings 타입:", typeof sectionMappings);
-  console.log("- sectionMappings 배열 여부:", Array.isArray(sectionMappings));
-  console.log("- sectionMappings 길이:", sectionMappings?.length || 0);
 
     // 개선된 정규식: [SOURCE:1] 또는 [SOURCE:1, 2, 3] 형식 모두 지원
     const sourcePattern = /\[SOURCE:([\d\s,]+)\]/g;
@@ -47,73 +46,59 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
 
       // 각 번호에 대해 개별 버튼 생성
       sourceNumbers.forEach((sourceNumber, index) => {
-        // ✅ 개선: 매핑 정보를 사용해서 출처 찾기
+        // >> 핵심 수정: 전체 데이터 딕셔너리에서 직접 매핑
         let sourceData = null;
-        let actualIndex = sourceNumber;
 
         console.log(`🔍 SOURCE:${sourceNumber} 매핑 시작`);
-        console.log(`   - sectionMappings:`, sectionMappings);
-        console.log(`   - sources 길이:`, sources?.length);
+        console.log(`   - dataDict 타입:`, typeof dataDict);
+        console.log(`   - dataDict 키들:`, Object.keys(dataDict || {}));
+        console.log(`   - 찾는 키: ${sourceNumber} (타입: ${typeof sourceNumber})`);
 
-        if (sources && sources.length > 0) {
-          // 🔥 핵심 수정: 섹션 매핑 사용 (1-based SOURCE를 0-based로 변환)
-          if (sectionMappings && Array.isArray(sectionMappings) && sectionMappings.length > sourceNumber - 1) {
-            const globalIndex = sectionMappings[sourceNumber - 1]; // SOURCE:1 -> 매핑[0], SOURCE:2 -> 매핑[1]
-
-            console.log(`   - SOURCE:${sourceNumber} → 매핑 인덱스: ${globalIndex}`);
-
-            // 매핑된 인덱스가 sources 범위 내에 있는지 확인
-            if (typeof globalIndex === 'number' && globalIndex >= 0 && globalIndex < sources.length && sources[globalIndex]) {
-              sourceData = sources[globalIndex];
-              actualIndex = sourceNumber; // 버튼 표시는 그대로 1-based
-              console.log(`✅ 매핑 성공: SOURCE:${sourceNumber} → 전체 인덱스 ${globalIndex}`);
-              console.log(`   - 출처 제목:`, sourceData.title?.substring(0, 50) + '...');
-              console.log(`   - 출처 내용:`, sourceData.content?.substring(0, 100) + '...');
-            } else {
-              console.log(`❌ 매핑 실패: 섹션 SOURCE:${sourceNumber} → 전체 인덱스 ${globalIndex} (범위 벗어남 또는 데이터 없음)`);
-              console.log(`   - sources.length: ${sources.length}, globalIndex: ${globalIndex}, 유효성: ${typeof globalIndex === 'number' && globalIndex >= 0 && globalIndex < sources.length}`);
-            }
+        // 전체 데이터 딕셔너리에서 직접 조회 (숫자와 문자열 키 모두 시도)
+        if (dataDict) {
+          // 숫자 키로 먼저 시도
+          if (dataDict[sourceNumber]) {
+            sourceData = dataDict[sourceNumber];
+            console.log(`✅ 전체 데이터 딕셔너리에서 직접 매핑 성공 (숫자 키): SOURCE:${sourceNumber}`);
+          } 
+          // 문자열 키로 시도
+          else if (dataDict[String(sourceNumber)]) {
+            sourceData = dataDict[String(sourceNumber)];
+            console.log(`✅ 전체 데이터 딕셔너리에서 직접 매핑 성공 (문자열 키): SOURCE:${sourceNumber}`);
           }
-
-          // 2. 매핑이 없거나 실패한 경우 기본 로직 사용 (1-based를 0-based로)
-          if (!sourceData) {
-            const fallbackIndex = sourceNumber - 1;
-            if (fallbackIndex >= 0 && fallbackIndex < sources.length && sources[fallbackIndex]) {
-              sourceData = sources[fallbackIndex];
-              actualIndex = sourceNumber; // 버튼 표시는 그대로 1-based
-              console.log(`🔄 기본 로직 사용: SOURCE:${sourceNumber} → 인덱스 ${fallbackIndex}`);
-            } else {
-              console.log(`❌ 기본 로직도 실패: SOURCE:${sourceNumber} → 인덱스 ${fallbackIndex} (범위 벗어남 또는 데이터 없음)`);
-              console.log(`   - sources.length: ${sources.length}, fallbackIndex: ${fallbackIndex}`);
-
-              // 🔧 범위를 벗어나는 경우, 사용 가능한 마지막 인덱스로 대체
-              if (sources.length > 0) {
-                const safeIndex = Math.min(fallbackIndex, sources.length - 1);
-                if (sources[safeIndex]) {
-                  sourceData = sources[safeIndex];
-                  actualIndex = sourceNumber; // 버튼 표시는 원래 번호 유지
-                  console.log(`🔧 안전 인덱스 사용: SOURCE:${sourceNumber} → 인덱스 ${safeIndex} (최대 ${sources.length - 1})`);
-                }
+          
+          if (sourceData) {
+            console.log(`   - 출처 제목:`, sourceData.title?.substring(0, 50) + '...');
+            console.log(`   - 출처 내용:`, sourceData.content?.substring(0, 100) + '...');
+          } else {
+            console.log(`❌ 전체 데이터 딕셔너리에서 매핑 실패: SOURCE:${sourceNumber}`);
+            console.log(`   - 사용 가능한 키들: ${Object.keys(dataDict || {})}`);
+            
+            // fallback: sources 배열에서 시도
+            if (sources && sources.length > 0) {
+              console.log(`🔄 sources 배열 fallback 시도`);
+              const arrayIndex = sourceNumber - 1;
+              if (arrayIndex >= 0 && arrayIndex < sources.length && sources[arrayIndex]) {
+                sourceData = sources[arrayIndex];
+                console.log(`✅ sources 배열 fallback 성공: SOURCE:${sourceNumber} → 배열[${arrayIndex}]`);
               }
             }
           }
+        } else {
+          console.log(`❌ dataDict가 null/undefined`);
         }
 
-        // 🔥 핵심 수정: sourceData가 없어도 항상 버튼으로 렌더링
+        // 버튼 생성 (데이터 있든 없든)
         parts.push({
           type: 'source',
-          sourceNumber: actualIndex,
+          sourceNumber: sourceNumber, // 실제 인덱스 번호 사용
           sourceData: sourceData, // null일 수도 있음
-          isLoading: !sourceData && isStreaming // 로딩 상태 추가
+          isLoading: !sourceData && isStreaming // 로딩 상태
         });
 
-        if (sourceData) {
-          console.log(`출처 ${sourceNumber} 버튼 생성됨 (데이터 있음)`);
-        } else {
-          console.log(`출처 ${sourceNumber} 버튼 생성됨 (로딩 상태)`);
-        }
+        console.log(`출처 ${sourceNumber} 버튼 생성됨 ${sourceData ? '(데이터 있음)' : '(로딩 상태)'}`);
 
-        // 여러 번호가 있을 때 버튼 사이에 약간의 간격 추가 (마지막 번호가 아닌 경우)
+        // 여러 번호가 있을 때 버튼 사이에 약간의 간격 추가
         if (index < sourceNumbers.length - 1) {
           parts.push({
             type: 'text',
@@ -143,7 +128,7 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
       number: sourceNumber,
       data: sourceData
     });
-    setHoveredIndex(buttonIndex); // 현재 호버된 버튼의 인덱스 저장
+    setHoveredIndex(buttonIndex);
   };
 
   const handleSourceContainerLeave = () => {
@@ -151,9 +136,8 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
     setHoveredIndex(null);
   };
 
-  // 툴팁에 마우스가 올라갔을 때 툴팁 유지
   const handleTooltipEnter = () => {
-    // 현재 hoveredSource 상태 유지 (툴팁이 사라지지 않도록)
+    // 현재 hoveredSource 상태 유지
   };
 
   const handleTooltipLeave = () => {
@@ -173,7 +157,6 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeRaw]}
               components={{
-                // 헤더 크기 보존 - ReactMarkdown 기본 헤더 태그 사용
                 p: ({ children }) => <span>{children}</span>,
                 div: ({ children }) => <span>{children}</span>,
                 table: ({ node, ...props }) => (
@@ -203,7 +186,7 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                     window.open(part.sourceData.url || part.sourceData.source_url, '_blank');
                   }
                 }}
-                disabled={!part.sourceData} // 데이터가 없으면 클릭 비활성화
+                disabled={!part.sourceData}
                 title={part.isLoading ? '출처 로딩 중...' : (part.sourceData ? part.sourceData.title : '출처 정보 없음')}
               >
                 {part.sourceNumber}
@@ -214,7 +197,7 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                 <div
                   style={{
                     position: 'absolute',
-                    bottom: '100%', // 버튼 바로 위에 붙임
+                    bottom: '100%',
                     left: '50%',
                     transform: 'translateX(-50%)',
                     width: '300px',
@@ -229,7 +212,7 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                     lineHeight: '1.4',
                     color: '#fff',
                     boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
-                    marginBottom: '2px' // 버튼과 약간의 간격
+                    marginBottom: '2px'
                   }}
                   onMouseEnter={handleTooltipEnter}
                   onMouseLeave={handleTooltipLeave}
@@ -285,7 +268,10 @@ const SourceRenderer = ({ content, sources = [], isStreaming = false, sectionMap
                   }}>
                     <span style={{ color: '#666' }}>
                       {hoveredSource.data.source_type === 'web_search' ? '웹 검색' :
-                       hoveredSource.data.source_type === 'vector_db' ? '문서' : '출처'}
+                       hoveredSource.data.source_type === 'vector_db' ? '문서' :
+                       hoveredSource.data.source_type === 'rdb_search' ? '데이터베이스' :
+                       hoveredSource.data.source_type === 'graph_db' ? '그래프 DB' :
+                       hoveredSource.data.source || '출처'}
                     </span>
                     {(hoveredSource.data.url || hoveredSource.data.source_url) && (
                       <a

@@ -49,22 +49,6 @@ class SearchResult(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
-
-    # 메타데이터는 호환성을 위해 유지
-    @property
-    def metadata(self) -> Dict[str, Any]:
-        """호환성을 위한 metadata 프로퍼티"""
-        return {
-            "title": self.title,
-            "url": self.url,
-            "document_type": self.document_type,
-            "relevance_score": self.relevance_score,
-            "timestamp": self.timestamp,
-            "document_id": self.document_id,
-            "chunk_index": self.chunk_index,
-            "similarity_score": self.similarity_score
-        }
-
 class CriticResult(BaseModel):
     # 'pass' 또는 'fail'로 더 명확하게
     status: Literal["pass", "fail_with_feedback"]
