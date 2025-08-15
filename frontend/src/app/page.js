@@ -40,16 +40,9 @@ export default function Home() {
   const [fullDataDict, setFullDataDict] = useState({}); // 전체 데이터 딕셔너리
   const [sectionDataDicts, setSectionDataDicts] = useState({}); // 섹션별 데이터 딕셔너리
 
-  // 실시간 생각 스트리밍 상태들 - 메시지 ID별로 관리
-  const [messageTimingStates, setMessageTimingStates] = useState({}); // 메시지별 시간 상태
+  // 새로운 메시지별 상태 관리 시스템
+  const [messageStates, setMessageStates] = useState({}); // 메시지별 상태 {messageId: {status, startTime, endTime, statusHistory}}
   const [statusToggleOpen, setStatusToggleOpen] = useState(false); // 토글 열림/닫힘
-  
-  // 하위 호환성을 위한 전역 상태 (현재 스트리밍 중인 메시지용)
-  const [currentStreamingMessageId, setCurrentStreamingMessageId] = useState(null);
-  const [streamingStartTime, setStreamingStartTime] = useState(null); // 시작 시간
-  const [elapsedTime, setElapsedTime] = useState(0); // 경과 시간 (초)
-  const [isStreamingCompleted, setIsStreamingCompleted] = useState(false); // 완료 여부
-  const [statusMessages, setStatusMessages] = useState([]); // 현재 스트리밍 메시지의 상태들 (하위 호환)
 
   // 자동 스크롤 제어 상태
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true); // 자동 스크롤 활성화 여부
@@ -58,6 +51,9 @@ export default function Home() {
   const [selectedTeam, setSelectedTeam] = useState(null); // 선택된 팀 정보
   const [availableTeams, setAvailableTeams] = useState([]); // 사용 가능한 팀 목록
   const [teamSectionExpanded, setTeamSectionExpanded] = useState(false); // 팀 섹션 확장 상태
+  const [aiAutoEnabled, setAiAutoEnabled] = useState(true); // AI 자동 선택 활성화 상태
+  const [teamDropupOpen, setTeamDropupOpen] = useState(false); // 팀 선택 드롭업 상태
+  const [abortController, setAbortController] = useState(null); // 스트리밍 중단용
 
   // 🔍 디버깅: currentSearchResults 변경사항 추적
   const setCurrentSearchResultsDebug = (newResults) => {
@@ -127,27 +123,59 @@ export default function Home() {
     scrollToBottom();
   }, [currentConversation, currentStreamingMessage, currentStreamingCharts, scrollToBottom]);
 
-  // 실시간 경과 시간 업데이트
+  // 실시간 경과 시간 업데이트 (1초마다)
   useEffect(() => {
-    let interval = null;
+    const interval = setInterval(() => {
+      setMessageStates(prev => {
+        const newStates = { ...prev };
+        let hasActiveStreaming = false;
+        
+        Object.keys(newStates).forEach(messageId => {
+          const state = newStates[messageId];
+          if (state.isActive && !state.isCompleted) {
+            hasActiveStreaming = true;
+            const now = Date.now();
+            const elapsedSeconds = Math.floor((now - state.startTime) / 1000);
+            newStates[messageId] = { ...state, elapsedSeconds };
+          }
+        });
+        
+        if (hasActiveStreaming) {
+          // 로컬스토리지에 저장
+          localStorage.setItem('messageStates', JSON.stringify(newStates));
+        }
+        
+        return newStates;
+      });
+    }, 1000);
 
-    if (isStreaming && streamingStartTime && !isStreamingCompleted) {
-      interval = setInterval(() => {
-        const now = Date.now();
-        const elapsed = Math.floor((now - streamingStartTime) / 1000);
-        setElapsedTime(elapsed);
-      }, 1000);
-    }
+    return () => clearInterval(interval);
+  }, []);
 
-    return () => {
-      if (interval) {
-        clearInterval(interval);
+  // 드롭업 외부 클릭 시 닫기
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (!event.target.closest('.team-tag-container')) {
+        setTeamDropupOpen(false);
       }
     };
-  }, [isStreaming, streamingStartTime, isStreamingCompleted]);
 
-  // 로컬 스토리지에서 대화 히스토리 로드
+    if (teamDropupOpen) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [teamDropupOpen]);
+
+  // 스트리밍 시작 시 드롭업 닫기
   useEffect(() => {
+    if (isStreaming) {
+      setTeamDropupOpen(false);
+    }
+  }, [isStreaming]);
+
+  // 로컬 스토리지에서 데이터 로드
+  useEffect(() => {
+    // 대화 히스토리 로드
     const savedConversations = localStorage.getItem("chatConversations");
     if (savedConversations) {
       try {
@@ -174,6 +202,19 @@ export default function Home() {
       } catch (error) {
         console.error("대화 히스토리 로드 오류:", error);
         setConversations([]);
+      }
+    }
+
+    // 메시지 상태 로드
+    const savedMessageStates = localStorage.getItem("messageStates");
+    if (savedMessageStates) {
+      try {
+        const parsedStates = JSON.parse(savedMessageStates);
+        setMessageStates(parsedStates);
+        console.log(`메시지 상태 복원: ${Object.keys(parsedStates).length}개`);
+      } catch (error) {
+        console.error("메시지 상태 로드 오류:", error);
+        setMessageStates({});
       }
     }
 
@@ -258,21 +299,25 @@ export default function Home() {
     setFullDataDict({});
     setSectionDataDicts({});
 
-    // 실시간 생각 스트리밍 상태 초기화 (현재 스트리밍만 초기화, 기존 메시지 상태는 유지)
-    setStatusMessages([]); // 새 메시지용 상태만 초기화
+    // 메시지 상태 초기화
+    setMessageStates({});
     setStatusToggleOpen(false);
-    setStreamingStartTime(null);
-    setElapsedTime(0);
-    setIsStreamingCompleted(false);
     setStatusMessage("");
-    
-    // 메시지별 타이밍 상태 초기화
-    setMessageTimingStates({});
-    setCurrentStreamingMessageId(null);
+    localStorage.removeItem('messageStates');
 
     localStorage.removeItem("currentSearchResults");
     localStorage.removeItem("searchResultsVisible");
     localStorage.removeItem("conversationSearchResults");
+
+    // AI 자동 선택을 기본값으로 설정
+    setAiAutoEnabled(true);
+    if (availableTeams.length > 0) {
+      const autoSelectTeam = availableTeams.find(team => team.id === "AI_AUTO");
+      if (autoSelectTeam) {
+        setSelectedTeam(autoSelectTeam);
+        console.log("🤖 새 채팅 시작 - AI 자동 선택이 기본값으로 설정되었습니다");
+      }
+    }
 
     console.log("새 채팅이 시작되었습니다. 스트리밍 상태:", false);
   };
@@ -338,90 +383,126 @@ export default function Home() {
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // 메시지별 타이밍 상태 관리 헬퍼 함수들
-  const initializeMessageTiming = (messageId) => {
+  // 메시지 상태 관리 헬퍼 함수들
+  const initializeMessageState = (messageId) => {
     const startTime = Date.now();
-    setMessageTimingStates(prev => ({
-      ...prev,
-      [messageId]: {
-        startTime,
-        statusMessages: [{
-          id: Date.now(),
-          message: "생각하는 중...",
-          timestamp: startTime,
-          elapsedSeconds: 0
-        }],
-        elapsedTime: 0,
-        isCompleted: false
-      }
-    }));
+    const initialState = {
+      messageId,
+      startTime,
+      endTime: null,
+      elapsedSeconds: 0,
+      isActive: true,
+      isCompleted: false,
+      statusHistory: [{
+        id: Date.now(),
+        message: "생각하는 중...",
+        timestamp: startTime,
+        elapsedSeconds: 0
+      }]
+    };
+    
+    setMessageStates(prev => {
+      const newStates = { ...prev, [messageId]: initialState };
+      localStorage.setItem('messageStates', JSON.stringify(newStates));
+      return newStates;
+    });
+    
     return startTime;
   };
 
-  const addStatusToMessage = (messageId, statusMessage) => {
-    setMessageTimingStates(prev => {
-      const messageState = prev[messageId];
-      if (!messageState) return prev;
-
-      const currentTime = Date.now();
-      const elapsedSeconds = Math.floor((currentTime - messageState.startTime) / 1000);
+  const addMessageStatus = (messageId, statusMessage) => {
+    setMessageStates(prev => {
+      const currentState = prev[messageId];
+      if (!currentState) return prev;
       
-      const newStatusMessage = {
+      const now = Date.now();
+      const elapsedSeconds = Math.floor((now - currentState.startTime) / 1000);
+      
+      const newStatus = {
         id: Date.now() + Math.random(),
         message: statusMessage,
-        timestamp: currentTime,
+        timestamp: now,
         elapsedSeconds
       };
-
-      console.log(`🔄 메시지 ${messageId} 상태 추가:`, {
-        메시지: statusMessage,
-        경과시간: elapsedSeconds,
-        시작시간: messageState.startTime,
-        현재시간: currentTime
-      });
-
-      return {
-        ...prev,
-        [messageId]: {
-          ...messageState,
-          statusMessages: [...messageState.statusMessages, newStatusMessage],
-          elapsedTime: elapsedSeconds
-        }
-      };
-    });
-  };
-
-  const completeMessageTiming = (messageId) => {
-    setMessageTimingStates(prev => {
-      const messageState = prev[messageId];
-      if (!messageState) return prev;
-
-      const currentTime = Date.now();
-      const finalElapsedTime = Math.floor((currentTime - messageState.startTime) / 1000);
       
-      const completionMessage = {
-        id: Date.now() + Math.random(),
-        message: "보고서 생성 완료",
-        timestamp: currentTime,
-        elapsedSeconds: finalElapsedTime,
-        isCompleted: true
+      const updatedState = {
+        ...currentState,
+        elapsedSeconds,
+        statusHistory: [...currentState.statusHistory, newStatus]
       };
-
-      return {
-        ...prev,
-        [messageId]: {
-          ...messageState,
-          statusMessages: [...messageState.statusMessages, completionMessage],
-          elapsedTime: finalElapsedTime,
-          isCompleted: true
-        }
-      };
+      
+      const newStates = { ...prev, [messageId]: updatedState };
+      localStorage.setItem('messageStates', JSON.stringify(newStates));
+      
+      return newStates;
     });
   };
 
-  const getMessageTimingState = (messageId) => {
-    return messageTimingStates[messageId] || null;
+  const completeMessageState = (messageId, wasAborted = false) => {
+    setMessageStates(prev => {
+      const currentState = prev[messageId];
+      if (!currentState) return prev;
+      
+      const now = Date.now();
+      const finalElapsedSeconds = Math.floor((now - currentState.startTime) / 1000);
+      
+      const completionStatus = {
+        id: Date.now() + Math.random(),
+        message: wasAborted ? "보고서 생성 중지" : "보고서 생성 완료",
+        timestamp: now,
+        elapsedSeconds: finalElapsedSeconds,
+        isCompleted: !wasAborted,
+        wasAborted: wasAborted
+      };
+      
+      const completedState = {
+        ...currentState,
+        endTime: now,
+        elapsedSeconds: finalElapsedSeconds,
+        isActive: false,
+        isCompleted: true,
+        statusHistory: [...currentState.statusHistory, completionStatus]
+      };
+      
+      const newStates = { ...prev, [messageId]: completedState };
+      localStorage.setItem('messageStates', JSON.stringify(newStates));
+      
+      return newStates;
+    });
   };
+
+  const getMessageState = (messageId) => {
+    return messageStates[messageId] || null;
+  };
+
+  // 스트리밍 중단 함수
+  const stopGeneration = () => {
+    if (abortController) {
+      console.log("🛑 사용자가 생성을 중단했습니다");
+      abortController.abort();
+      setAbortController(null);
+      setIsStreaming(false);
+      setStatusMessage("생성이 중단되었습니다");
+      
+      // 현재 스트리밍 중인 메시지 상태 업데이트
+      if (currentConversation.length > 0) {
+        const lastMessage = currentConversation[currentConversation.length - 1];
+        if (lastMessage && lastMessage.type === "assistant" && lastMessage.isStreaming) {
+          // 메시지 상태 완료 처리 (타이머 중단) - 중단 상태로 표시
+          completeMessageState(lastMessage.id, true);
+          
+          setCurrentConversation(prev => 
+            prev.map(msg => 
+              msg.id === lastMessage.id 
+                ? { ...msg, isStreaming: false, wasAborted: true }
+                : msg
+            )
+          );
+        }
+      }
+    }
+  };
+
 
   // 팀 목록 로드 함수
   const loadAvailableTeams = async () => {
@@ -472,6 +553,16 @@ export default function Home() {
       ];
 
       setAvailableTeams(teamsWithAuto);
+      
+      // AI 자동 선택을 기본값으로 설정
+      if (!selectedTeam) {
+        const autoSelectTeam = teamsWithAuto.find(team => team.id === "AI_AUTO");
+        if (autoSelectTeam) {
+          setSelectedTeam(autoSelectTeam);
+          console.log("🤖 AI 자동 선택이 기본값으로 설정되었습니다");
+        }
+      }
+      
       console.log("사용 가능한 팀 목록:", teamsWithAuto);
     } catch (error) {
       console.error("팀 목록 로드 실패:", error);
@@ -546,22 +637,10 @@ export default function Home() {
       sources: null,
     };
 
-    // 해당 메시지의 타이밍 상태 초기화
-    const messageStartTime = initializeMessageTiming(assistantMessage.id);
+    // 메시지 상태 초기화
+    const messageStartTime = initializeMessageState(assistantMessage.id);
     
-    // 현재 스트리밍 메시지 ID 설정 및 전역 상태 초기화 (하위 호환)
-    setCurrentStreamingMessageId(assistantMessage.id);
-    setStreamingStartTime(messageStartTime);
-    setElapsedTime(0);
-    setIsStreamingCompleted(false);
-    setStatusMessages([{
-      id: Date.now(),
-      message: "생각하는 중...",
-      timestamp: messageStartTime,
-      elapsedSeconds: 0
-    }]);
-    
-    console.log("🕐 메시지별 타이밍 초기화:", {
+    console.log("🕐 메시지 상태 초기화:", {
       messageId: assistantMessage.id,
       startTime: messageStartTime
     });
@@ -589,11 +668,34 @@ export default function Home() {
         selectedTeamName: selectedTeam?.name,
       });
 
-      // AI 자동 선택이 활성화된 경우 먼저 적절한 팀 추천받기
-      let finalTeamId = selectedTeam?.id || null;
+      // AbortController 생성
+      const controller = new AbortController();
+      setAbortController(controller);
 
-      if (selectedTeam?.id === "AI_AUTO") {
-        console.log("🤖 AI 자동 선택 활성화 - 적절한 팀 추천 요청");
+      // AI 자동 선택이 활성화된 경우 적절한 팀 추천받기
+      let finalTeamId = null;
+      
+      if (aiAutoEnabled) {
+        finalTeamId = "AI_AUTO";
+      } else if (selectedTeam && selectedTeam.id !== "AI_AUTO") {
+        finalTeamId = selectedTeam.id;
+      }
+
+      if (aiAutoEnabled || finalTeamId === "AI_AUTO") {
+        console.log("🤖 AI 자동 선택 활성화 - 적절한 팀 추천 요청", {
+          reason: !selectedTeam ? "팀 선택 없음" : "AI_AUTO 선택됨",
+          selectedTeam: selectedTeam?.name || "없음"
+        });
+        
+        // 사용자가 팀을 선택하지 않은 경우 AI 자동 선택으로 UI 업데이트
+        if (!selectedTeam) {
+          const autoSelectTeam = availableTeams.find(team => team.id === "AI_AUTO");
+          if (autoSelectTeam) {
+            setSelectedTeam(autoSelectTeam);
+            console.log("🎯 프론트엔드 UI를 AI 자동 선택으로 업데이트");
+          }
+        }
+        
         try {
           const suggestResponse = await fetch(`${API_BASE_URL}/teams/suggest`, {
             method: "POST",
@@ -635,6 +737,7 @@ export default function Home() {
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
         },
+        signal: controller.signal, // AbortController 시그널 추가
         body: JSON.stringify({
           query: currentQuery,
           session_id: conversationId || undefined,
@@ -706,26 +809,8 @@ export default function Home() {
                   const statusMessage = data.data?.message || data.message || "처리 중...";
                   setStatusMessage(statusMessage);
 
-                  // 메시지별 타이밍에 상태 추가
-                  if (currentStreamingMessageId) {
-                    addStatusToMessage(currentStreamingMessageId, statusMessage);
-                    
-                    // 하위 호환성을 위한 전역 상태도 업데이트
-                    setStatusMessages(prev => {
-                      const currentTime = Date.now();
-                      const relativeElapsedSeconds = streamingStartTime ? 
-                        Math.floor((currentTime - streamingStartTime) / 1000) : 0;
-                      
-                      const newMessage = {
-                        id: Date.now() + Math.random(),
-                        message: statusMessage,
-                        timestamp: currentTime,
-                        elapsedSeconds: relativeElapsedSeconds
-                      };
-                      
-                      return [...prev, newMessage];
-                    });
-                  }
+                  // 메시지 상태에 상태 추가
+                  addMessageStatus(assistantMessage.id, statusMessage);
                   break;
 
                 // >> 새로운 이벤트 타입: 전체 데이터 딕셔너리
@@ -1032,150 +1117,39 @@ export default function Home() {
                 case "final_complete":
                   setStatusMessage("");
 
-                  // 메시지별 타이밍 완료 처리
-                  if (currentStreamingMessageId) {
-                    completeMessageTiming(currentStreamingMessageId);
-                  }
+                  // 메시지 상태 완료 처리
+                  completeMessageState(assistantMessage.id);
 
-                  // 최종 경과 시간 계산 (먼저 계산)
-                  const finalElapsedTime = streamingStartTime ? Math.floor((Date.now() - streamingStartTime) / 1000) : 0;
-
-                  console.log("🔥 finalElapsedTime 계산 확인:", {
-                    messageId: currentStreamingMessageId,
-                    streamingStartTime,
-                    currentTime: Date.now(),
-                    timeDiff: streamingStartTime ? (Date.now() - streamingStartTime) : 0,
-                    finalElapsedTime,
-                    hasStreamingStartTime: !!streamingStartTime
-                  });
-
-                  // 실시간 경과 시간 상태도 최종 시간으로 업데이트
-                  setElapsedTime(finalElapsedTime);
-
-                  // 실시간 생각 스트리밍 완료 처리
-                  setIsStreamingCompleted(true);
-
-                  // 최종 상태 메시지 생성 - 함수형 업데이트로 최신 상태 사용
-                  setStatusMessages(prevMessages => {
-                    const finalMessages = [...prevMessages, {
-                      id: Date.now() + Math.random(),
-                      message: "보고서 생성 완료",
-                      timestamp: Date.now(),
-                      elapsedSeconds: finalElapsedTime, // 최종 경과 시간 사용
-                      isCompleted: true
-                    }];
-
-                    console.log("🔥 setStatusMessages 내부 값 확인:", {
-                      finalElapsedTime,
-                      streamingStartTime,
-                      hasStreamingStartTime: !!streamingStartTime
-                    });
-
-                    return finalMessages;
-                  });
-
-                  // 메시지에 저장할 때도 최신 상태 사용
+                  // 메시지에 상태 저장
                   setCurrentConversation((prevConversation) => {
-                    console.log("🚨 final_complete - 메시지 업데이트 시작:", {
-                      targetMessageId: assistantMessage.id,
-                      conversationLength: prevConversation.length,
-                      assistantMessages: prevConversation.filter(m => m.type === "assistant").map(m => ({id: m.id, isStreaming: m.isStreaming}))
-                    });
-
                     const newConversation = prevConversation.map((msg) => {
                       if (msg.id === assistantMessage.id) {
-                        console.log('🔥 final_complete - 메시지 업데이트:', {
-                          messageId: msg.id,
-                          finalElapsedTime: finalElapsedTime,
-                          streamingStartTime: streamingStartTime,
-                          fullDataDictToSave: !!fullDataDict,
-                          fullDataDictSize: Object.keys(fullDataDict || {}).length,
-                          fullDataDictKeys: Object.keys(fullDataDict || {}).slice(0, 5),
-                          msgCurrentFullDataDict: !!msg.fullDataDict,
-                          msgCurrentFullDataDictSize: Object.keys(msg.fullDataDict || {}).length
-                        });
-
-                        // 메시지에서 이미 저장된 fullDataDict를 우선 사용
-                        const finalFullDataDict = msg.fullDataDict || fullDataDict;
-
-                        // 메시지의 streamingStartTime이 있다면 그것을 사용해서 정확한 경과시간 계산
-                        const messageStreamingStartTime = msg.streamingStartTime || streamingStartTime;
-                        const accurateElapsedTime = messageStreamingStartTime ?
-                          Math.floor((Date.now() - messageStreamingStartTime) / 1000) : finalElapsedTime;
-
-                        console.log("🚨 정확한 시간 계산 확인:", {
-                          msgId: msg.id,
-                          msgStreamingStartTime: messageStreamingStartTime,
-                          globalStreamingStartTime: streamingStartTime,
-                          currentTime: Date.now(),
-                          timeDifference: messageStreamingStartTime ? (Date.now() - messageStreamingStartTime) : 0,
-                          accurateElapsedTime,
-                          finalElapsedTime,
-                          willSaveAsTotal: accurateElapsedTime
-                        });
-
-                        // 메시지별 타이밍 상태에서 최종 상태 가져오기
-                        const finalMessageTimingState = getMessageTimingState(msg.id);
-                        const finalStatusMessages = finalMessageTimingState ? 
-                          finalMessageTimingState.statusMessages : 
-                          [...statusMessages, {
-                            id: Date.now() + Math.random(),
-                            message: "보고서 생성 완료",
-                            timestamp: Date.now(),
-                            elapsedSeconds: accurateElapsedTime,
-                            isCompleted: true
-                          }];
-
+                        const messageState = getMessageState(assistantMessage.id);
+                        
                         const updatedMessage = {
                           ...msg,
                           charts: finalCharts,
                           isStreaming: false,
-                          // >> 우선순위: 메시지에 저장된 것 > 상태의 것
-                          fullDataDict: finalFullDataDict,
+                          fullDataDict: msg.fullDataDict || fullDataDict,
                           sectionDataDicts: sectionDataDicts,
-                          // 메시지별 타이밍 상태의 상태 메시지들 저장
-                          statusMessages: finalStatusMessages,
-                          streamingStartTime: messageStreamingStartTime,
-                          totalElapsedTime: accurateElapsedTime  // 더 정확한 경과 시간 사용
+                          // 메시지 상태 저장
+                          messageState: messageState
                         };
-
-                        console.log("🔥 메시지 업데이트 - 시간 저장 확인:", {
-                          messageId: msg.id,
-                          finalElapsedTime,
-                          accurateElapsedTime,
-                          globalStreamingStartTime: streamingStartTime,
-                          messageStreamingStartTime,
-                          updatedMessage: {
-                            totalElapsedTime: updatedMessage.totalElapsedTime,
-                            streamingStartTime: updatedMessage.streamingStartTime,
-                            hasStatusMessages: !!updatedMessage.statusMessages
-                          }
-                        });
-
+                        
                         return updatedMessage;
                       }
                       return msg;
                     });
 
-                    console.log("🚨 final_complete - conversation 업데이트 완료:", {
-                      targetMessageId: assistantMessage.id,
-                      foundUpdatedMessage: !!newConversation.find(m => m.id === assistantMessage.id),
-                      updatedMessageData: newConversation.find(m => m.id === assistantMessage.id)?.totalElapsedTime
-                    });
-
                     // 대화 저장
                     const conversationData = {
                       id: conversationId || Date.now().toString(),
-                      title:
-                        currentQuery.slice(0, 30) +
-                        (currentQuery.length > 30 ? "..." : ""),
+                      title: currentQuery.slice(0, 30) + (currentQuery.length > 30 ? "..." : ""),
                       messages: newConversation,
                       lastUpdated: new Date().toISOString(),
                     };
 
-                    const updatedConversations = conversations.filter(
-                      (c) => c.id !== conversationData.id
-                    );
+                    const updatedConversations = conversations.filter((c) => c.id !== conversationData.id);
                     updatedConversations.unshift(conversationData);
                     saveConversations(updatedConversations.slice(0, 50));
 
@@ -1184,9 +1158,7 @@ export default function Home() {
                     return newConversation;
                   });
 
-                  console.log("검색 결과 및 데이터 딕셔너리 유지됨");
                   setIsStreaming(false);
-                  console.log("스트리밍 완료 - 검색 결과 및 출처 정보 유지");
                   break;
 
                 case "error":
@@ -1215,8 +1187,17 @@ export default function Home() {
       console.error("오류 메시지:", error.message);
       console.error("오류 스택:", error.stack);
       console.error("========================");
-      setStatusMessage(`오류: ${error.message}`);
+      
+      // AbortError는 사용자가 의도적으로 중단한 것이므로 별도 처리
+      if (error.name === 'AbortError') {
+        console.log("🛑 요청이 중단되었습니다");
+        setStatusMessage("생성이 중단되었습니다");
+      } else {
+        setStatusMessage(`오류: ${error.message}`);
+      }
+      
       setIsStreaming(false);
+      setAbortController(null);
       localStorage.removeItem('currentStreamingConversation');
     }
   };
@@ -1244,6 +1225,29 @@ export default function Home() {
 
   // >> renderMessageContent 함수 수정 - 실제 인덱스 기반 출처 매핑
   const renderMessageContent = (message) => {
+    // 중단된 메시지 처리
+    if (message.wasAborted) {
+      return (
+        <div className="message-content">
+          {message.content && (
+            <SourceRenderer 
+              content={message.content}
+              sources={[]}
+              isStreaming={false}
+              dataDict={{}}
+            />
+          )}
+          <div className="generation-stopped">
+            <div className="stopped-icon"></div>
+            <div className="stopped-content">
+              <div className="stopped-title">생성이 중단되었습니다</div>
+              <div className="stopped-subtitle">사용자 요청에 의해 응답 생성이 중단되었습니다</div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     const content = message.content || "";
     const charts = message.charts || [];
     const sectionHeaders = message.sectionHeaders || [];
@@ -1454,22 +1458,32 @@ export default function Home() {
                   <button
                     key={`team-${team.id || index}`}
                     className={`team-toggle-btn ${
-                      selectedTeam?.id === team.id ? 'active' : ''
+                      team.id === 'AI_AUTO' ? (aiAutoEnabled ? 'active' : '') : (selectedTeam?.id === team.id ? 'active' : '')
                     } ${team.id === 'AI_AUTO' ? 'ai-auto-btn' : ''}`}
                     onClick={() => {
-                      if (selectedTeam?.id === team.id) {
-                        console.log("🎭 팀 선택 해제:", team.name);
-                        setSelectedTeam(null); // 같은 팀 클릭시 해제
+                      if (team.id === 'AI_AUTO') {
+                        // AI 자동 선택 클릭 시 토글 상태 변경
+                        setAiAutoEnabled(!aiAutoEnabled);
+                        setSelectedTeam(aiAutoEnabled ? null : team);
+                        console.log("🤖 AI 자동 선택 토글:", !aiAutoEnabled);
                       } else {
-                        console.log("🎭 팀 선택됨:", team.name, "ID:", team.id);
-                        setSelectedTeam(team); // 새로운 팀 선택
+                        // 일반 팀 선택
+                        if (selectedTeam?.id === team.id) {
+                          console.log("🎭 팀 선택 해제:", team.name);
+                          setSelectedTeam(null);
+                          setAiAutoEnabled(true); // 팀 해제 시 AI 자동 선택 활성화
+                        } else {
+                          console.log("🎭 팀 선택됨:", team.name, "ID:", team.id);
+                          setSelectedTeam(team);
+                          setAiAutoEnabled(false); // 수동 팀 선택 시 AI 자동 선택 비활성화
+                        }
                       }
                     }}
                     title={team.description}
                   >
                     <div className="team-button-content">
                       <span className="team-name">{team.name}</span>
-                      {selectedTeam?.id === team.id && (
+                      {((team.id === 'AI_AUTO' && aiAutoEnabled) || (team.id !== 'AI_AUTO' && selectedTeam?.id === team.id)) && (
                         <svg
                           className="team-check-icon"
                           width="16"
@@ -1573,31 +1587,14 @@ export default function Home() {
                       </div>
                     )}
                     <div className="message-content">
-                      {/* 어시스턴트 메시지에서 실시간 생각 스트리밍 UI를 맨 위에 표시 */}
+                      {/* 어시스턴트 메시지에서 상태 표시 */}
                       {message.type === "assistant" && (() => {
-                        // 현재 스트리밍 중인 메시지이거나, 완료된 메시지 중 상태 정보가 있는 경우 표시
-                        const isCurrentStreaming = message.isStreaming && isStreaming;
-                        const messageStatusMessages = message.statusMessages || [];
-                        const hasStatusHistory = !message.isStreaming && messageStatusMessages.length > 0;
-
-                        console.log("🎯 상단 스트리밍 메시지 렌더링 조건 체크:", {
-                          messageId: message.id,
-                          isStreaming,
-                          messageIsStreaming: message.isStreaming,
-                          isCurrentStreaming,
-                          hasStatusHistory,
-                          messageStatusMessagesLength: messageStatusMessages.length,
-                          currentStatusMessagesLength: statusMessages.length,
-                          shouldShow: isCurrentStreaming || hasStatusHistory,
-                          messageData: {
-                            hasStatusMessages: !!message.statusMessages,
-                            hasStreamingStartTime: !!message.streamingStartTime,
-                            hasTotalElapsedTime: !!message.totalElapsedTime,
-                            statusMessages: message.statusMessages
-                          }
-                        });
-
-                        return isCurrentStreaming || hasStatusHistory;
+                        // 현재 스트리밍 중이거나 완료된 메시지의 상태가 있는 경우 표시
+                        const messageState = getMessageState(message.id);
+                        const storedMessageState = message.messageState;
+                        const hasState = messageState || storedMessageState;
+                        
+                        return hasState;
                       })() && (
                         <div className="thinking-stream">
                           <div
@@ -1608,41 +1605,13 @@ export default function Home() {
                               <div className="pulse-dot"></div>
                               <span>
                                 {(() => {
-                                  // 메시지별 타이밍 상태 우선 사용
-                                  const messageTimingState = getMessageTimingState(message.id);
-                                  const isCurrentStreaming = message.isStreaming && isStreaming && currentStreamingMessageId === message.id;
+                                  const messageState = getMessageState(message.id) || message.messageState;
+                                  const isCurrentStreaming = message.isStreaming && isStreaming;
                                   
-                                  let displayTime;
-                                  if (messageTimingState) {
-                                    // 메시지별 타이밍 상태에서 시간 가져오기
-                                    displayTime = messageTimingState.elapsedTime;
-                                  } else if (isCurrentStreaming) {
-                                    // 현재 스트리밍 중인 메시지: 실시간 경과 시간 사용
-                                    displayTime = elapsedTime;
-                                  } else if (message.totalElapsedTime) {
-                                    // 완료된 메시지이고 저장된 시간이 있는 경우: 저장된 시간 사용
-                                    displayTime = message.totalElapsedTime;
-                                  } else {
-                                    // 저장된 시간이 없는 경우 0으로 설정
-                                    displayTime = 0;
+                                  let displayTime = 0;
+                                  if (messageState) {
+                                    displayTime = messageState.elapsedSeconds || 0;
                                   }
-
-                                  // 디버깅 로그 추가
-                                  console.log("🚨 UI 시간 표시 최종 확인:", {
-                                    messageId: message.id,
-                                    step: "UI_RENDER",
-                                    isCurrentStreaming,
-                                    globalElapsedTime: elapsedTime,
-                                    messageTotalElapsedTime: message.totalElapsedTime,
-                                    messageStreamingStartTime: message.streamingStartTime,
-                                    globalStreamingStartTime: streamingStartTime,
-                                    finalDisplayTime: displayTime,
-                                    displayTimeSource: isCurrentStreaming ? "global_elapsed" :
-                                                     (message.totalElapsedTime ? "message_total" : "zero"),
-                                    willShowTime: displayTime,
-                                    formattedTime: formatElapsedTime(displayTime),
-                                    messageComplete: !message.isStreaming
-                                  });
 
                                   if (statusToggleOpen) {
                                     return isCurrentStreaming ? `생각하는 중...` : `생각 과정`;
@@ -1662,42 +1631,10 @@ export default function Home() {
                           {statusToggleOpen && (
                             <div className="thinking-stream-content">
                               {(() => {
-                                // 메시지별 타이밍 상태 우선 사용, 없으면 기존 방식 사용
-                                const messageTimingState = getMessageTimingState(message.id);
-                                const isCurrentStreaming = message.isStreaming && isStreaming && currentStreamingMessageId === message.id;
-                                
-                                let displayMessages, displayStartTime;
-                                
-                                if (messageTimingState) {
-                                  // 메시지별 타이밍 상태가 있으면 그것을 사용
-                                  displayMessages = messageTimingState.statusMessages;
-                                  displayStartTime = messageTimingState.startTime;
-                                } else {
-                                  // 하위 호환: 기존 방식 사용
-                                  if (isCurrentStreaming) {
-                                    // 현재 스트리밍 중인 메시지: 전역 상태 또는 해당 메시지의 상태 사용
-                                    const currentMessageState = messageTimingStates[currentStreamingMessageId];
-                                    displayMessages = currentMessageState ? currentMessageState.statusMessages : statusMessages;
-                                    displayStartTime = currentMessageState ? currentMessageState.startTime : streamingStartTime;
-                                  } else {
-                                    // 완료된 메시지: 저장된 상태 사용
-                                    displayMessages = message.statusMessages || [];
-                                    displayStartTime = message.streamingStartTime;
-                                  }
-                                }
+                                const messageState = getMessageState(message.id) || message.messageState;
+                                const statusHistory = messageState?.statusHistory || [];
 
-                                console.log("🎯 상태 메시지 표시 확인:", {
-                                  messageId: message.id,
-                                  isCurrentStreaming: message.isStreaming && isStreaming,
-                                  globalStatusMessagesLength: statusMessages.length,
-                                  messageStatusMessagesLength: (message.statusMessages || []).length,
-                                  displayMessagesLength: displayMessages.length,
-                                  displayMessages: displayMessages.map(msg => msg.message),
-                                  messageIsStreaming: message.isStreaming,
-                                  globalIsStreaming: isStreaming
-                                });
-
-                                return displayMessages.map((status) => (
+                                return statusHistory.map((status) => (
                                   <div
                                     key={status.id}
                                     className={`thinking-step ${status.isCompleted ? 'completed' : ''}`}
@@ -1708,19 +1645,7 @@ export default function Home() {
                                     <div className="step-content">
                                       <span className="step-message">{status.message}</span>
                                       <span className="step-time">
-                                        {(() => {
-                                          // 미리 계산된 elapsedSeconds가 있으면 우선 사용
-                                          if (typeof status.elapsedSeconds === 'number') {
-                                            return formatElapsedTime(status.elapsedSeconds);
-                                          }
-                                          
-                                          // 없으면 기존 방식으로 계산 (음수 방지)
-                                          if (!displayStartTime) return '0:00';
-                                          
-                                          const elapsedSeconds = Math.floor((status.timestamp - displayStartTime) / 1000);
-                                          const safeElapsedSeconds = Math.max(0, elapsedSeconds);
-                                          return formatElapsedTime(safeElapsedSeconds);
-                                        })()}
+                                        {formatElapsedTime(status.elapsedSeconds || 0)}
                                       </span>
                                     </div>
                                   </div>
@@ -1883,14 +1808,15 @@ export default function Home() {
                           <button
                             className="sources-simple-btn"
                             onClick={() => {
-                              console.log('소스 패널 열기, fullDataDict:', Object.keys(fullDataDict).length, '개');
+                              console.log('소스 패널 토글, fullDataDict:', Object.keys(fullDataDict).length, '개');
                               setFullDataDict(fullDataDict); // 현재 전역 상태 사용
-                              if (!sourcesPanelVisible) {
-                                toggleSourcesPanel();
-                              }
+                              toggleSourcesPanel(); // 항상 토글
                             }}
                           >
-                            {Object.keys(fullDataDict).length}개 출처
+                            {sourcesPanelVisible ? 
+                              `출처 패널 닫기 (${Object.keys(fullDataDict).length}개)` : 
+                              `${Object.keys(fullDataDict).length}개 출처 보기`
+                            }
                           </button>
                         </div>
                       )}
@@ -1916,34 +1842,145 @@ export default function Home() {
         {/* 입력 영역 */}
         <div className="input-area">
           <div className="input-container">
-            <textarea
-              ref={textareaRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={handleKeyPress}
-              placeholder="메시지 보내기..."
-              disabled={isStreaming}
-              className="message-input"
-              rows={1}
-            />
-            <button
-              onClick={handleSubmit}
-              disabled={isStreaming || !query.trim()}
-              className="send-button"
-              title="메시지 전송"
-            >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-              >
-                <line x1="22" y1="2" x2="11" y2="13" />
-                <polygon points="22,2 15,22 11,13 2,9 22,2" />
-              </svg>
-            </button>
+            <div className="textarea-container">
+              <textarea
+                ref={textareaRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleKeyPress}
+                placeholder="메시지 보내기..."
+                disabled={isStreaming}
+                className="message-input"
+                rows={1}
+              />
+              {isStreaming ? (
+                <button
+                  onClick={stopGeneration}
+                  className="stop-button"
+                  title="생성 중단"
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <rect x="6" y="6" width="12" height="12" rx="2" />
+                  </svg>
+                </button>
+              ) : (
+                <button
+                  onClick={handleSubmit}
+                  disabled={!query.trim()}
+                  className="send-button"
+                  title="메시지 전송"
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <line x1="22" y1="2" x2="11" y2="13" />
+                    <polygon points="22,2 15,22 11,13 2,9 22,2" />
+                  </svg>
+                </button>
+              )}
+            </div>
+
+            {/* AI 자동 선택 토글 및 담당자 태그 - 입력창 아래 */}
+            <div className="input-controls">
+              <div className="ai-auto-toggle">
+                <button
+                  className={`ai-auto-btn ${aiAutoEnabled ? 'active' : ''} ${isStreaming ? 'disabled' : ''}`}
+                  onClick={() => {
+                    if (isStreaming) return; // 스트리밍 중에는 클릭 무시
+                    setAiAutoEnabled(!aiAutoEnabled);
+                    if (!aiAutoEnabled) {
+                      // AI 자동 선택 활성화 시 selectedTeam을 AI_AUTO로 설정
+                      const autoSelectTeam = availableTeams.find(team => team.id === "AI_AUTO");
+                      if (autoSelectTeam) {
+                        setSelectedTeam(autoSelectTeam);
+                      }
+                    }
+                    console.log("🤖 AI 자동 선택 토글:", !aiAutoEnabled);
+                  }}
+                  disabled={isStreaming}
+                  title={isStreaming ? "보고서 생성 중에는 변경할 수 없습니다" : (aiAutoEnabled ? "AI 자동 선택 비활성화" : "AI 자동 선택 활성화")}
+                >
+                  <span className="ai-auto-text">
+                    {aiAutoEnabled ? "AI 자동" : "수동"}
+                  </span>
+                </button>
+              </div>
+              
+              {/* 담당자 태그 */}
+              <div className="team-tag-container">
+                <button 
+                  className={`team-tag-button ${isStreaming ? 'disabled' : ''}`}
+                  onClick={() => {
+                    if (isStreaming) return; // 스트리밍 중에는 클릭 무시
+                    setTeamDropupOpen(!teamDropupOpen);
+                  }}
+                  disabled={isStreaming}
+                  title={isStreaming ? "보고서 생성 중에는 변경할 수 없습니다" : "담당자 선택"}
+                >
+                  {aiAutoEnabled ? (
+                    <span className="tag tag-auto">AI 자동 선택</span>
+                  ) : selectedTeam && selectedTeam.id !== "AI_AUTO" ? (
+                    <span className="tag tag-manual">{selectedTeam.name}</span>
+                  ) : (
+                    <span className="tag tag-none">담당자 미선택</span>
+                  )}
+                  <svg className="dropup-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="18,15 12,9 6,15" />
+                  </svg>
+                </button>
+
+                {/* 드롭업 메뉴 */}
+                {teamDropupOpen && !isStreaming && (
+                  <div className="team-dropup-menu">
+                    {availableTeams.map((team, index) => (
+                      <button
+                        key={team.id}
+                        className={`team-dropup-item ${
+                          team.id === 'AI_AUTO' ? (aiAutoEnabled ? 'active' : '') : 
+                          (selectedTeam?.id === team.id ? 'active' : '')
+                        }`}
+                        onClick={() => {
+                          if (team.id === 'AI_AUTO') {
+                            setAiAutoEnabled(true);
+                            setSelectedTeam(team);
+                          } else {
+                            setAiAutoEnabled(false);
+                            setSelectedTeam(team);
+                          }
+                          setTeamDropupOpen(false);
+                          console.log("🎭 드롭업에서 팀 선택:", team.name);
+                        }}
+                        style={{
+                          animationDelay: `${index * 50}ms`
+                        }}
+                      >
+                        <span className="team-dropup-name">{team.name}</span>
+                        {team.description && (
+                          <span className="team-dropup-desc">{team.description}</span>
+                        )}
+                        {((team.id === 'AI_AUTO' && aiAutoEnabled) || (team.id !== 'AI_AUTO' && selectedTeam?.id === team.id)) && (
+                          <svg className="team-dropup-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <polyline points="20,6 9,17 4,12" />
+                          </svg>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </div>
       </div>
