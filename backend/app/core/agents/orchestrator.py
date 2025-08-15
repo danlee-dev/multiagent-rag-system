@@ -126,6 +126,73 @@ class OrchestratorAgent:
             return []
         return list(self.personas.keys())
     
+    async def suggest_team_for_query(self, query: str) -> str:
+        """
+        LLM이 쿼리 내용을 분석하여 가장 적합한 페르소나를 추천합니다.
+        """
+        if not self.personas:
+            return "기본"
+        
+        # 사용 가능한 페르소나 목록과 설명 생성
+        persona_descriptions = []
+        for persona_name, persona_info in self.personas.items():
+            description = persona_info.get("description", "설명 없음")
+            persona_descriptions.append(f"- {persona_name}: {description}")
+        
+        personas_text = "\n".join(persona_descriptions)
+        
+        # LLM에게 페르소나 추천 요청
+        prompt = f"""다음 사용자 질문을 분석하여 가장 적합한 전문가를 선택해주세요.
+
+사용자 질문: "{query}"
+
+사용 가능한 전문가들:
+{personas_text}
+
+위 전문가들 중에서 사용자의 질문에 가장 적합한 전문가 한 명을 선택하여, 정확히 그 이름만 답변해주세요.
+예: 구매 담당자"""
+
+        try:
+            import os
+            from langchain_openai import ChatOpenAI
+            
+            # OpenAI 클라이언트 생성
+            openai_api_key = os.getenv("OPENAI_API_KEY")
+            if not openai_api_key:
+                print("🤖 OpenAI API 키가 없어서 기본 페르소나 사용")
+                return "기본"
+            
+            llm = ChatOpenAI(
+                model="gpt-4o-mini",
+                temperature=0.1,
+                max_tokens=50,
+                api_key=openai_api_key
+            )
+            
+            # LangChain HumanMessage, SystemMessage 방식으로 호출
+            from langchain_core.messages import HumanMessage, SystemMessage
+            
+            messages = [
+                SystemMessage(content="당신은 사용자의 질문을 분석하여 가장 적절한 전문가를 추천하는 AI입니다. 정확히 주어진 전문가 이름 중 하나만 답변하세요."),
+                HumanMessage(content=prompt)
+            ]
+            
+            response = await llm.ainvoke(messages)
+            
+            suggested_persona = response.content.strip()
+            
+            # 제안된 페르소나가 실제 목록에 있는지 확인
+            if suggested_persona in self.personas:
+                print(f"🤖 LLM 자동 라우팅: '{query[:30]}...' -> '{suggested_persona}'")
+                return suggested_persona
+            else:
+                print(f"🤖 LLM 자동 라우팅: 잘못된 응답 '{suggested_persona}' -> '기본' 사용")
+                return "기본"
+                
+        except Exception as e:
+            print(f"🤖 LLM 자동 라우팅 오류: {e} -> '기본' 사용")
+            return "기본"
+    
     # ✅ 추가: 일관된 상태 메시지 생성을 위한 헬퍼 함수
     def _create_status_event(self, stage: str, sub_stage: str, message: str, details: Optional[Dict] = None) -> Dict:
         """표준화된 상태 이벤트 객체를 생성합니다."""

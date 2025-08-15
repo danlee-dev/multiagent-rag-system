@@ -14,9 +14,12 @@ from .orchestrator import OrchestratorAgent
 # 추가: 페르소나 프롬프트 로드
 PERSONA_PROMPTS = {}
 try:
-    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+    import os
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "prompts", "persona_prompts.json")
+    with open(file_path, "r", encoding="utf-8") as f:
         PERSONA_PROMPTS = json.load(f)
-    print("SimpleAnswererAgent: 페르소나 프롬프트 로드 성공.")
+    print(f"SimpleAnswererAgent: 페르소나 프롬프트 로드 성공 ({len(PERSONA_PROMPTS)}개).")
 except Exception as e:
     print(f"SimpleAnswererAgent: 페르소나 프롬프트 로드 실패 - {e}")
 
@@ -109,15 +112,20 @@ class SimpleAnswererAgent:
         query = state["original_query"]  # 딕셔너리 접근 방식 사용
 
         # --- 수정: state에 페르소나 정보가 있는지 확인 ---
+        print(f"🔍 SimpleAnswerer - state 내용: {list(state.keys())}")
+        print(f"🎭 SimpleAnswerer - state에서 가져온 persona: {state.get('persona')} (기본값 전 raw)")
+        
         selected_persona = state.get("persona", "기본")
+        print(f"🎯 SimpleAnswerer - 최종 selected_persona: '{selected_persona}'")
+        print(f"📝 SimpleAnswerer - 사용 가능한 personas: {list(self.personas.keys())}")
         
         # 선택된 페르소나가 유효한지 확인 (없으면 기본으로 설정)
         if selected_persona not in self.personas:
-            print(f" - 알 수 없는 페르소나 '{selected_persona}', '기본'으로 설정")
+            print(f"❌ 알 수 없는 페르소나 '{selected_persona}', '기본'으로 설정")
             selected_persona = "기본"
             state["persona"] = selected_persona
         
-        print(f"  - 채팅에 '{selected_persona}' 페르소나 적용")
+        print(f"✅ 채팅에 '{selected_persona}' 페르소나 적용")
         # ---------------------------------------------
 
         # 간단한 벡터 검색 수행 (필요시)

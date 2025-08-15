@@ -55,6 +55,7 @@ class StreamingAgentStateModel(BaseModel):
     plan: dict | None = None
     design: dict | None = None
     metadata: dict = Field(default_factory=dict)
+    persona: str | None = None  # 팀/페르소나 정보 추가
 
     # 필수 필드들 추가 (TypedDict와 호환성을 위해)
     conversation_id: str = ""
@@ -108,6 +109,7 @@ async def stream_query(request: QueryRequest):
     print(f"\n{'='*20} New Query Received {'='*20}")
     print(f"Session ID: {request.session_id}")
     print(f"Query: {request.query}")
+    print(f"🎭 Team ID 수신: {request.team_id} (타입: {type(request.team_id)})")
 
     async def event_stream_generator() -> AsyncGenerator[str, None]:
         """쿼리 처리 및 결과 스트리밍을 위한 비동기 생성기"""
@@ -131,15 +133,18 @@ async def stream_query(request: QueryRequest):
             # 1. Triage Agent 실행
             yield server_sent_event("status", {"message": "요청 유형 분석 중...", "session_id": state.session_id})
             state_dict = state.model_dump()
-            
+
             # 🔑 핵심: 딕셔너리로 변환된 후에 persona 추가
             if request.team_id:
                 state_dict["persona"] = request.team_id
-                print(f">> state_dict에 persona '{request.team_id}' 추가됨")
+                print(f"✅ state_dict에 persona '{request.team_id}' 추가됨")
+                print(f"🔍 state_dict 내용 확인: {list(state_dict.keys())}")
+                print(f"🎭 저장된 persona 값: {state_dict.get('persona')}")
             else:
                 state_dict["persona"] = "기본"
-                print(">> state_dict에 기본 persona 추가됨")
-                
+                print("⚠️ team_id가 없어서 state_dict에 '기본' persona 추가됨")
+                print(f"🔍 전달받은 team_id: {request.team_id} (falsy 값인지 확인)")
+
             updated_state_dict = await triage_agent.classify_request(request.query, state_dict)
             state = StreamingAgentStateModel(**updated_state_dict)
             flow_type = state.flow_type or "task"
@@ -292,17 +297,22 @@ def get_teams():
     """사용 가능한 팀 목록을 반환합니다."""
     try:
         # orchestrator_agent에서 팀 정보 가져오기
-        teams = orchestrator_agent.get_available_personas()
+        persona_names = orchestrator_agent.get_available_personas()
+        # 문자열 배열을 객체 배열로 변환
+        teams = []
+        for persona_name in persona_names:
+            teams.append({
+                "id": persona_name,
+                "name": persona_name,
+                "description": f"{persona_name} 전용 응답"
+            })
         return {"teams": teams}
     except Exception as e:
         print(f"팀 목록 조회 오류: {e}")
         # 기본 팀 목록 반환
         return {
             "teams": [
-                {"id": "marketing", "name": "마케팅팀", "description": "마케팅 전략 및 캠페인 관련"},
-                {"id": "product", "name": "제품팀", "description": "제품 개발 및 기획 관련"},
-                {"id": "sales", "name": "영업팀", "description": "영업 전략 및 고객 관리 관련"},
-                {"id": "general", "name": "일반", "description": "범용 응답"}
+                {"id": "기본", "name": "기본", "description": "기본 응답"}
             ]
         }
 

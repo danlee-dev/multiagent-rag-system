@@ -30,9 +30,12 @@ _global_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="search_
 # 추가: 페르소나 프롬프트 로드
 PERSONA_PROMPTS = {}
 try:
-    with open("agents/prompts/persona_prompts.json", "r", encoding="utf-8") as f:
+    import os
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    file_path = os.path.join(current_dir, "prompts", "persona_prompts.json")
+    with open(file_path, "r", encoding="utf-8") as f:
         PERSONA_PROMPTS = json.load(f)
-    print("ProcessorAgent: 페르소나 프롬프트 로드 성공.")
+    print(f"ProcessorAgent: 페르소나 프롬프트 로드 성공 ({len(PERSONA_PROMPTS)}개).")
 except Exception as e:
     print(f"ProcessorAgent: 페르소나 프롬프트 로드 실패 - {e}")
 
